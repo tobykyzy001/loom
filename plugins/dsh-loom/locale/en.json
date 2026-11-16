@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Loom local node",
-    "description": "An experimental Host-only Loom node scaffold with explicit registration, persistent outbound state, and separate file or DSH Agent execution modes. Both modes require explicit opt-in; the bundle is not installed by this repository, no token is bundled, and no paid model or live Host execution has been verified."
+    "description": "An experimental Host-only node scaffold for explicitly configured isolated Loom coordinators. A temporary fixture verified actual DSH Agent sessions, scoped tools/file effects, source-linked child Agents and one zero-network text adapter. Default-off and unsupported; no token is bundled, no current Profile is changed, and this is not proof of live LLM quality, remote deployment, arbitrary Harnesses or unrestricted execution."
   }
 }

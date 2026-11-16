@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Loom 本地节点",
-    "description": "实验性的纯 Host Loom 节点脚手架：显式注册、持久化出队长，并将确定性文件执行与 DSH Agent 执行分开。两种执行均需明确启用；本仓库不会安装插件，不包含令牌，也未验证真实模型或真实 DSH Host 执行。"
+    "description": "实验性的纯 Host Loom 节点脚手架，仅用于明确配置的隔离协调器或测试环境。临时 Profile 中已验证真实 DSH Agent 会话、受限工具/文件效果、有关联来源的子 Agent 以及一种零网络文本适配器。默认禁用且 executor 为 unsupported；不包含令牌或长期权限，不修改当前桌面 Profile，不证明真实 LLM 质量、远程部署、任意 Harness 或无限制执行。"
   }
 }
