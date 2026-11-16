@@ -1,0 +1,6 @@
+{
+  "name": "@loom/dsh-fixture-runner",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node run.mjs" }
+}

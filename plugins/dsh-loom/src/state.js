@@ -59,11 +59,11 @@ export class NodeState extends EventEmitter {
     const pending = { assignment_id: key, digest, state: 'running', summary: 'The deterministic operation is in progress.', artifacts: [], effects: [] }
     await this.mutate((data) => { data.completions[key] = pending })
     if (this.data.assignments[key]?.cancel_requested) {
-      return this.complete(key, { state: 'cancelled', summary: 'Cancelled before the operation started.', artifacts: [], effects: [] })
+      return this.complete(key, { state: 'cancelled', cancel_acknowledged: true, summary: 'Cancelled before the operation started.', artifacts: [], effects: [] })
     }
     let result
     try { result = await operation() } catch (error) {
-      result = { state: 'failed', summary: error.message, artifact: null, effect: null }
+      result = { state: error.state || 'failed', summary: error.message, cancel_acknowledged: error.cancel_acknowledged === true, session_ref: error.session_ref, artifact: null, effect: null }
     }
     return this.complete(key, result)
   }

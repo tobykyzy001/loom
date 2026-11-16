@@ -1,0 +1,17 @@
+{
+  "name": "@loom/dsh-fixture-stub-provider",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Disposable zero-network DSH fixture: deterministic provider and exclusively allocated controlled tests.",
+  "type": "module",
+  "exports": { ".": "./index.js" },
+  "files": ["index.js", "cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "engines": { "dsh": "0.2.2-rc.3" },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.19.0"
+  }
+}

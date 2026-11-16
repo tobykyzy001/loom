@@ -7,9 +7,19 @@ import { CAPABILITIES, envelope, validateAssignment } from './validation.js'
 import { ControlledFileExecutor } from './executor.js'
 import { canonical, id, sha256, requireIsolatedRoot } from './util.js'
 
+export function wireCapabilities(values) {
+  return values.map((value) => {
+    if (value.kind === 'dsh_agent_turn') return { ticket_kind: 'dsh_agent_turn', permission: 'read' }
+    if (value === 'read_summary' || value === 'dsh_agent_turn') return { ticket_kind: value, permission: 'read' }
+    if (value === 'edit_file') return { ticket_kind: 'edit_file', permission: 'write' }
+    return value
+  })
+}
+
 export class LocalNodeRunner {
   constructor(options) {
-    this.options = options
+    this.options = { ...options }
+    this.registration = options.registration || {}
     this.stopped = false
     this.lastAssignmentId = null
     this.versions = new Map()
@@ -19,22 +29,27 @@ export class LocalNodeRunner {
   async start({ enrollmentCode } = {}) {
     this.identity = await NodeIdentity.open(this.options.stateDir)
     this.state = await NodeState.open(this.options.stateDir)
-    this.http = new LoomHttpClient({ baseUrl: this.options.baseUrl, fetch: this.options.fetch })
+    this.http = new LoomHttpClient({ baseUrl: this.options.baseUrl, fetch: this.options.fetch, timeoutMs: this.options.requestTimeoutMs })
     this.client = new LoomNodeClient({ http: this.http, identity: this.identity, state: this.state })
     this.executor = new ControlledFileExecutor({ artifactDir: this.options.artifactDir })
     if (enrollmentCode || !this.identity.token) {
       if (!enrollmentCode) throw new Error('Persistent node token is missing; an explicit enrollment code is required')
-      await this.client.enroll({ enrollmentCode, capabilities: this.capabilities, ...this.options.registration })
+      await this.client.enroll({ enrollmentCode, capabilities: wireCapabilities(this.capabilities), workerId: 'default', harnessKind: 'dsh-host', profileId: this.options.registration?.profile_id || 'isolated', ...this.options.registration })
     }
-    await this.client.heartbeat({ capabilities: this.capabilities })
+    await this.client.heartbeat({ capabilities: wireCapabilities(this.capabilities), ...this.registrationFacts() })
     return this.identity.public
   }
   /** New coordinator caller; no server-to-node transport or local HTTP listener is needed. */
-  static async create({ stateDir, artifactDir, baseUrl, enrollmentCode, registration } = {}) {
+  static async create({ stateDir, artifactDir, baseUrl, enrollmentCode, registration, requestTimeoutMs } = {}) {
     const runner = new LocalNodeRunner({ stateDir: requireIsolatedRoot(stateDir), artifactDir: resolve(artifactDir),
-      baseUrl, registration })
+      baseUrl, registration, requestTimeoutMs })
     await runner.start({ enrollmentCode })
     return runner
+  }
+  registrationFacts(capabilities = this.capabilities) {
+    const registration = this.registration || {}
+    return { workers: [{ worker_id: 'default', harness_kind: 'dsh-host', profile_id: registration.profile_id || 'isolated', capabilities: wireCapabilities(capabilities) }],
+      inventory: { project_roots: registration.project_roots || {}, harness_kind: 'dsh-host' } }
   }
   get nodeId() { return this.identity.nodeId }
   get installationId() { return this.identity.installationId }
@@ -95,9 +110,12 @@ export class LocalNodeRunner {
       artifacts = [...artifacts, result.artifact.metadata]
     }
     if (result.effect) effects = [...effects, result.effect]
+    if (result.state === 'unknown' && effects.length === 0 && result.session_ref) {
+      effects = [{ effect_id: `dsh-turn-${assignment.id}`, status: 'unknown', input_digest: result.digest || '', evidence: { description: 'Actual DSH turn outcome or its delivery needs reconciliation; no external file effect is claimed.', session_ref: result.session_ref }, artifacts: [] }]
+    }
     return this.client.report({ ticketId: assignment.ticket_id, assignmentId: assignment.id, leaseEpoch: assignment.lease_epoch,
-      state: result.state, summary: result.summary,
-      evidence: result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : []), artifacts, effects })
+      state: result.state, summary: result.summary, cancelAcknowledged: Boolean(result.cancel_acknowledged),
+      evidence: result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : []), artifacts: result.artifact ? [result.artifact.artifact_id] : artifacts.map((entry) => entry.artifact_id || entry.id), effects })
   }
   async rejectAssignment(assignment, reason) {
     try {

@@ -8,6 +8,7 @@ import { DshAdapter } from './lib/dsh-adapter.js'
 import { DshDispatcher } from './lib/dsh-dispatcher.js'
 
 export const name = 'loom-local-node'
+export const inject = ['agents', 'sessionPersistence']
 export const Config = z.object({
   enabled: z.boolean().default(false).description('Start outbound HTTP registration only; does not enable task execution.'),
   allow_workers: z.boolean().default(false).description('Explicit opt-in to perform any Loom-assigned work.'),
@@ -19,6 +20,7 @@ export const Config = z.object({
   allow_dsh_agent_creation: z.boolean().default(false).description('Allow creation of an owned Agent; otherwise use existing agent_session_id and never dispose it.'),
   agent_session_id: z.string().default('').description('Optional existing DSH Session id; resume failures are reported, not faked.'),
   profile_id: z.string().default('isolated').description('Loom worker-scope label, not a source of host authorization.'),
+  project_roots: z.any().default({}).description('Explicit host-declared projectId to absolute synthetic/project root mapping; no implicit authorization.'),
   provider: z.string().description('Optional provider route passed verbatim to ctx.agents.create().'),
   model: z.string().description('Optional model identifier; must actually exist on the selected Host.'),
   reasoning_effort: z.string().description('Optional adapter-supported reasoning effort for model that accepts it.'),
@@ -57,7 +59,9 @@ export async function apply(ctx, config) {
       // Optional dynamic service detection keeps an absent Agent surface an error, never simulated execution.
       if (!ctx.agents || typeof ctx.agents.get !== 'function') throw new Error('Unsupported DSH executor: verified ctx.agents service is not mounted')
       const adapter = new DshAdapter(ctx, { allowCreation: config.allow_dsh_agent_creation,
-        agentSessionId: config.agent_session_id, snapshotDir: config.artifact_dir })
+        agentSessionId: config.agent_session_id, snapshotDir: config.artifact_dir,
+        sessionMapPath: `${config.state_dir}/dsh-session-map.json` })
+      // Project roots are explicitly host declarations, never implicit execution Grants.
       loop = await runLocalDshPlugin(config, {
         createClient: undefined,
         localDispatcher: (conf, runner) => new DshDispatcher(runner, adapter, conf),

@@ -1,0 +1,8 @@
+{
+  "name": "@deepseek-ai/schemastery",
+  "version": "3.19.0",
+  "private": true,
+  "description": "Harness-test-only local link to the exact Schemastery shipped with the verified DSH installation. Contains no implementation.",
+  "main": "./index.cjs",
+  "type": "commonjs"
+}

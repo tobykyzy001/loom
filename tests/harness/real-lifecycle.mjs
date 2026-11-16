@@ -1,0 +1,187 @@
+import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { installation, isolatedEnv, fixtureRoot, installBundles, command, redact, sleep, PROFILE } from './environment.mjs'
+import { FixtureHost } from './runtime.mjs'
+import { startRustConcierge } from '../../scripts/fixtures/rust-server.mjs'
+import { LoomHttpClient } from '../../packages/node-client/src/http.js'
+
+export async function runRealLifecycle({ output = process.env.LOOM_TEST_OUTPUT ? resolve(process.env.LOOM_TEST_OUTPUT) : undefined, root: requestedRoot } = {}) {
+  const root = await fixtureRoot(requestedRoot)
+  const checks = []
+  const facts = { real_dsh: 'NOT RUN', install: 'NOT RUN', register: 'NOT RUN', task: 'NOT RUN', cancellation: 'NOT RUN', resume: 'NOT RUN', live_llm: 'NOT RUN (zero network Stub)' }
+  const log = async (name, evidence) => { checks.push({ name, status: 'PASS', evidence }); console.log(`PASS real DSH: ${name}`) }
+  const failure = (error) => {
+    const text = redact(error.stack || error.message || error, secrets)
+    console.error(text)
+    checks.push({ name: 'failure', status: 'FAIL', evidence: text.slice(0, 4000) })
+  }
+  let host, server, admin
+  const secrets = []
+  let env
+  let settled = false
+  let sessionId = ''
+  try {
+    await writeFile(join(root, 'project', 'input.txt'), 'ORBITAL-731\nSynthetic appointed test project; no real user files.\n', { mode: 0o600 })
+    await writeFile(join(root, 'private', 'fixture-control.jsonl'), '', { mode: 0o600 })
+    await mkdir(join(root, 'rust'), { mode: 0o700 })
+    const { executable, cli } = installation()
+    server = await startRustConcierge({ root: join(root, 'rust'), env: { ...isolatedEnv(root), PATH: process.env.PATH } })
+    secrets.push(server.clientToken)
+    admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
+    const health = await admin.get('/api/v1/health')
+    assert.equal(health.status, 'ok')
+    const projectRoot = join(root, 'project')
+    const project = await admin.post('/api/v1/projects', { name: 'Loom deterministic DSH synthetic project', root: projectRoot, mode: 'read_write' })
+    const projectId = project.project.id
+    const enrollment = await admin.post('/api/v1/enrollment-codes', {})
+    secrets.push(enrollment.code)
+    env = isolatedEnv(root, { LOOM_FIXTURE_COORDINATOR_URL: server.baseUrl, LOOM_FIXTURE_ENROLLMENT_CODE: enrollment.code,
+      LOOM_FIXTURE_PROJECT_MAPPING: JSON.stringify({ [projectId]: projectRoot }) })
+    const installed = await installBundles({ env, root, cli, executable, bundles: [join(root, 'fixture-packages/stub-provider'), join(root, 'fixture-packages/dsh-loom')] })
+    assert.ok(installed.dependencies.includes('@loom/dsh-loom'))
+    facts.install = 'PASS'
+    await log('real dsh plugin CLI installs only inside owned temporary Profile', { argv: ['dsh', 'plugin', '--profile', PROFILE, 'add', 'file:<owned-shallow-copy>', '--ignore-scripts', '--store-dir', '<fixture>/pnpm-store'], dependencies: installed.dependencies, dsh_home_mode: installed.root_mode })
+    env = { ...env, LOOM_FIXTURE_AGENT_SESSION_ID: '' }
+    host = new FixtureHost(root, env, secrets)
+    await host.writePatch()
+    await command(executable, [cli, '--profile', PROFILE, '--patch', join(root, 'patch', 'fixture.yml'), '--dump-config'], { cwd: join(root, 'project'), env }).then((result) => writeFile(join(root, 'private', 'composed-runtime-config.txt'), result.stdout, { mode: 0o600 }))
+    const composed = await readFile(join(root, 'private', 'composed-runtime-config.txt'), 'utf8')
+    assert.match(composed, /# == @loom\/dsh-loom/)
+    assert.match(composed, /# == @loom\/dsh-fixture-stub-provider/)
+    assert.doesNotMatch(composed, new RegExp(enrollment.code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    await host.start()
+    await waitForRegistration(admin, projectId, projectRoot)
+    const nodes = await admin.get('/api/v1/nodes')
+    const initialNodes = nodes.nodes
+    console.log('REAL_REGISTRATION_SNAPSHOT', JSON.stringify(initialNodes.map((entry) => ({ id: entry.id, status: entry.status, workers: entry.workers?.map((worker) => ({ worker_id: worker.worker_id, profile_id: worker.profile_id, harness_kind: worker.harness_kind })), project_roots: entry.inventory?.project_roots }))))
+    const node = initialNodes.find((entry) => entry.status === 'online' && entry.inventory?.project_roots?.[projectId] === projectRoot)
+    assert.ok(initialNodes.length > 0 && initialNodes.some((entry) => entry.status === 'online' && entry.workers?.some((worker) => worker.worker_id === 'default')), 'Actual dsh-host Node must be registered with default Worker')
+    assert.ok(node?.inventory?.project_roots?.[projectId] === projectRoot, 'Registration inventory must contain the approved synthetic root mapping')
+    facts.register = 'PASS'; facts.real_dsh = 'PASS'
+    await log('real Host activate + outbound Node registration / root inventory persists', { node_id: node.id, worker_id: node.workers[0].worker_id, harness_kind: node.inventory.harness_kind, session_ref: 'derived by Host provider logging; no synthetic Session record', credential_persistence_restart_without_new_enrollment: true })
+    const binding = await admin.post('/api/v1/project-bindings', { project_id: projectId, node_id: node.id, worker_id: 'default', root_scope: projectRoot })
+    const grantResponse = await admin.post('/api/v1/grants', { project_id: projectId, node_id: node.id, worker_id: 'default', operations: ['read', 'write'] })
+    const grantId = grantResponse.grant.id
+    const createTicket = (objective, kind = 'read_summary') => admin.post('/api/v1/tickets', { project_id: projectId, node_id: node.id, grant_id: grantId, worker_id: 'default', objective, kind, relative_path: 'not-a-file-operation' })
+    const followup = await createTicket(`LOOM_FIXTURE_READ ${randomUUID()} Please call the controlled inspect tool for project ORBITAL-731.`)
+    await host.waitFor(() => readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8').then((value) => JSON.parse(value).assignments.length > 0, () => false), 45_000, 'real own DSH Agent Session creation')
+    const mapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+    sessionId = mapping.assignments.find((entry) => entry.assignment_id === followup.assignments[0].id)?.session_id
+    assert.ok(sessionId, 'Actual SessionRef must map the real Assignment ID')
+    const realSessionRef = controlRead(root).find((entry) => entry.session_id && entry.session_id === sessionId)
+    if (!realSessionRef) await host.waitFor(() => controlRead(root).some((entry) => entry.session_id === sessionId), 45_000, 'actual provider-bound Session header')
+    const completed = await waitTicket(admin, followup.id, ['succeeded', 'failed', 'cancelled', 'reconciling'], 60_000)
+    assert.equal(completed.status, 'succeeded', JSON.stringify({ reports: completed.reports, status: completed.status }))
+    assert.equal(completed.reports.length, 1)
+    assert.equal(completed.artifacts.length, 1)
+    assert.equal(host.sessionEvents(sessionId, ['tool/call']).length, 1)
+    assert.equal(host.sessionEvents(sessionId, ['tool/result']).length, 1)
+    assert.ok(host.sessionEvents(sessionId, ['turn/end']).at(-1).event.data.reason.kind === 'completed')
+    const artifact = await admin.get(`/api/v1/tickets/${followup.id}/artifacts/${completed.artifacts[0].id}`)
+    const assistant = JSON.parse(artifact.content)
+    assert.match(assistant.text, /actual controlled tool result|ORBITAL-731/)
+    const stateStat = await stat(join(root, 'node-state', 'identity.json'))
+    assert.equal(stateStat.mode & 0o777, 0o600)
+    assert.equal((await stat(join(root, 'node-state', 'dsh-session-map.json'))).mode & 0o777, 0o600)
+    facts.task = 'PASS'
+    await log('actual Loom Ticket to real DSH Agent followup + controlled tool + immutable artifact', { ticket_id: followup.id, assignment_id: completed.assignments[0].id, session_id: sessionId, host_tool_calls: 1, final_reason: 'completed', report_state: 'succeeded', artifact_id: artifact.artifact.id, source: 'DSH committed assistant/message', effect_kind: 'none (read-only inspect tool)', project_binding_id: binding.id })
+    const cancellation = await createTicket('LOOM_FIXTURE_CANCEL hold until DSH demonstrably aborts this turn')
+    await host.waitFor(() => controlRead(root).some((entry) => entry.type === 'hold'), 30_000, 'Stub hold')
+    assert.equal((await admin.post(`/api/v1/tickets/${cancellation.id}/cancel`, {})).status, 'cancel_requested')
+    const cancelMapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+    const cancelSessionId = cancelMapping.assignments.find((entry) => entry.assignment_id === cancellation.assignments[0].id)?.session_id
+    assert.ok(cancelSessionId && cancelSessionId !== sessionId, 'Cancellation must bind its own actual DSH Session')
+    const cancelled = await waitTicket(admin, cancellation.id, ['cancelled', 'failed', 'succeeded', 'reconciling'], 45_000)
+    assert.equal(cancelled.status, 'cancelled', JSON.stringify({ reports: cancelled.reports, status: cancelled.status }))
+    assert.equal(cancelled.reports.at(-1).state, 'cancelled')
+    assert.ok([1, true].includes(cancelled.reports.at(-1).cancel_acknowledged))
+    assert.equal(cancelled.artifacts.length, 0)
+    await host.waitFor(() => host.sessionEvents(cancelSessionId, ['turn/end']).some((entry) => entry.event.data?.reason?.kind === 'aborted'), 15_000, 'actual user-cause aborted DSH Session event')
+    assert.equal(host.sessionEvents(cancelSessionId, ['turn/end']).at(-1).event.data.reason.kind, 'aborted')
+    // The terminal DSH event above is the observed cancellation source; no extra Session events are synthesized.
+    facts.cancellation = 'PASS'
+    await log('actual Loom cancel -> Host agent.cancel + durable aborted turn + cancel_acknowledged', { ticket_id: cancellation.id, session_id: cancelSessionId, terminal_kind: 'aborted', cancel_acknowledged: true, artifacts: 0 })
+    await host.stop(); host = null
+    const retained = await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8')
+    assert.match(retained, new RegExp(sessionId))
+    assert.doesNotMatch(retained, /token|private_key/)
+    assert.match(fsEvents(root, sessionId).join('\n'), /assistant\/message/)
+    env.LOOM_FIXTURE_ENROLLMENT_CODE = ''
+    env.LOOM_FIXTURE_AGENT_SESSION_ID = sessionId
+    host = await new FixtureHost(root, env, secrets).start()
+    await host.raw('session/resume', { sessionId })
+    const resumed = await createTicket('LOOM_FIXTURE_RESUME verify actual persisted Session history')
+    const resumedDone = await waitTicket(admin, resumed.id, ['succeeded', 'failed', 'reconciling', 'cancelled'], 60_000)
+    assert.equal(resumedDone.status, 'succeeded')
+    const resumedArtifact = await admin.get(`/api/v1/tickets/${resumed.id}/artifacts/${resumedDone.artifacts[0].id}`)
+    assert.match(JSON.parse(resumedArtifact.content).text, /reused loom_fixture_inspect.*ORBITAL-731/)
+    assert.equal(host.sessionEvents(sessionId, ['turn/end']).at(-1).event.data.reason.kind, 'completed')
+    facts.resume = 'PASS'
+    await log('owned Session persisted across Host restart and resumed for new actual followup', { session_id: sessionId, restart_completed: true, actual_history_provider_seen: true, no_synthetic_session_event: true })
+    settled = true
+    return { schema: 'loom.dsh.real_harness.v1', overall: 'PASS', facts, checks, public_apis: publicApis(), root, session_id: sessionId }
+  } catch (error) {
+    failure(error)
+    return { schema: 'loom.dsh.real_harness.v1', overall: 'FAIL', facts, checks, root, diagnostics: host?.diagnostics().slice(-4000) || '', public_apis: publicApis() }
+  } finally {
+    if (host) await host.stop().catch(() => {})
+    if (server) await server.stop().catch(() => {})
+    if (output) await writeFile(output, JSON.stringify({ schema: 'loom.dsh.real_harness.v1', overall: settled ? 'PASS' : 'FAIL', facts, checks, root, public_apis: publicApis(), diagnostics: host?.diagnostics().slice(-4000) || '' }, null, 2), { mode: 0o600 })
+  }
+}
+function controlRead(root) {
+  try { return readFileSync(join(root, 'private', 'fixture-control.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) } catch { return [] }
+}
+function fsEvents(root, sessionId) {
+  // Read only the explicit synthetic DSH root, and only names event types, never secret fields or unrelated logs.
+  const files = []
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) visit(path)
+      else if (entry.name === 'session.v4.jsonl') files.push(path)
+    }
+  }
+  visit(join(root, 'dsh-test-state', 'sessions'))
+  return files.filter((path) => readFileSync(path, 'utf8').includes(sessionId)).flatMap((path) => readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line).type || JSON.parse(line).event?.type || ''))
+}
+async function waitForRegistration(admin, projectId, root) {
+  const deadline = Date.now() + 45_000
+  while (Date.now() < deadline) {
+    const nodes = await admin.get('/api/v1/nodes')
+    if (nodes.nodes.some((entry) => entry.status === 'online' && entry.inventory?.project_roots?.[projectId] === root)) return nodes
+    await sleep(200)
+  }
+  const final = await admin.get('/api/v1/nodes')
+  throw new Error(`The real outbound Node did not deliver bounded inventory: ${JSON.stringify(final)}`)
+}
+async function waitTicket(admin, ticket, statuses, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) { const detail = await admin.get(`/api/v1/tickets/${ticket}`); if (statuses.includes(detail.status)) return detail; await sleep(150) }
+  throw new Error(`Ticket ${ticket} did not reach ${statuses}`)
+}
+function publicApis() {
+  return [
+    'dsh --profile loom-local-fixture --from-default-profile sdk-minimal --dump-config (one-time owned initialization)',
+    'dsh plugin --profile loom-local-fixture add file:<fixture> --ignore-scripts --store-dir <fixture>',
+    'dsh --profile loom-local-fixture --patch <owned-patch>',
+    'ctx.llm.registerAdapter([provider], LlmAdapter)',
+    'ctx.tools.register(ToolDefinition)',
+    'export const inject=["agents","sessionPersistence"]',
+    'ctx.agents.create({sessionId,meta:{cwd},agentOptions:{provider,model}})',
+    'ctx.agents.resume({resumeSessionId})',
+    'ctx.agents.get(sessionId)',
+    'agent.followup({id,role:"user",content,source:{kind:"loom"}}) (identified, frozen public UserMessage)',
+    'agent.cancel({kind:"user"})',
+    'ctx.on("session/event",(session,event)) ordinary assistant/message + turn/end',
+    'SDK initialize/session/prompt/session/wait/session/resume/shutdown',
+  ]
+}
+if (process.argv[1]?.endsWith('real-lifecycle.mjs')) {
+  const result = await runRealLifecycle()
+  console.log(JSON.stringify({ ...result, checks: undefined }, null, 2))
+  if (result.overall !== 'PASS') process.exitCode = 1
+}

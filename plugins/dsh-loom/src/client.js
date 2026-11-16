@@ -19,9 +19,9 @@ export class LoomNodeClient {
     await this.identity.setToken(response)
     return response
   }
-  async heartbeat({ status = 'online', capabilities, workers = [], signal } = {}) {
+  async heartbeat({ status = 'online', capabilities, workers = [], inventory, signal } = {}) {
     return this.http.post('/api/v1/nodes/heartbeat', { ...envelope(this, id()), status: validateStatus(status),
-      capabilities, workers, timestamp: new Date().toISOString() }, { token: this.identity.token, signal })
+      capabilities, workers, ...(inventory ? { inventory } : {}), timestamp: new Date().toISOString() }, { token: this.identity.token, signal })
   }
   async poll({ lastAssignmentId = null, waitSeconds = 1, signal } = {}) {
     nonNegative(waitSeconds, 'waitSeconds', 60)
@@ -39,13 +39,19 @@ export class LoomNodeClient {
       ...(sessionRef ? { session_ref: sessionRef } : {}), kind, content: summary, activity: summary }
     return this.state.enqueue('event', body, { digest: this.logicalDigest(body) })
   }
-  async report({ ticketId, assignmentId, leaseEpoch, state: requestedState, summary, evidence = [], artifacts = [], effects = [], signal }) {
+  async report({ ticketId, assignmentId, leaseEpoch, state: requestedState, summary,
+    evidence = [], artifacts = [], artifactIds = [], effects = [], cancelAcknowledged = false, signal }) {
     if (!['running', 'succeeded', 'failed', 'cancelled', 'unknown'].includes(requestedState)) throw new TypeError('Invalid report state')
+    const ids = [...artifactIds, ...artifacts.map((entry) => typeof entry === 'string' ? entry : entry?.artifact_id).filter(Boolean)]
+    const artifact_ids = [...new Set(ids)]
+    if (!artifact_ids.every((entry) => typeof entry === 'string' && entry.length > 0)) {
+      throw new TypeError('Every artifact reference needs a stable non-empty UUID string')
+    }
     const body = { ...envelope(this, id()), ticket_id: ticketId, assignment_id: assignmentId, lease_epoch: leaseEpoch,
-      requested_state: requestedState, summary, evidence, artifacts, effects }
+      requested_state: requestedState, summary, evidence, artifact_ids, effects,
+      ...(cancelAcknowledged ? { cancel_acknowledged: true } : {}) }
     if (leaseEpoch === undefined) delete body.lease_epoch
-    const digest = this.logicalDigest(body)
-    return this.state.enqueue('report', body, { digest })
+    return this.state.enqueue('report', body, { digest: this.logicalDigest(body) })
   }
   async artifact({ ticketId, artifactId, assignmentId, leaseEpoch, metadata, bytes, signal }) {
     const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
