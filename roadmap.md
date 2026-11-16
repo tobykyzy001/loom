@@ -26,14 +26,16 @@
 
 ### 已确定的技术决策
 
-- 首版控制面、Host Agent、Registry 与持久化应用层使用 **Rust**；Web UI 使用 **Vue 3 + TypeScript**。
+- 首版控制面、裸机 Host Agent、Registry 与持久化应用层使用 **Rust**；Web UI 使用 **Vue 3 + TypeScript**。
 - 桌面壳优先 **Tauri**；移动端先做响应式 Web / PWA，确有推送、商店与系统能力需求时再包装 Tauri Mobile 或薄原生壳。
-- 既有 Harness / 模型服务保留原技术栈：DSH 薄插件用 TypeScript，Python 探测与模型 Connector 放在 Host 边界，不复刻核心控制面。
+- **DSH Host 的首选形态是 TypeScript Loom 插件**：作为完整 Local Node 主动注册中心，适配 Session、事件、心跳、Artifact 和本机权限；不再为同一 DSH 机器强制部署 Rust Agent。
+- 其他既有 Harness / 模型服务保留原技术栈，按 API / MCP / CLI / Connector 接入；本地模型服务复用所属 DSH Node，不要求再套一层 Agent。
 - 协议使用版本化、语言中立的 Schema 与 HTTP / MCP / RPC，不把 Rust 或 TypeScript 内存对象当公共接口。
 - macOS / Linux / Windows 是桌面 Host 目标，逐个平台验证；iOS / Android 首版用于查看、沟通和审批，不承诺后台 Worker / 长期在线 Host。
-- 每个 Harness 需要 Adapter 实例，但不强制需要宿主插件；按 **Native API → MCP → CLI → 薄宿主插件** 的顺序选择能满足能力约束的接入方式。
-- 提供**选择性组网安装**：在管理机审核包，选择部分 Host 分发，各 Host 独立验证、安装、启用和报告。
-- 分发代码和配置不等于分发 Secret、模型、权限或长期无人值守批准。首版仅承诺可信单用户 LAN 的官方包，不做任意第三方包和跨不受信网络安装。
+- 每种其他 Harness 需要 Adapter 实例但不强制宿主插件；按 **Native API → MCP → CLI → 专用 Runtime Plugin** 的顺序选择能满足能力约束的接入方式。
+- 提供**选择性组网安装和主动注册**：管理机审核包和 Inventory，在选中的机器安装 Plugin / Bare Agent，节点主动注册并完成一次性配对，中心保留 Grant / Lease / 任务权威。
+- **Ansible / SSH 免密引导是允许的**：本质复用已有运维授权，传输、安装、提权和后续任务 Grant 分开；不做模型临时拼脚本的远程执行，也不因免密而默认接管全 LAN。
+- 分发代码和配置不等于分发 Secret、模型、权限或长期无人值守批准。首版仅承诺可信单用户 LAN 的官方包与固定受审计 Installer，不做任意第三方包和跨不受信网络的聊天触发安装。
 
 接入、多端边界与部署见 [architecture.md](architecture.md) 的第 7～8 章。Rust 运行时、SQLite 驱动、特定平台服务管理和 Tauri Mobile 的实际适用性，均须通过原型与目标设备验证。
 
@@ -59,7 +61,7 @@
 
 **要证明什么**
 
-一个 Concierge、一个 Host Agent 和一个 DSH Worker 能完成真实任务；过程可恢复、结果可检查、默认聊天不被内部协作淹没。
+一个 Concierge、一个作为 Local Node 的 DSH Loom Plugin 和一个 DSH Worker 能完成真实任务；过程可恢复、结果可检查、默认聊天不被内部协作淹没。它可独立部署在 DSH 所在主机，无需另装 Rust Agent。
 
 **本阶段包含**
 
@@ -73,8 +75,9 @@
 - Agent / Worker 过程会话的默认折叠、按任务展开、发送者过滤与全局/单任务显示偏好；
 - 消息、SessionRef 与 Report 的关联；首版可只实现一个 DSH 内部子 Agent 场景；
 - 用户明确“记住这个”时的单条 Memory 保存、查看和删除；首版不自动归纳全部历史会话；
-- 首个 DSH Adapter，以及覆盖目标 DSH 版本的 MCP / 外部进程 / 薄插件 Spike；按实测能力确定保留哪些接入层；
-- Rust Core / Host / Types workspace，以及与 DSH TypeScript 薄插件之间的版本化协议验证；
+- 完整 DSH Loom Plugin 最小版本：主动出站注册、一次性配对、心跳、Assignment、SessionRef、事件、ArtifactRef 和本机 Grant；
+- MCP 仅用于需要的工具通道，不代替 Node 协议；不强制装 Rust Agent；
+- Rust Concierge / Types workspace 与 TypeScript DSH Plugin 的版本化协议验证；
 - Vue 3 响应式界面，同一 Ticket 在桌面与手机浏览器可查看过程、收起会话和完成一次非敏感审批。
 
 **本阶段暂缓**
@@ -90,14 +93,15 @@
 
 | 场景 | 通过条件 |
 | --- | --- |
-| Rust ↔ DSH 协议 | Rust Host 提交与恢复任务，TypeScript 薄插件只承担已确认必要的宿主事件与交互；任一方升级或崩溃不产生伪造状态 |
+| Rust ↔ DSH 协议 | Rust Concierge 主动向配对节点签发任务与 Lease，TypeScript Plugin 承担完整本地 Node 语义；任一方升级、断线或崩溃不产生伪造状态 |
 | 移动 Web 基线 | iOS 与 Android 浏览器可进入同一 Ticket、查看产物和展开允许的过程；锁屏、断网后刷新仍对应原 Ticket，不承诺后台仍在执行 |
 | 编程任务 | 在示例仓库完成一个小改动，展示变更与验证结果，不访问未授权目录 |
 | 资料处理任务 | 读取授权资料并生成独立 Artifact，不覆盖原文件，结果可追溯 |
 | 中心重启 | 运行中和已完成任务均能恢复；外部失败不被伪造成成功 |
 | 取消任务 | 用户停止意图被持久保存，不被自动恢复覆盖 |
 | 多 Agent 小任务 | 主 Agent 委派一个子 Agent；默认只显示关键阶段，展开后能看到委派、回复和结论的关联 |
-| DSH 接入能力 | 真实验证任务提交、取消、运行状态、失败和重新打开宿主 Session；未从 MCP 获得的能力才由薄插件补齐，插件不能破坏宿主日志兼容性 |
+| 主动注册 | 插件使用一次性配对码 / 预注册证书主动向中心连接；中心完成身份挑战，未批准节点不能执行 Assignment；撤销后不能继续领取任务 |
+| DSH 接入能力 | 真实验证任务提交、取消、运行状态、失败和重新打开宿主 Session；完整插件复用宿主日志和凭据机制，不私造不可恢复事件或手写 Profile |
 | 显示偏好 | 全局折叠、单任务展开及再次折叠均生效，不改变 Task、Report 和 Artifact 数据 |
 | 敏感过程 | 展开记录不暴露测试 Secret 或未授权文件内容；权限边界不只依赖 UI |
 | 审计保留 | 隐藏过程后，任务授权、关键决定、结果和待处理副作用仍可查询 |
@@ -168,8 +172,9 @@
 - Collaboration 视图增加 Host / Worker / Assignment 关联与跨机过程追踪；
 - Package Manifest、内容寻址包 Store、OS / arch / Harness 版本兼容检查；
 - 选择性 Rollout：管理机批准包版本，选择部分 Host，本机独立安装 Grant、健康检查与回滚；
-- Host Agent 与官方 Adapter 的安装和启停；Harness 薄插件单独分发，不混为通用包；
-- 以手动安装、已加入 Loom 的 Host Agent 为前提，支持其后续远程升级；无 Agent 新机器的 SSH / MDM 引导另行授权，不属于普通 Rollout；
+- Bare Agent、DSH Loom Plugin 与其他官方 Adapter 的安装和启停，分别声明宿主兼容版本；
+- 新机器可选手动安装，或通过**独立授权的 Ansible / SSH Bootstrap**引导；免密仅复用运维传输授权，节点安装后仍需主动注册和配对；
+- 已有节点可通过自身通道后续升级；Bootstrap 不自动获得后续项目 / 模型 / 外发权限；
 - 初始 macOS Host 之外，至少验证一个 Linux 或 Windows Host；其他桌面系统保留在明确支持矩阵中，不因 Rust 可跨编译就默认通过；
 - Host 包按 OS / arch 独立构建、签名和回滚，平台服务、凭据库与目录权限走本机适配层。
 
@@ -200,8 +205,12 @@
 | 本机安装权限 | 管理端不能单方面获得新目录、模型、外发或宿主管理员权限；逐目标批准并保留 Secret 在本机 Broker |
 | 安装失败回滚 | 激活后健康检查失败时回到上一个可用版本，其他 Host 不被无意义重装；断线时安装结果进入 Unknown 并对账 |
 | 配置与 Skill | 可单独选择性分发不涉敏配置 / Skill 包；保存和安装仍不授予执行或自动运行权 |
-| 无 Agent 新机器 | 普通 Rollout 明示不能引导，不暗中使用 SSH；如需 MDM / OS 远程管理，使用独立授权通道 |
+| 免密 Bootstrap | 对选定 Linux 测试机通过预置 SSH / Ansible Installer 安装 Bare Agent；对选定 DSH 测试机安装插件。只使用已批准 Inventory / 凭据引用，执行固定安装任务，记录逐机结果 |
+| 注册与安装分离 | 安装成功的节点仍需出站长连接注册和一次性配对；伪造或撤销身份的节点不能领取 Assignment；未配对不能宣称是可用 Worker |
+| 最小安装权限 | 优先用户级安装；sudo、系统服务、防火墙修改、重启分别明确授权；SSH Key 不进入模型上下文，安装结束不提供默认长期 Shell 通道 |
+| 无凭据机器 | 普通 Rollout 不暗中扫描或猜测登录；可提示用户手动安装或单独配置明确的 Bootstrap 授权 |
 | Rust 跨平台 | 分别安装并运行覆盖平台矩阵的签名 Host 包，验证路径、进程、服务、凭据库和重启恢复；不把“编译成功”作为支持证据 |
+| DSH 节点无重复 Agent | 已有 DSH 的主机只安装并配对 DSH Loom Plugin，即能注册、执行和展示本地 Harness / 模型资源，不强制再安装 Rust Host Agent |
 
 **进入 M3 的证据**
 
@@ -256,7 +265,7 @@
 **本阶段包含**
 
 - 同机公司 / 个人 Worker 身份、目录、记忆与默认 Placement 隔离；
-- DSH 之外的第二类 Harness Adapter，优先复用 Native API / MCP；如需薄插件则独立声明宿主兼容版本；
+- DSH 之外的第二类 Harness Adapter，优先复用 Native API / MCP；如需专用 Runtime Plugin 则独立声明宿主兼容版本；
 - ConversationSegment / MessageRef 的适配、分页、搜索和按权限导出；
 - 对 Worker 内部会话、Worker 间消息和用户可见摘要分别设置展示策略；
 - Harness 仅上报摘要、无法提供完整过程时，明确展示记录完整度；

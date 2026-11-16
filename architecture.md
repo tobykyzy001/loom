@@ -86,14 +86,14 @@ Trigger → Eval / Decision → Mandate + Ticket → Assignment → Report
        │                          │                           │
        └──────────────────────────┼───────────────────────────┘
                                   │
-                     Authenticated Host Control Plane
+                     Authenticated Node Control Plane
                                   │
            ┌──────────────────────┼──────────────────────┐
            │                      │                      │
-       Trusted Host A          Trusted Host B       Trusted Host C
-       Host Agent              Host Agent           Host Agent
-       Harness / LLM Worker    Model Worker         Project Worker
-       Local Context           Local Models         Project Checkout
+       DSH Desktop A           DSH GPU Host B         Bare Linux C
+       DSH Loom Plugin         DSH Loom Plugin       Rust Host Agent
+       Local Project           Local Model Worker    API / CLI Worker
+       Local Context           Local Models          Local Checkout
            │                      │                      │
            └──────────────────────┼──────────────────────┘
                                   │
@@ -106,7 +106,7 @@ Host 数量、设备类型、模型能力和任务组合均由用户环境决定
 
 | 平台 | Client | Host Agent 首版定位 |
 | --- | --- | --- |
-| macOS / Linux / Windows | Web / Desktop Shell | 支持受控 Host、项目访问和 Harness 执行，逐步验证后台服务与开机恢复 |
+| macOS / Linux / Windows | Web / Desktop Shell | 已装 DSH 时以其 Loom 插件作为节点；裸机使用轻量 Rust Host Agent，逐步验证后台服务与开机恢复 |
 | iOS / Android | Web / PWA，必要时薄原生壳 | 用户入口、审批、任务与 Artifact 查看；不是默认可靠的长驻 Host |
 | NAS / 服务器 Linux | Web | 在资源和权限满足时可作为 Host |
 
@@ -126,9 +126,9 @@ Host 数量、设备类型、模型能力和任务组合均由用户环境决定
 
 推荐初期采用中心单写者与事务化存储，不为了“去中心化”引入多主写入。
 
-### 3.2 Host Agent
+### 3.2 Local Node / Host Agent 职责
 
-每台计算机运行一个轻量 Host Agent，负责：
+每个被纳管的执行环境具有 Local Node 身份，负责：
 
 - 设备、硬件、服务和 Worker 注册；
 - GPU、显存、队列、负载、模型的本地探测；
@@ -139,7 +139,16 @@ Host 数量、设备类型、模型能力和任务组合均由用户环境决定
 - 本机 Effect Ledger 和副作用对账；
 - Artifact 内容存储与受控传输。
 
-中心不直接操纵其他机器的 Harness 内部服务，也不假定每台机器模型目录相同。
+中心不绕过 Local Node 的边界直接操纵其他机器的 Harness 内部服务，也不假定每台机器模型目录相同。Local Node 的主要包装有两种：
+
+| 部署形态 | 实现与职责 |
+| --- | --- |
+| **DSH Loom Plugin** | 在 DSH 进程内实现 Local Node：节点注册、Profile / Workspace 标签、SessionRef、事件流、本地 Grant、心跳、ArtifactRef 和效果对账；复用已有 DSH Agent / Session，不要求独立 Rust Host Agent。 |
+| **Bare Rust Host Agent** | 在没有 DSH 的桌面或 Linux 服务器提供相同 Node 协议，通过 Native API / MCP / CLI 管理 Worker 和本机资源。 |
+
+两种 Node 都主动向中心注册；只有中心签发 Assignment / Lease 后，节点才执行相应副作用。同一节点上直接启动的模型 HTTP 服务属于该节点声明的 Runtime，并不要求再部署一个 Rust Agent；其本地 Secret、文件与监听地址由所属节点控制。DSH Plugin 是一等节点而非仅为补充 MCP 能力的薄插件。
+
+节点可以访问自身 DSH 内部能力，不代表中心自动信任其自报权限。Owner、Device Link、Node Identity、Profile Identity 和 Workspace Scope 分开映射，避免把整台机器或任意 DSH Profile 混为同一主体。
 
 ### 3.3 Router、Project Scheduler、Resource Scheduler
 
@@ -390,7 +399,7 @@ Register → Approve → Place / Load → Invoke → Retire
 
 **Rust 的核心价值**是 Host Agent 的单二进制部署、资源占用、进程与文件边界，以及被多个桌面平台共享的策略执行逻辑；不是消除所有平台差异。SQLite 事务驱动、Tokio async runtime、HTTP/WebSocket/SSE API、操作系统 Keychain / Credential Manager / Secret Service 适配等具体 crate 通过 M0 Prototype 选型。
 
-**跨语言不是异常路径**：DSH 薄插件保留 TypeScript / JavaScript；已有 Harness、LLM、ComfyUI 或 Python 助手保留原语言，通过版本化 HTTP、MCP 或受限本地 RPC 通信。核心禁止把 Rust struct、内存指针或私有 FFI ABI 当成公共 Harness 协议。
+**跨语言不是异常路径**：DSH Loom Plugin 保留 TypeScript / JavaScript；已有 Harness、LLM、ComfyUI 或 Python 助手保留原语言，通过版本化 HTTP、MCP 或受限本地 RPC 通信。核心禁止把 Rust struct、内存指针或私有 FFI ABI 当成公共 Harness 协议。
 
 ```text
 Vue 3 + TypeScript
@@ -398,37 +407,60 @@ Vue 3 + TypeScript
   └─ Tauri Shell（桌面优先；移动按需）
                 │ Versioned Client API + Strong Device Authentication
                 ▼
-Rust Control Plane + Rust Host Agent
-  ├─ Persistent State / Policy / Lease / Artifact / Local Broker
-  └─ Versioned Adapter RPC / MCP
-       ├─ DSH TypeScript Thin Plugin（确实需要时）
-       ├─ Native Harness API / CLI
-       └─ Python / Model Runtime Connectors
+Rust Concierge / Control Plane
+  ├─ Persistent State / Policy / Lease / Artifact / Registry
+  └─ Outbound, Authenticated Node Registration
+       ├─ DSH TypeScript Loom Plugin（Local Node，首选 DSH 接入）
+       ├─ Bare Rust Host Agent（无 DSH 的设备）
+       └─ Runtime Connector：API / MCP / CLI / Python
 ```
 
 ### 7.2 不为每种 Harness 强制开发插件
 
-每个 Harness 需要一个 **Adapter 实例**，但不等于需要一个**安装进 Harness 的插件**：
+DSH 通过专用 Loom 插件接入；其他 Harness 各自需要 Adapter 实例，但不等于每种都需要安装进 Harness 的插件：
 
 | 接入方式 | 使用条件 | 主要部署位置 |
 | --- | --- | --- |
 | Native API Adapter | 已有任务、输入、取消和状态查询 API | Host Agent 旁的独立进程 |
 | MCP / Tool Adapter | 标准工具或配置连接已覆盖必要行为 | Host 本地服务或 Harness 配置 |
 | CLI / Process Adapter | 只能可靠启动和观测进程，且产物边界可确定 | Host Agent 的受管子进程 |
-| Thin Host Plugin | 需要 Session 内部事件、细粒度取消、收件或进程内状态 | 各 Harness 自己的进程 |
+| Host Runtime Plugin | DSH 的正式本地节点，或其他 Harness 确实需要的 Session 事件、细粒度取消和进程内状态 | 各 Harness 自己的进程 |
 
 | Harness / 服务 | 首版策略 |
 | --- | --- |
-| DSH | Rust Host Agent 通过其配置的 MCP 与外部进程控制能力接入；标准连接不足时提供一个 TypeScript 薄插件，读取必要 Session 事件与提供受控任务入口 |
-| 其他 Harness | 优先 Native API / MCP，其次 CLI；不因接入了名称而承诺 Session 级能力 |
+| DSH | 专用 TypeScript Loom 插件作为 Local Node，主动注册中心；任务、SessionRef、事件、Artifact 和本地权限直接适配，MCP 只作为辅助工具通道 |
+| Bare Host | 轻量 Rust Host Agent 提供同一 Node 协议，供无 DSH 的桌面 / Linux 服务器使用 |
+| 其他 Harness | 优先 Native API / MCP，其次 CLI；确需同节点内部状态再增加专用插件。不复制 DSH 独有实现，也不因接入了名称而承诺 Session 级能力 |
 | LLM / 图像等模型服务 | 直接使用已有 HTTP / API Connectors，不默认编写 DSH 或模型服务插件 |
 | ComfyUI | API-first 的模型 Worker Connector，而非通用 Harness 插件 |
 
-DSH 的 MCP 配置只提供工具接入；它本身不能证明完整的 Assignment、取消、Lease 和恢复语义。DSH 插件需要采用其版本兼容的会话机制：不私造不可重开的 Session Event，不把插件缓存当作唯一事实。具体接口按对接时的 DSH 版本验证。
+DSH 的 MCP 配置只提供工具接入；它本身不能证明完整的 Assignment、取消、Lease 和恢复语义。DSH 插件需要采用其版本兼容的会话机制：不私造不可重开的 Session Event，不把插件缓存当作唯一事实。配置通过宿主支持的编辑器持久化，Token 等 Secret 放入宿主 Credential Store / 本机 Broker，不手写用户 Profile 文件。具体接口按对接时的 DSH 版本验证。
 
-Adapter 通过 Adapter Capability Declaration（适配器能力声明）告诉中心它支持哪些操作，例如 `submit / interrupt / resume / events / artifacts / transcript`。未支持的能力必须在 UI 显示缺口，不得用状态轮询伪造完整会话。
+Adapter 通过 Node / Adapter Capability Declaration 告诉中心它支持哪些操作，例如 `register / submit / interrupt / resume / events / artifacts / transcript`。未支持的能力必须在 UI 显示缺口，不得用状态轮询伪造完整会话。
 
-### 7.3 组件、包和权限边界
+### 7.3 主动注册与中心权威
+
+```text
+Install Plugin / Bare Agent
+  → Configure Trusted Concierge Address
+  → Generate Node Keypair + Device / Profile Identity
+  → Outbound HTTPS / WebSocket Hello + Signed Challenge
+  → Short Enrollment Code or Pre-provisioned Certificate
+  → Center Binds Node + Owner (first enrollment requires explicit trust)
+  → Node Receives Node-scoped Capability / Policy
+  → Periodic Inventory / Heartbeat
+  → Per-Assignment Grant + Lease
+  → Execute → Report → Reconcile
+```
+
+- 节点启动后**主动**连接中心，不要求中心直连各 DSH 的管理端口；NAT / 防火墙后的节点可以出站长连接。
+- 主动注册只代表可发现或已认证节点，**注册本身不是任务 Grant、目录访问或无条件 Membership**。首次加入需一次性配对码、预注册设备身份或管理员批准；凭据自动取得不等于信任自动扩张。
+- 节点配置中心地址和最小凭据；中心对节点进行身份挑战。节点也必须验证中心 TLS / 签名身份，不能只因内网 IP 就上传私密库存。
+- 节点保存可重放的 Outbox 和幂等上报；协议版本不兼容、中心离线、Token 撤销时明示状态，不盲目清空任务或重复副作用。
+- 同一 DSH 的多个 Profile / Agent 可以作为独立 Worker / Tenant 命名空间。Profile 的隔离级别要如实声明，不能把安装在同一 DSH 实例的公司 / 个人工作身份混为同一 Worker。
+- 中心保留 Ticket、Grant、Lease、调度和恢复权威；插件可保留本地 Effect Ledger、会话日志和必要缓存，但不成为独立跨机任务权威。
+
+### 7.4 组件、包和权限边界
 
 ```text
 Loom Control Package
@@ -437,8 +469,11 @@ Loom Control Package
 Host Agent Package
   └─ Host enrollment / local execution / Local Broker
 
-Harness Adapter Package（按能力选择一个或多个）
-  └─ API / MCP / CLI / Thin Plugin Connector
+DSH Loom Plugin Package（DSH Host 首选）
+  └─ Local Node / DSH Session / Registration / Local Grant / ArtifactRef
+
+Harness Adapter Package（其他 Harness，按能力选择一个或多个）
+  └─ API / MCP / CLI / Runtime Plugin Connector
 
 Runtime Connector Package
   └─ LLM / ComfyUI / 专用 Worker，与 Harness Adapter 分离
@@ -450,7 +485,7 @@ Runtime Connector Package
 
 ### 8.1 支持“装一次，选择一组机器部署”
 
-用户可以在一台管理设备上构建、导入或下载经过批准的安装包，然后向组网内的部分 Host 创建 Rollout。中心负责计划和审计，Host Agent 在本机执行安装与激活：
+用户可以在一台管理设备上构建、导入或下载经过批准的安装包，然后向组网内的部分 Host 创建 Rollout。中心负责计划和审计，已有节点或受权 Bootstrap Installer 在目标机执行安装与激活：
 
 ```text
 Discover Hosts → Select Targets → Approve Package and Version
@@ -459,9 +494,11 @@ Discover Hosts → Select Targets → Approve Package and Version
                                        └→ Rollback / Needs Person
 ```
 
-这不是必须要求的广播安装，也不是将某个 Harness 的当前安装目录整体同步到其他机器。相同版本可以复用下载内容，但每台 Host 都独立校验、安装、激活和报告。
+这不是无差别广播安装，也不是将某个 Harness 的当前安装目录整体同步到其他机器。相同版本可以复用下载内容，但每台 Host 都独立校验、安装、激活和报告。
 
-**引导与后续分发分开**：首版目标是每台机器已手动安装并加入 Loom 的 Host Agent。此后，可以远程分发和升级 Agent / Adapter / Connector。没有 Host Agent 的新机器不默认存在远程安装通道；如需使用 SSH、MDM 或 OS 远程管理引导，必须是另外授权的 Connector，不能复用普通聊天授权。
+**引导与后续分发分开**：新机器可以通过手动安装，或经用户明确授权的 Ansible / SSH / MDM Bootstrap Installer 纳入 Loom。裸 Linux / Windows / macOS 安装 Rust Host Agent；已有 DSH 的机器安装或配置 DSH Loom Plugin，不重复安装独立 Agent。节点注册成功后，后续更新可以走自身 Node 通道或同一受控 Bootstrap 通道。
+
+**免密 SSH 可以消除交互登录，不会消除安装授权。** Bootstrap 有独立目标清单、身份、有限操作和审计；复用运维已有的 SSH Key / Agent / 管理证书是允许的，但不得把普通聊天 Grant 当作开机或 sudo 权限。不能把一键安装包包装成任意远程命令执行。
 
 ### 8.2 包与安装计划
 
@@ -476,25 +513,29 @@ install_requires: service_restart | harness_restart | dependency | none
 permissions_requested / declared_effects / default_disabled
 ```
 
-Rollout Plan 至少包含：目标 Host / Worker、包版本、期望状态、逐项安装 Grant、超时、是否允许重启、健康检查和回滚版本。
+Rollout Plan 至少包含：目标 Node / Worker、包版本、期望状态、逐项安装 Grant、超时、是否允许重启、健康检查和回滚版本。Bootstrap Plan 另外声明连接方式、目标凭据引用、是否允许 sudo、配对方式、安装范围和卸载 / 回滚策略。
+
+运维可以自带 SSH Config 或 Ansible Inventory / Playbook 选择目标，但 Loom 不能静默扫描并接管整个网段。Ansible 或其他安装器应作为外部工具 Adapter 生成审计结果，不依赖模型临时拼出的脚本。
 
 中心先把可信包放入可寻址 Store；Host 在线时拉取或经 LAN 点对点获取。包体不经聊天 Router，不重复传大文件。不同 OS / arch 选择对应产物，不兼容的设备明确跳过。
 
 ### 8.3 权限与安全规则
 
-- **Built ≠ Installed ≠ Activated ≠ Granted**：构建、下载、安装、启用和任务权限是独立动作。
-- 管理端有某个凭据，不代表该凭据可以进入所有目标 Host。Secret、API Key、SSH Key 和 Harness Profile 默认留在本机，由本机 Broker 绑定或单独录入。
+- **Built ≠ Installed ≠ Activated ≠ Registered ≠ Granted**：构建、下载、安装、启用、注册和任务权限是独立动作。
+- 管理端有某个凭据，不代表该凭据可以进入所有目标 Host 或交付给模型。Secret、API Key、SSH Key 和 Harness Profile 默认留在执行安装的运维环境或目标本机，由 Broker 绑定或单独录入。免密 SSH 仅让安装器证明既有运维授权，不授予 Loom 任意的后续访问权限。
 - 不因安装了 Host Agent 或 Adapter 就获得项目目录、模型、外发和 Worker 执行权限。
 - 代码包与 Harness 插件可分发；本地模型、私有 LoRA、Memory 和完整会话不默认分发，仍受 `local-only / no-copy` 与 Policy 限制。
 - 跨用户、跨公司 / 个人 Worker、跨不信任网络不得默认接收同一 Rollout。
 - 严格执行的包激活规则以版本化 Policy 判断；不能让安装包内的说明或模型自行声明可信。
 - 安装 / 激活 / 重启各自是可对账 Effect 或受控本机操作。超时后进入 Unknown，不假装成功也不无条件重装。
-- 首版支持签名包、版本锁定、逐 Host 批准、健康检查和保留上一个可用版本；禁止自动运行任意网络 Shell 安装脚本。
+- 首版支持签名包、版本锁定、逐 Node 批准、健康检查和保留上一个可用版本；仅运行固定、已审计、有版本的安装 Playbook / Installer，不执行模型临时生成或任意网络 Shell 安装脚本。
+- Bootstrap 完成只说明已安装；节点仍须配对并主动注册。远程安装结果不等于 Node 在线、不等于 Harness 可用、不等于已获任务 Grant。
+- 远程 sudo、修改防火墙 / 系统服务、卸载和重启均单独确认；优先用户级安装，减少系统级权限。
 - 撤销分发与撤销 Grant 不同：可以禁止新安装、停用 Adapter、卸载程序，但不能假定网络包已从所有介质擦除。停用不得清除仍有用的审计证据。
 
 ### 8.4 首版范围
 
-先支持可信单用户 LAN 中的 Host Agent、官方 Adapter 和配置 / Skill 包的选择性安装；跨 Harness 插件因宿主版本差异单独打包。持续自动更新、任意第三方插件、跨不受信网络的远程装包暂不进入首版承诺。
+先支持可信单用户 LAN 中已有节点的选择性更新，以及通过明确授权的 Ansible / SSH 对目标机器引导 Rust Host Agent 或 DSH Loom Plugin。节点随后主动注册并领取最小权限。跨 Harness 插件因宿主版本差异单独打包。持续自动更新、任意第三方插件、跨不受信网络的普通聊天触发安装暂不进入首版承诺。
 
 ### 8.5 平台包矩阵与客户端更新
 
