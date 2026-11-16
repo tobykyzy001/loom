@@ -18,6 +18,7 @@ Updated: 2026-11-17.
 12. `a0b32b3` — bounded DSH public-tool semantic HTML file, genuine external Effect/SessionRef and zero-live-model verification.
 13. `aacdf34` — bounded, versioned document-DAG protocol validation (not a claim of an executed industry DAG).
 14. `2126038` — real bounded two-stage document execution, immutable parent input, v4 run/stage projection and restart validation.
+15. `0f3ec88` — actual parent/child Agent delegation with source/current-Lease proof, center-refused forged references, immutable child lineage and filtered collaboration evidence.
 
 Local commits are not pushed unless separately reported.
 
