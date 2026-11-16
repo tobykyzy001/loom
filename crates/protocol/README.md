@@ -21,6 +21,10 @@ not a runtime owned or started by this crate. No LLM/provider is called.
   `ReportResponse`, `from_json_strict`, `to_canonical_json`.
 - `identity`: `NodePublicKey`, `ChallengeNonce`, `RegistrationChallenge`,
   `NodeIdentity`; raw Ed25519 challenge and fingerprint validation.
+- `pipeline`: **M4 foundation only** `loom.document-pipeline.v1` bounded
+  document-definition validation, Registry-input Grant/Binding checks, ready/wait
+  stage presentation, verified Artifact requirements and at-least-once semantics.
+  This is not M3 general Pipeline support or an executing pipeline engine.
 - `policy`: `AuthorizationStore`, `authorize_report`, `DomainState`,
   `cancel_assignment`, `ReconciliationRule`.
 - `state`: `M0StateMachine`, `ReportOutcome`, `HostEffectFact`.
@@ -214,6 +218,46 @@ Use a single center writer, optimistic fencing/version checks in SQLite for
 retries/concurrent requests. Do not accept an authenticated replay without
 looking up its already recorded Report. Do not let a duplicate Report claim a
 revised summary, artifact hash, effect state, Worker or Grant.
+
+## Bounded document Pipeline foundation (M4 incremental only)
+
+`PipelineDefinition` validates schema/revision, nonempty unique stage/output IDs,
+unknown/duplicate/self edges, real acyclicity and explicit output mappings. The
+only kinds are `read_summary` (logical `ProjectRoot` + `RelativePath`) and
+`edit_file` (upstream `ArtifactRefSpec` + logical target + bounded text transform).
+There are no model/GPU/image, scripts/commands, arbitrary filesystem paths or
+implicit default placement/permission. The optional `expected_artifact_id` pins
+an actual immutable Artifact UUID; it is never a generated dummy UUID.
+
+`next_tasks` is a pure presenter, not a task authority. It returns
+`NextTaskCandidates { ready, waiting, failed }` from a state map and Registry
+snapshots. Missing verified Grant/Binding descriptors return explicit
+requirements rather than ready Tasks. Grants and immutable bindings must match
+exact Project/Node/Installation/Worker, active version/digests and read/write
+permission; host/worker preferences cannot choose `auto` or another root.
+`ReadyStage::ticket_spec()` is a future integration seam to the existing Task
+seam, not a replacement Grant, Lease or execution call. No new DB/HTTP pipeline
+registration is enabled.
+
+Artifact dependencies require an explicit producer edge and `output_id`. Their
+public URI is exactly `loom://artifact/<uuid>`; retrieval goes through
+`VerifiedArtifactRegistry`, which must compare the complete immutable reference,
+its registered SHA-256 and actual lineage. No private Project location or generic
+metadata is treated as artifact access evidence. A successful output must belong
+to the exact attached Task and have its expected immutable parents. Input bytes
+must also independently match that reference. `DocumentTaskFrame` contains only
+this registered text and its bounded operation, not nested secret/Grant payloads.
+
+Stage presentation keeps pending/paused/reconciling/succeeded/failed/cancelled
+separate. Unknown remains reconciling and does not advance descendents; failed or
+cancelled parents block their descendents without automatic retries. Effects are
+at-least-once, never exactly-once. `PipelineExecution` is an in-memory projection
+for testing/adapters, not persisted/retrying execution. There is no real Host
+Task or Artifact execution test in this module. The versioned synthetic fixture
+is [`../../protocol/fixtures/pipeline/v1/document.json`](../../protocol/fixtures/pipeline/v1/document.json).
+Current dynamic registry `grant_...` strings differ from shared `domain::Grant`
+UUIDs: a later integration adapter must explicitly map actual row identity and
+digest semantics or reject the record; this module does not invent a conversion.
 
 ## Verification boundaries
 

@@ -11,6 +11,7 @@ pub mod domain;
 pub mod error;
 pub mod identity;
 pub mod node;
+pub mod pipeline;
 pub mod policy;
 pub mod state;
 
@@ -19,5 +20,6 @@ pub use domain::*;
 pub use error::{ProtocolError, ProtocolResult};
 pub use identity::*;
 pub use node::*;
+pub use pipeline::*;
 pub use policy::*;
 pub use state::*;

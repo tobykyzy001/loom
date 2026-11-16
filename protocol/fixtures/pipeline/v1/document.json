@@ -1,0 +1,52 @@
+{
+  "schema": "loom.document-pipeline.v1",
+  "version": 1,
+  "pipeline_id": "00000000-0000-0000-0000-00000000000a",
+  "project_id": "00000000-0000-0000-0000-00000000000b",
+  "nodes": [
+    {
+      "project_id": "00000000-0000-0000-0000-00000000000b",
+      "grant_id": "00000000-0000-0000-0000-000000000014",
+      "stage_id": "read",
+      "depends_on": [],
+      "kind": "read_summary",
+      "operation": {
+        "operation": "read_summary",
+        "input": {
+          "project_id": "00000000-0000-0000-0000-00000000000b",
+          "path": "docs"
+        }
+      },
+      "output": {
+        "output_id": "summary"
+      },
+      "node_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "worker_id": "reader"
+    },
+    {
+      "project_id": "00000000-0000-0000-0000-00000000000b",
+      "grant_id": "00000000-0000-0000-0000-000000000015",
+      "stage_id": "edit",
+      "depends_on": [
+        "read"
+      ],
+      "kind": "edit_file",
+      "operation": {
+        "operation": "edit_file",
+        "input": {
+          "producer_stage_id": "read",
+          "output_id": "summary"
+        },
+        "target": "docs/edited.md",
+        "transform": {
+          "kind": "text_transform",
+          "transform": "collapse_whitespace"
+        }
+      },
+      "output": {
+        "output_id": "edited"
+      },
+      "worker_id": "editor"
+    }
+  ]
+}
