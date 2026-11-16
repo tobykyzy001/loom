@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { access, mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, writeFile, realpath } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -21,7 +21,7 @@ export async function prepareProject(root) {
   const project = join(root, 'project')
   await mkdir(project, { mode: 0o700 })
   await writeFile(join(project, 'input.txt'), 'Real isolated project input.\nNo LLM, DSH host or network model was called.\n', { mode: 0o600 })
-  return project
+  return realpath(project)
 }
 // A reserved port is closed before Loom binds it; this avoids a proxy or fixed-port collision.
 async function availablePort() {
