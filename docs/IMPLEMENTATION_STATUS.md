@@ -21,6 +21,7 @@ Updated: 2026-11-17.
 15. `0f3ec88` — actual parent/child Agent delegation with source/current-Lease proof, center-refused forged references, immutable child lineage and filtered collaboration evidence.
 16. `5320707` — explicit bounded hardware probe with real local Apple M5 Max/Metal 4 observations, missing/unknown boundaries, no model claim.
 17. `59aaee5` — real public-SDK text invocation with independent invoke_text permission, precise provider/model, source-bound response and replay/recovery proof.
+18. `f0e724b` — direct local peer Artifact handoff with recipient Ed25519 signatures, one-time nonces, current scope/cancel/Lease checks, raw-source hash lineage and additive v5 migration.
 
 Local commits are not pushed unless separately reported.
 
