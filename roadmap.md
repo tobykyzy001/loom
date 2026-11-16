@@ -23,6 +23,17 @@
 
 ## 2. 当前与下一步
 
+### 已确定的技术决策
+
+- 首版控制面、Host Agent、默认 Adapter 使用 **TypeScript**；Web UI 使用 **React + TypeScript**。
+- 既有 Harness / 模型服务保留原技术栈；Python 探测或启动助手放在 Host 边界，不复制控制面。
+- 协议使用版本化、语言中立的 Schema。
+- 每个 Harness 需要 Adapter 实例，但不强制需要宿主插件；按 **Native API → MCP → CLI → 薄宿主插件** 的顺序选择能满足能力约束的接入方式。
+- 提供**选择性组网安装**：在管理机审核包，选择部分 Host 分发，各 Host 独立验证、安装、启用和报告。
+- 分发代码和配置不等于分发 Secret、模型、权限或长期无人值守批准。首版仅承诺可信单用户 LAN 的官方包，不做任意第三方包和跨不受信网络安装。
+
+接入与部署边界见 [architecture.md](architecture.md) 的第 7～8 章。首版 SQLite / 驱动 / Web 框架仍通过 M0 原型选型，不在文档里先锁死。
+
 ### 当前
 
 仓库处于设计阶段。下述状态在没有代码或测试证据前均不能视为已完成：
@@ -31,7 +42,7 @@
 - 尚无通用的 Host / Project / Model Registry；
 - 尚无跨机 Assignment、Artifact 传输或故障恢复；
 - 尚无 Agent / Worker 会话的折叠与展开实现；
-- 尚未选择具体技术栈、存储实现和 Adapter 接口。
+- 尚未选择存储驱动、Web 框架和具体 Adapter API；语言与接入原则见上述技术决策。
 
 ### 下一刀：M0 的最小垂直切片
 
@@ -58,7 +69,8 @@
 - Conversation / Activity / Collaboration 三层视图的最小版本；
 - Agent / Worker 过程会话的默认折叠、按任务展开、发送者过滤与全局/单任务显示偏好；
 - 消息、SessionRef 与 Report 的关联；首版可只实现一个 DSH 内部子 Agent 场景；
-- 用户明确“记住这个”时的单条 Memory 保存、查看和删除；首版不自动归纳全部历史会话。
+- 用户明确“记住这个”时的单条 Memory 保存、查看和删除；首版不自动归纳全部历史会话；
+- 首个 DSH Adapter，以及覆盖目标 DSH 版本的 MCP / 外部进程 / 薄插件 Spike；按实测能力确定保留哪些接入层。
 
 **本阶段暂缓**
 
@@ -78,6 +90,7 @@
 | 中心重启 | 运行中和已完成任务均能恢复；外部失败不被伪造成成功 |
 | 取消任务 | 用户停止意图被持久保存，不被自动恢复覆盖 |
 | 多 Agent 小任务 | 主 Agent 委派一个子 Agent；默认只显示关键阶段，展开后能看到委派、回复和结论的关联 |
+| DSH 接入能力 | 真实验证任务提交、取消、运行状态、失败和重新打开宿主 Session；未从 MCP 获得的能力才由薄插件补齐，插件不能破坏宿主日志兼容性 |
 | 显示偏好 | 全局折叠、单任务展开及再次折叠均生效，不改变 Task、Report 和 Artifact 数据 |
 | 敏感过程 | 展开记录不暴露测试 Secret 或未授权文件内容；权限边界不只依赖 UI |
 | 审计保留 | 隐藏过程后，任务授权、关键决定、结果和待处理副作用仍可查询 |
@@ -145,14 +158,20 @@
 - Host 间受控 Artifact 传输，大文件不经过 Router；
 - 跨机 Structured Report、Effect Ledger 和 Unknown Outcome 对账；
 - 无可用设备的排队、替代建议和显式重调度；
-- Collaboration 视图增加 Host / Worker / Assignment 关联与跨机过程追踪。
+- Collaboration 视图增加 Host / Worker / Assignment 关联与跨机过程追踪；
+- Package Manifest、内容寻址包 Store、OS / arch / Harness 版本兼容检查；
+- 选择性 Rollout：管理机批准包版本，选择部分 Host，本机独立安装 Grant、健康检查与回滚；
+- Host Agent 与官方 Adapter 的安装和启停；Harness 薄插件单独分发，不混为通用包；
+- 以手动安装、已加入 Loom 的 Host Agent 为前提，支持其后续远程升级；无 Agent 新机器的 SSH / MDM 引导另行授权，不属于普通 Rollout。
 
 **本阶段暂缓**
 
 - 无中心任务争抢；
 - 任意 Session 无损迁移；
 - 通用 exactly-once 承诺；
-- 多机动态任务 DAG 的所有优化。
+- 多机动态任务 DAG 的所有优化；
+- 任意第三方插件、全网自动更新、跨不受信网络部署；
+- 直接同步本机安装目录、Harness Profile、凭据和私有模型。
 
 **场景验收**
 
@@ -167,10 +186,16 @@
 | 结果未知 | 进入对账或询问，不盲目重跑、不宣称成功 |
 | 过程追踪 | 用户能按 Ticket 展开两个 Worker 的交接消息、Shared Brief、Assignment 和 Artifact 关系 |
 | Host 侧原文不可用 | 中心显示摘要和可见性缺口；不伪造完整 Transcript |
+| 选择性安装 | 一个已批准包仅部署到选中的两个测试 Host；未选中设备不改变安装状态，包签名与内容摘要在每台设备校验 |
+| 平台不兼容 | 缺少对应 OS / arch / Harness 版本的设备明确跳过；不复制不兼容安装目录、不将整个 Rollout 伪报为全部成功 |
+| 本机安装权限 | 管理端不能单方面获得新目录、模型、外发或宿主管理员权限；逐目标批准并保留 Secret 在本机 Broker |
+| 安装失败回滚 | 激活后健康检查失败时回到上一个可用版本，其他 Host 不被无意义重装；断线时安装结果进入 Unknown 并对账 |
+| 配置与 Skill | 可单独选择性分发不涉敏配置 / Skill 包；保存和安装仍不授予执行或自动运行权 |
+| 无 Agent 新机器 | 普通 Rollout 明示不能引导，不暗中使用 SSH；如需 MDM / OS 远程管理，使用独立授权通道 |
 
 **进入 M3 的证据**
 
-至少两类不同载荷的任务完成双机测试，并完成断线、重连、过期租约、重复回调和未知结果故障注入。跨机成功演示本身不足以通过。
+至少两类不同载荷的任务完成双机测试，并完成断线、重连、过期租约、重复回调和未知结果故障注入。选择性安装必须通过一个官方 Host Agent / Adapter 包在部分目标上的部署、失败回滚和权限测试。跨机成功或安装演示本身不足以通过。
 
 ### M3 — 通用 Pipeline 与模型治理
 
@@ -221,7 +246,7 @@
 **本阶段包含**
 
 - 同机公司 / 个人 Worker 身份、目录、记忆与默认 Placement 隔离；
-- DSH 之外的第二类 Harness Adapter；
+- DSH 之外的第二类 Harness Adapter，优先复用 Native API / MCP；如需薄插件则独立声明宿主兼容版本；
 - ConversationSegment / MessageRef 的适配、分页、搜索和按权限导出；
 - 对 Worker 内部会话、Worker 间消息和用户可见摘要分别设置展示策略；
 - Harness 仅上报摘要、无法提供完整过程时，明确展示记录完整度；
@@ -229,7 +254,7 @@
 
 **场景验收**
 
-- 两类 Harness 完成同一协议下的委派和交付，统一 Ticket 不强迫统一其内部 Session；
+- 两类 Harness 完成同一协议下的委派和交付，统一 Ticket 不强迫统一其内部 Session；不得为每个 Harness 重复实现控制面；
 - 用户能展开两个 Harness 的协作链，也能回到无过程消息干扰的主对话；
 - 搜索、复制、导出和引用过程消息同样经过权限检查；
 - 公司 / 个人 Worker 不互相读取目录、凭据和长期记忆；

@@ -361,16 +361,121 @@ Register → Approve → Place / Load → Invoke → Retire
 - 权重不进入提示词或普通事件记录；
 - 任务结果记录模型、LoRA、参数、Revision 和执行环境。
 
-## 7. 授权、调度与可靠性
+## 7. 首版技术栈与 Harness 接入
 
-### 7.1 Grant 与 Lease 分离
+### 7.1 首版实现语言
+
+首版以 **TypeScript** 为统一实现语言：
+
+- Concierge、Host Agent、Registry、任务协议和持久化应用层使用 TypeScript；
+- 默认 Web UI 使用 React + TypeScript；
+- 优先复用已有 Node.js 的强类型 Schema、序列化、事件和依赖注入生态；
+- 协议与持久数据使用版本化、语言中立的 Schema，适配器不能依赖 TypeScript 私有运行时对象。
+
+首个可用版本以 macOS 开发环境和单用户部署为开发基线，但协议、路径、凭据和包管理不得假设所有 Host 使用 macOS。
+
+这不是“每个组件都必须使用 TypeScript”：已有 Harness、LLM、ComfyUI 或专用 Worker 保留原语言和运行时；确实需要 Python 的模型探测、启停和工具调用放在 Host 侧边界，使用带类型校验的本地协议与 TypeScript Host Agent 通信。首版不让 Python 微服务无边界增长。
+
+### 7.2 不为每种 Harness 强制开发插件
+
+每个 Harness 需要一个 **Adapter 实例**，但不等于需要一个**安装进 Harness 的插件**：
+
+| 接入方式 | 使用条件 | 主要部署位置 |
+| --- | --- | --- |
+| Native API Adapter | 已有任务、输入、取消和状态查询 API | Host Agent 旁的独立进程 |
+| MCP / Tool Adapter | 标准工具或配置连接已覆盖必要行为 | Host 本地服务或 Harness 配置 |
+| CLI / Process Adapter | 只能可靠启动和观测进程，且产物边界可确定 | Host Agent 的受管子进程 |
+| Thin Host Plugin | 需要 Session 内部事件、细粒度取消、收件或进程内状态 | 各 Harness 自己的进程 |
+
+| Harness / 服务 | 首版策略 |
+| --- | --- |
+| DSH | 复用其配置的 MCP 与外部进程控制能力；标准连接不足时提供一个薄插件，读取必要 Session 事件与提供受控任务入口 |
+| 其他 Harness | 优先 Native API / MCP，其次 CLI；不因接入了名称而承诺 Session 级能力 |
+| LLM / 图像等模型服务 | 直接使用已有 HTTP / API Connectors，不默认编写 DSH 或模型服务插件 |
+| ComfyUI | API-first 的模型 Worker Connector，而非通用 Harness 插件 |
+
+DSH 的 MCP 配置只提供工具接入；它本身不能证明完整的 Assignment、取消、Lease 和恢复语义。DSH 插件需要采用其版本兼容的会话机制：不私造不可重开的 Session Event，不把插件缓存当作唯一事实。具体接口按对接时的 DSH 版本验证。
+
+Adapter 通过 Adapter Capability Declaration（适配器能力声明）告诉中心它支持哪些操作，例如 `submit / interrupt / resume / events / artifacts / transcript`。未支持的能力必须在 UI 显示缺口，不得用状态轮询伪造完整会话。
+
+### 7.3 组件、包和权限边界
+
+```text
+Loom Control Package
+  └─ Concierge / Policy / Registry / Scheduler
+
+Host Agent Package
+  └─ Host enrollment / local execution / Local Broker
+
+Harness Adapter Package（按能力选择一个或多个）
+  └─ API / MCP / CLI / Thin Plugin Connector
+
+Runtime Connector Package
+  └─ LLM / ComfyUI / 专用 Worker，与 Harness Adapter 分离
+```
+
+协议应尽量采用带版本的消息 Envelope，而非共享数据库或进程内对象。Host Agent、插件和 API Connector 是独立部署单元；一台机器上的 Harness 1 插件不应被错误当成 Harness 2 的适配器。
+
+## 8. 组网内选择性分发与安装
+
+### 8.1 支持“装一次，选择一组机器部署”
+
+用户可以在一台管理设备上构建、导入或下载经过批准的安装包，然后向组网内的部分 Host 创建 Rollout。中心负责计划和审计，Host Agent 在本机执行安装与激活：
+
+```text
+Discover Hosts → Select Targets → Approve Package and Version
+  → Stage / Transfer → Local Compatibility Check → User / Policy Approval
+  → Install → Activate → Health Check → Report
+                                       └→ Rollback / Needs Person
+```
+
+这不是必须要求的广播安装，也不是将某个 Harness 的当前安装目录整体同步到其他机器。相同版本可以复用下载内容，但每台 Host 都独立校验、安装、激活和报告。
+
+**引导与后续分发分开**：首版目标是每台机器已手动安装并加入 Loom 的 Host Agent。此后，可以远程分发和升级 Agent / Adapter / Connector。没有 Host Agent 的新机器不默认存在远程安装通道；如需使用 SSH、MDM 或 OS 远程管理引导，必须是另外授权的 Connector，不能复用普通聊天授权。
+
+### 8.2 包与安装计划
+
+Package Manifest 至少声明：
+
+```text
+package_id / immutable_version / artifact_digest / source / signature
+component_kind: host_agent | harness_adapter | runtime_connector | skill | config
+host_kind / harness_kind / supported_host_versions
+supported_os / arch / required_capabilities
+install_requires: service_restart | harness_restart | dependency | none
+permissions_requested / declared_effects / default_disabled
+```
+
+Rollout Plan 至少包含：目标 Host / Worker、包版本、期望状态、逐项安装 Grant、超时、是否允许重启、健康检查和回滚版本。
+
+中心先把可信包放入可寻址 Store；Host 在线时拉取或经 LAN 点对点获取。包体不经聊天 Router，不重复传大文件。不同 OS / arch 选择对应产物，不兼容的设备明确跳过。
+
+### 8.3 权限与安全规则
+
+- **Built ≠ Installed ≠ Activated ≠ Granted**：构建、下载、安装、启用和任务权限是独立动作。
+- 管理端有某个凭据，不代表该凭据可以进入所有目标 Host。Secret、API Key、SSH Key 和 Harness Profile 默认留在本机，由本机 Broker 绑定或单独录入。
+- 不因安装了 Host Agent 或 Adapter 就获得项目目录、模型、外发和 Worker 执行权限。
+- 代码包与 Harness 插件可分发；本地模型、私有 LoRA、Memory 和完整会话不默认分发，仍受 `local-only / no-copy` 与 Policy 限制。
+- 跨用户、跨公司 / 个人 Worker、跨不信任网络不得默认接收同一 Rollout。
+- 严格执行的包激活规则以版本化 Policy 判断；不能让安装包内的说明或模型自行声明可信。
+- 安装 / 激活 / 重启各自是可对账 Effect 或受控本机操作。超时后进入 Unknown，不假装成功也不无条件重装。
+- 首版支持签名包、版本锁定、逐 Host 批准、健康检查和保留上一个可用版本；禁止自动运行任意网络 Shell 安装脚本。
+- 撤销分发与撤销 Grant 不同：可以禁止新安装、停用 Adapter、卸载程序，但不能假定网络包已从所有介质擦除。停用不得清除仍有用的审计证据。
+
+### 8.4 首版范围
+
+先支持可信单用户 LAN 中的 Host Agent、官方 Adapter 和配置 / Skill 包的选择性安装；跨 Harness 插件因宿主版本差异单独打包。持续自动更新、任意第三方插件、跨不受信网络的远程装包暂不进入首版承诺。
+
+## 9. 授权、调度与可靠性
+
+### 9.1 Grant 与 Lease 分离
 
 - **Grant**：用户允许哪项任务使用哪些资源、目录、模型、操作及数据。
 - **Lease**：协调器允许某 Host 在某时段执行某 Assignment。
 
 二者分别版本化：用户禁止外发是 Policy，GPU 从忙碌变空闲是 Resource State。资源变化不能扩大 Grant；Policy 撤销后新执行必须停止，旧 Lease 失效，旧 Agent 的后续写入需被 fencing。
 
-### 7.2 Assignment 的建议字段
+### 9.2 Assignment 的建议字段
 
 ```text
 assignment_id / ticket_id / grant_digest
@@ -385,7 +490,7 @@ report / reconciliation_state
 
 一次换机是新 Assignment 或明确 Attempt，不延续原机器的本地会话假设。
 
-### 7.3 Effect 与 Unknown Outcome
+### 9.3 Effect 与 Unknown Outcome
 
 跨机采用 **at-least-once + 对账**，不承诺无法证明的 exactly-once：
 
@@ -403,7 +508,7 @@ queued → leased → confirmed
 
 无法证明是否成功的敏感效果，询问用户而非盲目重跑。模型“先检查一下再决定”可辅助恢复，但不能代替确定性证据。
 
-### 7.4 调度失败与离线
+### 9.4 调度失败与离线
 
 - 无符合 Host：排队、等待指定设备上线，或向用户提供替代方案；
 - Host 离线：Task 保留，不能伪装为执行失败或成功；
@@ -412,7 +517,7 @@ queued → leased → confirmed
 - 通知可以广播预热，真正的副作用必须获得中心 Lease；
 - 多机暂不采用无中心争抢任务，避免双写和权限不明确。
 
-### 7.5 Host 与外部 Watchdog
+### 9.5 Host 与外部 Watchdog
 
 - Host Watchdog：检查进程、资源、Lease、任务、磁盘与对账；
 - Independent Watchdog：在另一设备或独立 Profile 检查协调器；
@@ -420,7 +525,7 @@ queued → leased → confirmed
 - 手动停止是尊重的持久意图，不应被自动恢复覆盖；
 - 检查进展而非仅检查进程是否活着。
 
-## 8. 用户交互与 Worker 放置
+## 10. 用户交互与 Worker 放置
 
 保持单联系人的体验，但用以下视图提供可控性：
 
