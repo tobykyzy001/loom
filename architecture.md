@@ -254,7 +254,17 @@ Host Agent
 - Nonce由A私有状态持久化并单次消费，重开未完成的中心保留原请求凭据。但这不是所有端到端副作用保证一次，传输中途的未知须由Host reconciliation另行处理；错误签名/revoked/deadline/cancel/offline/oversize/shape未通过禁止生成新的file effect。
 - v5 的新增direct_offers只是辅助关系，是[id,current attempt,artifact,recipient,nonce,key与definition]的保存，不是新任务权威，也不代替Ticket/Grant或Artifact。迁移采用IF NOT EXISTS；对legacy ticket/grant、原有Artifact bytes与审计链保持不覆盖。其它数据面和非本机部署继承须另行实测。
 
-实际一次 source→socket→checksum→B Grant→child file验证在[tests/direct/README.md](tests/direct/README.md)，含取消 expires/lifecycle错误与重启幂等测试。它**不是**第二物理机连接/TLS保证、远程安装包部署、任意大文件默认可下载或全面M2完成证明。
+实际一次 source→socket→checksum→B Grant→child file验证在[tests/direct/README.md](tests/direct/README.md)，含取消 expires/lifecycle错误与重启幂等测试。它**不是**第二物理机连接/TLS保证、远程安装包部署、任意大文件默认可下载或全面M2完成证明。中途断流、nonce已经消费而下游结果不确定的自动收据/对账仍未完整验证，不可用一次领取或Model Observation替代未知付款的结果确认。
+
+### 3.6 受限模型调用的可读观察
+
+需要早期模型功能的第一个回答不是全套激活面板，而是**这一份实际任务用到了哪个资源、产生了哪一份Artifact、哪次Grant关联何来源**。在严格`model_text`的SDK返回Artifact时，Concierge只接受受限`loom.model-ref.v1`，核对原Task原始`loom.model-text.v1` provider/model、实际origin Node/Assignment、精确原`invoke_text` Grant和结果bytes SHA。它保存`model_observations`仅作**已登记Artifact的观察关系**，与Artifact在同一SQLite事务创建，不能独立预造。
+
+schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail返回：原artifact/sha/ticket/assignment/node、精确provider/model、Text mode、host_reported来源、report-declared的执行/输出布尔值、observed_at/recorded_at、可选真实Session UUID、Grant与`grant_current`在读取时的状态。这里的`grant_current`仅表示原记录现未被撤销；**不是当前模型可用，仍须分别查证Node、能力、Lease等**。撤销Grant不删合法的过去任务及报告，而会阻止它成为新的授权。缺失/不同provider/model、其他Grant、错sha、假session UUID、image模态、对stub声称实际LLM均不得成为模型观察。
+
+早期只有文件索引没有现存完整受限ModelMetadata的旧Artifact保持不补造此零散历史；否则仅以严格现状/原始字段记录这个信息缺口，不凭文件名或Goal假装知道做过什么。普通文件任务没有模型观察。 `GET /models`仍在full registry/lifecycle未提供的范围返回501，维护这项窄观察与全局Model Registry不能混淆；Text Result也没有原生文件副作用。
+
+实际DSH SDK生文本、中心接收、原始Grant/Artifact及恢复后读取由`tests/harness/real-model-text.mjs`验证。模型报告本身是宿主报告，不是Conci erge独立验证任意商业LLM；Stub并不收费或触网。提供方功能、资源生命周期和质量评价仍分别NOT RUN。原任务详情只展示这个边界明确的观察，没有管理模型或浏览器读取Profile/凭据。
 
 ## 4. 会话可见性与审计架构
 

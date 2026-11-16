@@ -27,7 +27,7 @@ const openCount = computed(() => props.tickets.filter(t => t.status === 'waiting
       <button v-for="ticket in visible" :key="ticket.id" class="ticket-item" :class="{ current: selectedId === ticket.id }" @click="emit('select', ticket.id)">
         <div class="ticket-item-top"><span class="status-badge" :class="statusTone(ticket.status)"><span class="status-dot" />{{ statusLabel(ticket.status) }}</span><span class="muted tiny">#{{ ticket.id.slice(0, 6) }}</span></div>
         <p>{{ ticket.objective }}</p>
-        <div class="ticket-item-meta"><span><AppIcon name="projects" :size="12" />{{ projectName(projects, ticket.project_id) }}</span><span class="muted">{{ ticket.kind === 'edit_file' ? '写入' : '读取' }}</span></div>
+        <div class="ticket-item-meta"><span><AppIcon name="projects" :size="12" />{{ projectName(projects, ticket.project_id) }}</span><span class="muted">{{ ticket.kind === 'edit_file' ? '写入' : ticket.kind === 'model_text' ? '文本模型' : '读取' }}</span></div>
       </button>
     </div>
     <div v-else class="ticket-list-empty"><AppIcon name="activity" :size="21" /><p>{{ tickets.length ? '这个筛选中没有任务。' : '暂无任务。描述目标，开始第一个小步骤。' }}</p><button v-if="tickets.length" class="text-link" @click="filter = 'all'">查看全部任务</button></div>

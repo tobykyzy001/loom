@@ -1473,6 +1473,17 @@ async fn artifact_upload(
             "sha256":current["sha256"],"location":current["location"]
         })));
     }
+    // Model observation is derived from this same scoped immutable Artifact,
+    // validated before any output bytes or auxiliary record are persisted.
+    let model_observation = crate::model_observation::from_registration(
+        &store,
+        &ticket,
+        &assignment,
+        &node,
+        &artifact,
+        &digest,
+        &metadata,
+    )?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1489,6 +1500,9 @@ async fn artifact_upload(
     let tx = store.conn_mut().transaction()?;
     let result = (|| -> rusqlite::Result<()> {
         tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),serde_json::Value::Array(lineage.clone()).to_string(),now()])?;
+        if let Some(observation) = model_observation.as_ref() {
+            crate::model_observation::insert(&tx, observation)?;
+        }
         store::audit_tx(
             &tx,
             Some(&ticket),
@@ -1738,7 +1752,11 @@ async fn ticket(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(state.lock()?.detail(&id)?))
+    let store = state.lock()?;
+    let mut detail = store.detail(&id)?;
+    detail["model_observation"] = crate::model_observation::for_ticket(&store, &id)?
+        .map_or(Value::Null, |entry| json!(entry));
+    Ok(Json(detail))
 }
 #[derive(Deserialize)]
 struct TicketRequest {

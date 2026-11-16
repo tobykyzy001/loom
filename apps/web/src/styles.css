@@ -226,6 +226,9 @@ code, .mono { font-family: var(--mono); }
 .activity-bottom .status-dot { width: 4px; height: 4px; opacity: .6; }
 .worker-card { background: #fdfcff; border: 1px solid #e9e2f0; padding: 13px; border-radius: 9px; margin-top: 20px; }
 .worker-heading { display: flex; align-items: center; gap: 8px; }
+.worker-heading > div { flex: 1; min-width: 0; }
+.worker-heading .worker-avatar, .worker-heading .status-badge { flex-shrink: 0; }
+.worker-heading p { overflow-wrap: anywhere; word-break: break-all; }
 .worker-avatar { width: 28px; height: 28px; display: grid; place-items: center; background: #f3eaf8; color: #a18bac; border-radius: 8px; }
 .worker-heading h3 { font-family: var(--mono); font-size: 8px; word-break: break-all; }
 .worker-heading p { color: #aa9db4; font-size: 8px; margin-top: 4px; }
@@ -312,7 +315,9 @@ code, .mono { font-family: var(--mono); }
 .deliverables .section-heading h2, .report-section h2 { font-size: 16px; font-weight: 550; }
 .deliverables .count-pill { font-size: 9px; }
 .artifact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
-.artifact-card { display: flex; align-items: center; gap: 11px; padding: 15px; border: 1px solid #e5dcea; border-radius: 9px; background: #fffeff; text-align: left; }
+.artifact-card { display: flex; align-items: center; gap: 11px; padding: 15px; border: 1px solid #e5dcea; border-radius: 9px; background: #fffeff; text-align: left; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.artifact-card strong { overflow-wrap: anywhere; word-break: break-word; }
+.artifact-card > svg, .artifact-icon { flex-shrink: 0; }
 .artifact-card:hover { border-color: #b8a2cc; }
 .artifact-icon { display: grid; place-items: center; background: #f6f0fb; color: #a68aba; padding: 10px; border-radius: 7px; }
 .artifact-card > div { flex: 1; min-width: 0; }
@@ -320,7 +325,9 @@ code, .mono { font-family: var(--mono); }
 .artifact-card span { display: block; color: #b092b9; font-size: 9px; margin-top: 7px; }
 .artifact-card > svg { color: #ba9bc5; }
 .artifact-viewer { border: 1px solid #e4d7e9; margin-top: 16px; padding: 19px; border-radius: 10px; }
-.artifact-viewer-top { display: flex; justify-content: space-between; align-items: center; }
+.artifact-viewer-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.artifact-viewer-top > div { min-width: 0; }
+.artifact-viewer h3 { overflow-wrap: anywhere; }
 .artifact-viewer h3 { font-size: 14px; margin-top: 6px; }
 .artifact-content { padding: 17px; border-radius: 6px; background: #faf7fc; font-family: var(--mono); color: #796082; font-size: 11px; line-height: 1.9; overflow: auto; max-height: 600px; margin-top: 20px; }
 .artifact-metadata { font-family: var(--mono); color: #ad95b5; font-size: 9px; line-height: 1.9; padding-top: 17px; border-top: 1px dashed #e3d7e9; }
@@ -532,6 +539,13 @@ details pre { background: #fbf8fc; padding: 14px; border-radius: 6px; max-height
   .workspace-content.has-selected-ticket { flex-direction: column; }
   .workspace-content.has-selected-ticket > .activity-panel { display: block; width: 100%; border-left: 0; border-top: 1px solid #e4e3ed; margin: 31px 0 0; padding: 22px 0 0; }
   .conversation-column { max-width: 760px; margin: 0 auto; width: 100%; }
+  /* An open ticket may exceed the viewport through its intrinsic flex
+     minimum. Keep the full evidence visible instead of forcing horizontal
+     scrolling or hiding the activity/summary column. */
+  .workspace-content.has-selected-ticket > .conversation-column { flex: 1 1 0; min-width: 0; max-width: 100%; }
+  .workspace-content.has-selected-ticket > .activity-panel { min-width: 0; }
+  .detail-top { min-width: 0; flex-wrap: wrap; row-gap: 8px; }
+  .ticket-id { min-width: 0; overflow-wrap: anywhere; }
   .workspace-content { padding-top: 35px; }
   .ticket-scroll { max-height: 350px; }
   .workspace-header { padding: 0 28px; }
@@ -673,6 +687,7 @@ details pre { background: #fbf8fc; padding: 14px; border-radius: 6px; max-height
   .detail-actions { gap: 8px; }
   .artifact-grid { grid-template-columns: 1fr; }
   .artifact-viewer { padding: 14px; }
+  .artifact-grid { grid-template-columns: minmax(0, 1fr); }
   .artifact-content { font-size: 10px; padding: 12px; max-width: 100%; }
   .connection-banner { padding: 10px 17px; font-size: 10px; }
   .loom-app > .connection-banner { min-height: 45px; }

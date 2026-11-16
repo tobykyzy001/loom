@@ -6,6 +6,7 @@ mod direct_offer;
 pub mod inventory;
 pub mod inventory_probe;
 mod maintenance;
+mod model_observation;
 mod node_api;
 pub mod pipeline;
 pub(crate) mod store;

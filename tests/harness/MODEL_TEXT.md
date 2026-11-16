@@ -41,6 +41,24 @@ Verified reference run:
 
 The harness independently retrieves the stored result bytes and verifies the hash. It reads the actual agent messages and ordinary session/log evidence. Unit tests separately cover default-off, wrong read/write grant, wrong selector/node, absent public provider functions, image-vs-text confusion and prepared-call shape. They do not replace the real SDK proof.
 
+## Persisted model observation and real browser evidence
+
+Current SQLite schema6 stores a narrowly scoped `model_observations` row **together with the actual Artifact**, not a general Model Registry. Only a `loom.model-ref.v1` matching the producing Node/Assignment, original versioned provider/model, actual result SHA and current Ticket's original `invoke_text` Grant is normalized. Non-matching models/resources/grants, bad hash, image modalities or claiming that the deterministic stub was a live LLM are refused. This means subsequent clients can understand the run rather than merely seeing a model name.
+
+`GET /tickets/{id}` then produces `model_observation` with the original immutable Artifact hash/IDs, `source: host_reported`, optional actual Session UUID, bounded observation timestamps and `grant_current` calculated at read time. After explicit revocation, this last value becomes false while the completed Task, historical Artifact and real SDK report are preserved. It does not carry `active`, `activated`, `installed` or new-provider authority. These are host reports alongside concrete registered bytes; the controller has not independently certified an arbitrary commercial LLM.
+
+The latest full command `node tests/harness/real-model-text.mjs --browser` proved those relationships and then loaded the same real history in Vue on a new local Edge profile. It matched the actual ID/sha, opened the response and verified that its `dsh_llm_stream` JSON exactly agrees with the host result. Desktop and 390px viewport no-overflow checks passed, with node/read/write grant status unaffected by raw `model_text` display. A separately verified Ticket run had:
+
+- ticket `tkt_801eb367f47849f8b7fd193ce0429424`,
+- Artifact `3a222442-f168-4878-88cc-953b9f9a86cd`, SHA `4ab8dc69681066b1b3e53e5b22d86017d1424202ac5fc36f4cf0d7ecd4966502`,
+- Session `3e2f2631-1187-46aa-a375-3723e34569be`,
+- revoked Grant shown as historical, not current permission,
+- `BROWSER_MODEL_OBSERVATION_PASS` before cleanup.
+
+Screenshots are from that actual Edge run, not composed UI examples: `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-dsh-8DHnKP/model-observation-desktop.png` and `.../model-observation-narrow.png`. The proof summary is in that root's `model-observation-ui.json`. The existing 26 Vue unit tests and TypeScript production build also passed. Long IDs, long artifact cards and many text lines remain visible rather than being clipped to satisfy screenshots.
+
+This narrow browser validation is not a physical mobile device, touch/lockscreen/internet-switch test, nor a substitute for the whole live-provider lifecycle.
+
 ## Deliberate limitations / NOT RUN
 
 - Natural-language model usefulness/quality, real provider inference, billing/credentials and cross-provider portability are not proven.

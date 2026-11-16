@@ -1,6 +1,6 @@
 export type Page = 'conversation' | 'activity' | 'devices' | 'projects' | 'memories' | 'access' | 'help'
 export type ProjectMode = 'read_only' | 'read_write'
-export type TicketKind = 'read_summary' | 'edit_file'
+export type TicketKind = 'read_summary' | 'edit_file' | 'model_text'
 export type TicketStatus =
   | 'pending'
   | 'running'
@@ -120,6 +120,28 @@ export interface Ticket {
   cancel_requested?: boolean
   grant_digest?: string
   approval?: ApprovalRequest | null
+  model_observation?: ModelObservation | null
+}
+
+export interface ModelObservation {
+  schema: 'loom.model-observation.v1'
+  artifact_id: string
+  ticket_id: string
+  assignment_id: string
+  origin_node_id: string
+  provider: string
+  model: string
+  input_modalities: string[]
+  source: 'host_reported'
+  execution_observed: boolean
+  output_observed: boolean
+  not_live_llm: boolean | null
+  observed_at: string
+  recorded_at: string
+  grant_id: string
+  operation: 'invoke_text'
+  grant_current: boolean
+  session_id?: string
 }
 
 export interface ApprovalRequest {

@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 5 {
+        if current > 6 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 5)"
+                "database schema is from a newer Loom release (found {current}, supported 6)"
             )
         }
         if current == 0 {
@@ -110,6 +110,24 @@ impl Store {
                 nonce TEXT NOT NULL UNIQUE,recipient_public_key TEXT NOT NULL,definition_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,UNIQUE(ticket_id,lease_epoch)
             ); PRAGMA user_version=5;")?;
+        }
+        if current < 6 {
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS model_observations(
+                    artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id),
+                    artifact_sha256 TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL REFERENCES tickets(id),
+                    assignment_id TEXT NOT NULL,origin_node_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,model TEXT NOT NULL,
+                    input_modalities TEXT NOT NULL,source TEXT NOT NULL,
+                    execution_observed INTEGER NOT NULL,output_observed INTEGER NOT NULL,
+                    not_live_llm INTEGER,grant_id TEXT NOT NULL REFERENCES grants(id),
+                    operation TEXT NOT NULL,observed_at TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,session_id TEXT,observation_kind TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS model_observations_ticket ON model_observations(ticket_id);
+                PRAGMA user_version=6;"
+            )?;
         }
         Ok(())
     }
@@ -408,7 +426,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);
@@ -431,5 +449,10 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM direct_offers", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+        let observations: i64 = reopened
+            .conn()
+            .query_row("SELECT COUNT(*) FROM model_observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(observations, 0);
     }
 }

@@ -12,6 +12,7 @@ const root = await fixtureRoot(process.env.LOOM_MODEL_TEXT_ROOT)
 let host, server, admin
 const secrets = []
 const checks = []
+const browserAccepted = process.argv.includes('--browser')
 const log = (name, evidence) => { checks.push({ name, status: 'PASS', evidence }); console.log('PASS model_text: ' + name) }
 try {
   const { executable, cli } = installation()
@@ -87,6 +88,24 @@ try {
   assert.equal(meta.model_ref.grant.id, invoke.id)
   assert.equal(meta.model_ref.grant.operation, 'invoke_text')
   assert.equal(meta.model_ref.artifact_sha256, supplied.sha256)
+  const observation = completed.model_observation
+  assert.equal(observation?.schema, 'loom.model-observation.v1')
+  assert.equal(observation.provider, 'loom-stub')
+  assert.equal(observation.model, 'loom-stub-v1')
+  assert.equal(observation.artifact_id, supplied.id)
+  assert.equal(observation.artifact_sha256, supplied.sha256)
+  assert.equal(observation.ticket_id, taskId)
+  assert.equal(observation.assignment_id, completed.assignments[0].id)
+  assert.equal(observation.origin_node_id, node.id)
+  assert.equal(observation.source, 'host_reported')
+  assert.deepEqual(observation.input_modalities, ['text'])
+  assert.equal(observation.execution_observed, true)
+  assert.equal(observation.output_observed, true)
+  assert.equal(observation.not_live_llm, true)
+  assert.equal(observation.grant_id, invoke.id)
+  assert.equal(observation.operation, 'invoke_text')
+  assert.equal(observation.grant_current, true)
+  assert.equal(observation.session_id, sessionId)
   const sourceNodes = (await admin.get('/api/v1/nodes')).nodes.find((entry) => entry.id === node.id)
   assert.equal(sourceNodes.revoked_at, null)
   const callers = readFileSync(join(root, 'private', 'fixture-control.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
@@ -110,7 +129,28 @@ try {
   assert.deepEqual(list.effects, [])
   assert.equal((await admin.get(`/api/v1/tickets/${taskId}/artifacts/${supplied.id}`)).content, firstBytes.toString('utf8'))
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'node-state', 'dsh-session-map.json'), 'utf8')).assignments.filter((entry) => entry.assignment_id === completed.assignments[0].id).map((entry) => entry.session_id), [sessionId])
+  assert.equal(list.model_observation?.session_id, sessionId)
+  assert.equal(list.model_observation?.artifact_id, supplied.id)
+  await admin.post(`/api/v1/grants/${invoke.id}/revoke`, {})
+  const afterRevoke = await admin.get(`/api/v1/tickets/${taskId}`)
+  assert.equal(afterRevoke.model_observation?.grant_current, false)
+  assert.equal(afterRevoke.model_observation?.provider, 'loom-stub')
+  assert.equal(afterRevoke.model_observation?.model, 'loom-stub-v1')
+  assert.equal(afterRevoke.model_observation?.not_live_llm, true)
+  assert.equal(afterRevoke.status, 'succeeded')
+  assert.equal(afterRevoke.artifacts.length, 1)
+  if (browserAccepted) {
+    const { verifyModelObservationBrowser } = await import('../browser/model-observation.mjs')
+    const browserResult = await verifyModelObservationBrowser({ server, taskId, root })
+    assert.equal(browserResult.actual_dsh_model_observation, true)
+    assert.equal(browserResult.grant_revoked_history_visible, true)
+    assert.equal(browserResult.related_artifact_verified, true)
+    assert.equal(browserResult.narrow_viewport_no_overflow, true)
+    log('actual browser observes only the already executed model history and its linked real Artifact', browserResult)
+  }
   log('actual SDK catalogue + exact generation + real text Artifact and session recovered without new invocation', {
+    observation_persisted: true, observation_is_host_reported: true,
+    revoke_preserves_historical_observation: true, revoked_observation_is_not_standing_grant: true,
     task_id: taskId, assignment_id: completed.assignments[0].id, artifact_id: supplied.id, sha256: supplied.sha256,
     session_id: sessionId, model: 'loom-stub-v1', provider: 'loom-stub', operation: 'invoke_text',
     no_file_effects: true, no_actual_llm: true, software_invocation_observed: true,
