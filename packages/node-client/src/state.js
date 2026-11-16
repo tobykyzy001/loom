@@ -7,7 +7,7 @@ const EMPTY = { version: 1, outbox: [], assignments: {}, completions: {} }
 export class NodeState extends EventEmitter {
   static async open(stateDir) {
     const state = new NodeState(join(stateDir, 'node-state.json'))
-    const data = await readJson(state.file, EMPTY)
+    const data = await readJson(state.file, structuredClone(EMPTY))
     if (data.version !== 1 || !Array.isArray(data.outbox) || typeof data.assignments !== 'object' || typeof data.completions !== 'object') {
       throw new Error('Invalid persistent Loom node state')
     }
@@ -46,7 +46,12 @@ export class NodeState extends EventEmitter {
       const existing = data.outbox.find((item) => item.kind === kind && item.digest === digest)
       if (existing) return existing
       const delivered = data.deliveries?.find((item) => item.kind === kind && item.digest === digest)
-      if (delivered) return { ...delivered, duplicate: true, persisted: true }
+      if (delivered) {
+        if (canonical(delivered.body) !== canonical(body)) throw new Error('Cannot replay a different body with the same logical digest')
+        const item = { kind, body: delivered.body, digest, attempts: 0, next_attempt_at: new Date(now).toISOString(), last_error: null }
+        data.outbox.push(item)
+        return item
+      }
       const item = { kind, body, digest, attempts: 0, next_attempt_at: new Date(now).toISOString(), last_error: null }
       data.outbox.push(item); return item
     })

@@ -51,6 +51,7 @@ export class LoomNodeClient {
       artifact_ids, cancel_acknowledged: requestedState === 'cancelled' }
     if (leaseEpoch === undefined) delete body.lease_epoch
     const digest = this.logicalDigest(body)
+// Persist the exact signed node identity and centered report association.
     return this.state.enqueue('report', body, { digest })
   }
   async artifact({ ticketId, artifactId, assignmentId, leaseEpoch, metadata, bytes, signal }) {

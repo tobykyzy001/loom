@@ -44,7 +44,7 @@ export class LocalNodeRunner {
   async pollAndRun() {
     const assignment = await this.client.poll({ lastAssignmentId: this.lastAssignmentId })
     if (!assignment) return { status: 'idle' }
-    if (assignment.cancel_requested && assignment.id) {
+    if ((assignment.cancel_requested === true || assignment.cancel_requested === 1) && assignment.id) {
       const previous = this.state.data.assignments[assignment.id]
       await this.state.mutate((data) => { data.assignments[assignment.id] = { ...previous, ...assignment, cancel_requested: true } })
       this.active.get(assignment.id)?.abort(new Error('Center cancellation requested'))
@@ -103,6 +103,7 @@ export class LocalNodeRunner {
   async assertApprovedRoot(assignment, grant) {
     const mapping = this.options.projectRoots?.[assignment.project_id]
     if (!mapping) throw new Error('No locally configured ProjectId-to-root mapping; refusing to execute')
+    if (resolve(grant.project_root || grant.root || '') !== resolve(mapping)) throw new Error('Center Grant root does not match this node\'s exact approved local project mapping')
     const [approved, configured] = await Promise.all([realpath(grant.project_root || grant.root), realpath(mapping)])
     const allowed = (root) => isAbsolute(root) && root !== sep && root !== resolve(process.env.HOME || '__none__')
     if (!allowed(approved) || !allowed(configured) || approved !== configured) {

@@ -1161,8 +1161,8 @@ pub(crate) async fn report(
     let at = now();
     let tx = store.conn_mut().transaction()?;
     tx.execute(
-        "INSERT INTO reports(id,assignment_id,ticket_id,node_id,lease_epoch,request_id,state,summary,evidence,session_ref,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-        params![report_id,assignment,ticket,node,epoch,request_id,requested_state,body["summary"].as_str().unwrap_or("No summary"),body["evidence"].to_string(),body["session_ref"].as_str(),at],
+        "INSERT INTO reports(id,assignment_id,ticket_id,node_id,lease_epoch,request_id,state,summary,evidence,session_ref,cancel_acknowledged,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        params![report_id,assignment,ticket,node,epoch,request_id,requested_state,body["summary"].as_str().unwrap_or("No summary"),body["evidence"].to_string(),body["session_ref"].as_str(), requested_state == "cancelled",at],
     )?;
     for effect in effects {
         tx.execute(

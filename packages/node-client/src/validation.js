@@ -45,8 +45,12 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
 }
 export function envelope(identity, requestId) {
   const source = identity.identity || identity
-  return { protocol: 'loom.node.v1', node_id: source.node_id || source.data?.node_id,
-    installation_id: source.installation_id || source.data?.installation_id, request_id: requestId }
+  const nodeId = identity.nodeId || source.node_id || source.nodeId || source.data?.node_id
+  const installationId = identity.installationId || source.installation_id || source.installationId || source.data?.installation_id
+  if (typeof nodeId !== 'string' || !/^[a-f0-9]{64}$/.test(nodeId) || typeof installationId !== 'string' || !installationId) {
+    throw new TypeError('Node envelope requires an enrolled persistent node identity')
+  }
+  return { protocol: 'loom.node.v1', node_id: nodeId, installation_id: installationId, request_id: requestId }
 }
 export function nonNegative(value, name, max = 3600) {
   if (!Number.isSafeInteger(value) || value < 0 || value > max) throw new TypeError(`${name} must be an integer from 0 to ${max}`)

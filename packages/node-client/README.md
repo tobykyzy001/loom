@@ -7,18 +7,28 @@ A dependency-free ESM M0 outbound client, identity/outbox store, and determinist
 Use an absolute `stateDir` explicitly reserved for the test or isolated plugin instance. The initial registration needs a one-use enrollment code obtained by the coordinator's client-token-authenticated administrative API.
 
 ```sh
-LOOM_BASE_URL=http://127.0.0.1:8765 \
-LOOM_CLIENT_TOKEN=<synthetic-test-token> \
-LOOM_ARTIFACT_DIR=<temporary-working-directory>/artifacts \
+# Synthetic protocol regression, then spawn an isolated real Rust Concierge and actual Node execution.
 node scripts/verify-baseline.mjs
+
+# Equivalent real-only command; writes a credential-free JSON result to a temporary directory.
+node scripts/run-real-integration.mjs
+
+# Alternatively, connect to a caller-managed loopback server only.
+LOOM_BASE_URL=http://127.0.0.1:8787 \
+LOOM_CLIENT_TOKEN=<synthetic-test-token> \
+node scripts/run-real-integration.mjs
 ```
 
-The runner's shared client is available for coordinator integration after the Rust server fields stabilize:
+The real runner uses `target/debug/loom` if present, otherwise `cargo run -p loom-concierge --bin loom --`, and isolates its center/node/project entirely below a new temporary directory. `LOOM_SERVER_CMD` is an optional **direct command with arguments, not a shell script**; `LOOM_TARGET_BINARY` can select a specific binary. The short-lived test client token is set only in the child environment, never put in its arguments or JSON result. The test terminates its child server; it neither installs nor launches DSH and never reads or changes a user Profile.
+
+Registration defaults to `workerId: 'default'`, matching ordinary Rust ticket placement. Other workers and remote registrations must be explicit. `projectRoots: { [projectId]: root }` declares the host-owned mapping in the heartbeat. The administrator separately approves that exact mapping with `/api/v1/project-bindings`; neither Grant nor Ticket can substitute cwd, `$HOME` or another locally discovered path for the approved root.
 
 ```js
 import { LocalNodeRunner, ControlledFileExecutor } from '@loom/node-client'
-const node = await LocalNodeRunner.create({ baseUrl, stateDir, artifactDir, enrollmentCode })
-await node.tick() // authenticated outbound HTTP only
+const node = await LocalNodeRunner.create({ baseUrl, stateDir, artifactDir, enrollmentCode,
+  projectRoots: { [projectId]: '/absolute/explicit/isolated/project' },
+  registration: { workerId: 'default', harnessKind: 'local-http', profileId: 'isolated' } })
+await node.tick() // authenticated outbound HTTP only; drain the outbox and inspect authoritative Ticket state
 ```
 
 No environment profile, working-directory guard, or external npm package supplies authorization. Assignment+Grant are checked for node identity, lease/Grant version, project, operation and expiry. The local executor only handles deterministic `read_summary` and `edit_file` under an explicitly granted test project. Paths are real, non-symlink project directories; ordinary file size is limited to 1 MiB. Edits use same-directory atomic rename. Read effects do not modify project files. Atomic rename is not inverse rollback, `fsync`, or crash-atomic database semantics.

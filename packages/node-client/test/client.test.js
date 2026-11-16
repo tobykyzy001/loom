@@ -68,8 +68,10 @@ test('outbox dedupes same body, persists exact request ID and requeues after net
   assert.equal(requests.at(-1).requested_state, 'unknown')
   assert.equal(loaded.data.deliveries[0].body.request_id, original.body.request_id)
   assert.equal(loaded.outbox.length, 0)
-  const duplicateDelivery = await restored.report(report)
-  assert.equal(duplicateDelivery.duplicate, true)
+  const duplicateDelivery = await loaded.enqueue('report', loaded.data.deliveries[0].body)
+  assert.equal(duplicateDelivery.body.request_id, original.body.request_id, 'Logical callback replay must retain request ID')
+  assert.equal(loaded.outbox.length, 1)
+  await restored.dispatchOutbox()
   assert.equal(loaded.outbox.length, 0)
   await assert.rejects(() => restored.report({ ...report, state: 'succeeded', artifacts: [{ name: 'id missing' }] }), /non-empty string IDs/)
   assert.equal(requests[0].request_id, requests[1].request_id)
@@ -111,6 +113,18 @@ test('controlled executor performs read and atomic write only within fixture pro
   assert.throws(() => requireIsolatedRoot('/'))
   assert.throws(() => requireIsolatedRoot('.'))
   assert.equal(requireIsolatedRoot(join(root, 'state')), join(root, 'state'))
+})
+
+test('two fresh isolated NodeState stores never share mutable outbox or identity-bound messages', async () => {
+  const root = await fixture()
+  const one = await NodeState.open(join(root, 'one'))
+  const two = await NodeState.open(join(root, 'two'))
+  await one.enqueue('report', { assignment_id: 'other-node-assignment', requested_state: 'cancelled' })
+  assert.equal(one.data.outbox.length, 1)
+  assert.deepEqual(two.data.outbox, [])
+  assert.notEqual(one.data, two.data)
+  const restored = await NodeState.open(join(root, 'two'))
+  assert.deepEqual(restored.data.outbox, [], 'Another isolated node replayed another node\'s report')
 })
 
 test('restart converts pending completion to unknown and never executes duplicate side effect', async () => {

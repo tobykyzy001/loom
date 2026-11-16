@@ -36,7 +36,9 @@ try {
   })
   let node
   await check('Ed25519 challenge, single-use enrollment, registration and heartbeat', async () => {
-    node = await LocalNodeRunner.create({ baseUrl: syntheticUrl, stateDir, artifactDir, enrollmentCode })
+    node = await LocalNodeRunner.create({ baseUrl: syntheticUrl, stateDir, artifactDir, enrollmentCode,
+      projectRoots: { [project.id]: project.root },
+      registration: { workerId: 'local-fixture-worker', harnessKind: 'local-fixture', profileId: 'isolated' } })
     expect(synthetic.nodes.get(node.nodeId).heartbeat === 'online', 'heartbeat was not stored')
     return { node_id: node.nodeId, installation_id: node.installationId, identity_persisted: true }
   })
@@ -60,11 +62,12 @@ try {
   await check('idempotent duplicate callback has stable request ID and no duplicate side effects', async () => {
     const before = [...synthetic.artifacts.values()].length
     const delivered = node.state.data.deliveries.find((item) => item.kind === 'report')
-    const deliveredReplay = await node.http.post('/api/v1/nodes/reports', delivered.body, { token: node.client.token })
+    const deliveredReplay = await node.http.post('/api/v1/nodes/reports', delivered.body, { token: node.identity.token })
     expect(deliveredReplay.duplicate === true, 'exact callback replay was not accepted as a server duplicate')
     await node.state.enqueue('report', delivered.body)
     const delivery = await node.client.dispatchOutbox()
-    expect(delivery.length === 0, 'delivered logical callback should not be requeued after restart')
+    expect(delivery.some((item) => item.status === 'replay_delivered'), 'exact persistent callback replay was not sent')
+    expect(delivery[0].requestId === delivered.body.request_id, 'replay changed stable request ID')
     expect(synthetic.tickets.get(ticket.id).reports.length === 1, 'report duplicated on synthetic server')
     expect(synthetic.artifacts.size === before, 'artifact was duplicated')
     return { duplicate_response: true, reports: 1, artifacts: before }
@@ -88,11 +91,13 @@ try {
     expect(value.status === 'cancel_acknowledged', 'pending cancellation did not return')
     expect(synthetic.tickets.get(cancelling.id).cancel_requested, 'intent was not preserved')
     await node.state.mutate((data) => { data.completions['restart-fixture'] = { assignment_id: 'restart-fixture', digest: 'x', state: 'running', summary: '', effects: [], artifacts: [] } })
-    const restoredNode = new LocalNodeRunner({ stateDir, artifactDir, baseUrl: syntheticUrl })
+    const restoredNode = new LocalNodeRunner({ stateDir, artifactDir, baseUrl: syntheticUrl,
+      projectRoots: { [project.id]: project.root },
+      registration: { workerId: 'local-fixture-worker', harnessKind: 'local-fixture', profileId: 'isolated' } })
     await restoredNode.start()
     expect(restoredNode.nodeId === node.nodeId, 'node identity changed during restart')
     expect(restoredNode.state.data.completions['restart-fixture'].state === 'unknown', 'unfinished restart effect was misreported')
-    expect(restoredNode.client.token === node.client.token, 'node token was not restored')
+    expect(restoredNode.identity.token === node.identity.token, 'node token was not restored')
     node = restoredNode
     return { cancellation_acknowledged: true, same_identity: true, recovered_effect: 'unknown', duplicate_execution: false }
   })

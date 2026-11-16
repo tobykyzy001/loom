@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current != 0 && current != 1 && current != 2 {
+        if current != 0 && current != 1 && current > 3 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 2)"
+                "database schema is from a newer Loom release (found {current}, supported 3)"
             )
         }
         if current == 0 {
@@ -61,7 +61,7 @@ impl Store {
             CREATE TABLE tickets(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),objective TEXT NOT NULL,kind TEXT NOT NULL,relative_path TEXT NOT NULL,content TEXT,status TEXT NOT NULL,grant_id TEXT NOT NULL REFERENCES grants(id),grant_digest TEXT NOT NULL,node_id TEXT NOT NULL,installation_id TEXT NOT NULL,worker_id TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,cancel_requested INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
             CREATE TABLE assignments(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),node_id TEXT NOT NULL,worker_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL UNIQUE,lease_epoch INTEGER NOT NULL,lease_expires_at TEXT NOT NULL,acknowledged_at TEXT,created_at TEXT NOT NULL,cancelled_at TEXT,last_report_at TEXT);
             CREATE TABLE artifacts(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),assignment_id TEXT NOT NULL,origin_node_id TEXT NOT NULL,name TEXT NOT NULL,media_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,storage_name TEXT NOT NULL,location TEXT NOT NULL,lineage TEXT NOT NULL,created_at TEXT NOT NULL);
-            CREATE TABLE reports(id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL,ticket_id TEXT NOT NULL,node_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,summary TEXT NOT NULL,evidence TEXT NOT NULL,session_ref TEXT,created_at TEXT NOT NULL,UNIQUE(assignment_id,request_id));
+            CREATE TABLE reports(id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL,ticket_id TEXT NOT NULL,node_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,summary TEXT NOT NULL,evidence TEXT NOT NULL,session_ref TEXT,cancel_acknowledged INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,UNIQUE(assignment_id,request_id));
             CREATE TABLE effects(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),assignment_id TEXT NOT NULL,node_id TEXT NOT NULL,attempt INTEGER NOT NULL,input_digest TEXT NOT NULL,status TEXT NOT NULL,evidence TEXT NOT NULL,artifacts TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(id,node_id));
             CREATE TABLE requests(node_id TEXT NOT NULL,route TEXT NOT NULL,request_id TEXT NOT NULL,payload_digest TEXT NOT NULL,response TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(node_id,route,request_id));
             CREATE TABLE preferences(ticket_id TEXT PRIMARY KEY,expanded INTEGER NOT NULL,sender_filter TEXT,updated_at TEXT NOT NULL);
@@ -78,12 +78,15 @@ impl Store {
             CREATE TABLE candidates(id TEXT PRIMARY KEY,kind TEXT NOT NULL,scope TEXT NOT NULL,content TEXT NOT NULL,source_refs TEXT NOT NULL,status TEXT NOT NULL,version INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
             CREATE TABLE audits(sequence INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id TEXT,actor TEXT NOT NULL,action TEXT NOT NULL,evidence TEXT NOT NULL,previous_hash TEXT NOT NULL,hash TEXT NOT NULL,created_at TEXT NOT NULL);
             "#)?;
-            self.connection.execute("PRAGMA user_version=2", [])?;
+            self.connection.execute("PRAGMA user_version=3", [])?;
         }
         if current == 1 {
             self.connection.execute_batch("CREATE TABLE IF NOT EXISTS project_bindings(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),node_id TEXT NOT NULL,installation_id TEXT NOT NULL,worker_id TEXT NOT NULL,root_scope TEXT NOT NULL,binding_digest TEXT NOT NULL,approved_at TEXT NOT NULL,revoked_at TEXT);
             ALTER TABLE grants ADD COLUMN project_binding_id TEXT;
-            PRAGMA user_version=2;")?;
+            PRAGMA user_version=3;")?;
+        }
+        if current == 2 {
+            self.connection.execute_batch("ALTER TABLE reports ADD COLUMN cancel_acknowledged INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=3;")?;
         }
         Ok(())
     }
