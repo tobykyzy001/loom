@@ -22,6 +22,7 @@ Updated: 2026-11-17.
 16. `5320707` — explicit bounded hardware probe with real local Apple M5 Max/Metal 4 observations, missing/unknown boundaries, no model claim.
 17. `59aaee5` — real public-SDK text invocation with independent invoke_text permission, precise provider/model, source-bound response and replay/recovery proof.
 18. `f0e724b` — direct local peer Artifact handoff with recipient Ed25519 signatures, one-time nonces, current scope/cancel/Lease checks, raw-source hash lineage and additive v5 migration.
+19. `b79d7d6` — actual source/Artifact-scoped model observations, additive v6, Grant-revocation history and true Vue/Edge display plus 390px checks.
 
 Local commits are not pushed unless separately reported.
 
