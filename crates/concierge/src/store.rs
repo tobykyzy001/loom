@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 6 {
+        if current > 7 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 6)"
+                "database schema is from a newer Loom release (found {current}, supported 7)"
             )
         }
         if current == 0 {
@@ -129,6 +129,34 @@ impl Store {
                 PRAGMA user_version=6;"
             )?;
         }
+        if current < 7 {
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS skill_replays(
+                    candidate_id TEXT PRIMARY KEY REFERENCES candidates(id),
+                    source_ticket_id TEXT NOT NULL REFERENCES tickets(id),
+                    source_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+                    grant_id TEXT NOT NULL REFERENCES grants(id),
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    node_id TEXT NOT NULL, installation_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+                    replay_ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id),
+                    replay_artifact_id TEXT UNIQUE REFERENCES artifacts(id),
+                    expected_sha256 TEXT NOT NULL, expected_sample TEXT NOT NULL,
+                    sample_digest TEXT NOT NULL, status TEXT NOT NULL,
+                    reason TEXT, definition_json TEXT NOT NULL,
+                    grant_revocation_denied_at TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, verified_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS skill_replays_source ON skill_replays(source_ticket_id,source_artifact_id);
+                CREATE TABLE IF NOT EXISTS skills(
+                    id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL UNIQUE REFERENCES candidates(id),
+                    scope TEXT NOT NULL, kind TEXT NOT NULL, source_ticket_id TEXT NOT NULL REFERENCES tickets(id),
+                    source_artifact_id TEXT NOT NULL REFERENCES artifacts(id), replay_ticket_id TEXT NOT NULL REFERENCES tickets(id),
+                    replay_artifact_id TEXT NOT NULL REFERENCES artifacts(id), grant_id TEXT NOT NULL REFERENCES grants(id),
+                    definition_json TEXT NOT NULL, proof_json TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                PRAGMA user_version=7;"
+            )?;
+        }
         Ok(())
     }
     pub fn conn(&self) -> &Connection {
@@ -152,7 +180,14 @@ impl Store {
     pub fn get(&self, table: &str, key: &str) -> Result<Option<Value>> {
         if !matches!(
             table,
-            "projects" | "grants" | "nodes" | "tickets" | "assignments" | "artifacts" | "memories"
+            "projects"
+                | "grants"
+                | "nodes"
+                | "tickets"
+                | "assignments"
+                | "artifacts"
+                | "memories"
+                | "candidates"
         ) {
             anyhow::bail!("unknown entity")
         };
@@ -426,7 +461,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);
@@ -454,5 +489,15 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM model_observations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(observations, 0);
+        let replay_tables: i64 = reopened
+            .conn()
+            .query_row("SELECT COUNT(*) FROM skill_replays", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(replay_tables, 0);
+        let skills: i64 = reopened
+            .conn()
+            .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(skills, 0);
     }
 }

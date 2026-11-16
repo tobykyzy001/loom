@@ -342,7 +342,13 @@ pub fn observation_candidate(store: &Store, body: &Value) -> Result<Value> {
     let fingerprint =
         hash(&json!({"project_id":project,"kind":body["kind"],"value":value}).to_string());
     let expires = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
-    store.conn().execute("INSERT INTO observations(id,fingerprint,scope,occurrences,source_refs,expires_at,created_at) VALUES(?1,?2,?3,1,?4,?5,?5) ON CONFLICT(fingerprint) DO UPDATE SET occurrences=occurrences+1",params![crate::id("observation"),fingerprint,project,body["source_refs"].to_string(),expires])?;
+    let changed = store.conn().execute(
+        "UPDATE observations SET occurrences=occurrences+1,source_refs=?2 WHERE fingerprint=?1",
+        params![fingerprint, body["source_refs"].to_string()],
+    )?;
+    if changed == 0 {
+        store.conn().execute("INSERT INTO observations(id,fingerprint,scope,occurrences,source_refs,expires_at,created_at) VALUES(?1,?2,?3,1,?4,?5,?5)",params![crate::id("observation"),fingerprint,project,body["source_refs"].to_string(),expires])?;
+    }
     let row = store
         .query(
             "SELECT * FROM observations WHERE fingerprint=?1",
@@ -386,23 +392,100 @@ pub fn review_candidate(store: &Store, candidate_id: &str, body: &Value) -> Resu
         bail!("do_not_suggest state is retained as audit but suppresses duplicate candidates")
     }
     if action == "accept" {
+        if candidate["status"] != "pending" {
+            bail!("Only a pending candidate can be accepted once; repeat review creates no authority or extra memory/skill record");
+        }
         let content: Value = serde_json::from_str(candidate["content"].as_str().unwrap_or("{}"))?;
         let kind = candidate["kind"].as_str().unwrap_or("memory");
-        if kind == "skill" && body["replay_verified"].as_bool() != Some(true) {
-            bail!("A Skill cannot become verified before sample replay; store candidate remains pending.")
+        store.conn().execute("BEGIN IMMEDIATE", [])?;
+        let result = (|| -> Result<Value> {
+            if kind == "skill" {
+                // The body boolean never matters. Byte-for-byte proof is reread from
+                // both actual immutable artifacts at this exact acceptance boundary.
+                let (replay, proof) =
+                    crate::skill_replay::verified_for_accept(store, candidate_id)?;
+                let summary = content["content"]
+                    .as_str()
+                    .unwrap_or("Bounded deterministic read_summary");
+                if summary.len() > 500
+                    || summary.contains("http://")
+                    || summary.contains("https://")
+                    || summary.contains("private_key")
+                    || summary.contains("SECRET")
+                    || summary.contains("api_key")
+                {
+                    bail!("Only a bounded public skill summary can be attached to replay evidence");
+                }
+                if let Some(extra) = body["content"].as_str() {
+                    let supplied = body
+                        .get("content")
+                        .map(Value::to_string)
+                        .unwrap_or_default();
+                    if extra.len() > 500
+                        || extra.contains("private_key")
+                        || extra.contains("SECRET")
+                        || extra.contains("api_key")
+                        || extra.contains("http://")
+                        || extra.contains("https://")
+                        || supplied.len() > 1024
+                    {
+                        bail!("Unbounded/private client metadata is forbidden in a Skill record");
+                    }
+                }
+                let definition = json!({"schema":"loom.skill-definition.v1","operation":"read_summary","summary":summary,
+                    "scope":candidate["scope"],"replay_candidate_id":candidate_id,"general_workflow":false});
+                let skill_id = crate::id("skill");
+                store.conn().execute(
+                    "INSERT INTO skills(id,candidate_id,scope,kind,source_ticket_id,source_artifact_id,replay_ticket_id,replay_artifact_id,grant_id,definition_json,proof_json,created_at) VALUES(?1,?2,?3,'skill',?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![skill_id,candidate_id,candidate["scope"].as_str(),replay["source_ticket_id"].as_str(),replay["source_artifact_id"].as_str(),replay["replay_ticket_id"].as_str(),replay["replay_artifact_id"].as_str(),replay["grant_id"].as_str(),definition.to_string(),proof.to_string(),crate::now()],
+                )?;
+                store.audit(None,"client","candidate.skill.accepted",&json!({"candidate_id":candidate_id,"skill_id":skill_id,
+                    "source_artifact_sha256":proof["sha256"],"replay_artifact_sha256":proof["sha256"],
+                    "grant_created":false,"standing_permission":false,"memory_created":false}))?;
+            } else {
+                // Legacy Memory review flow remains unchanged and never consults a Skill proof.
+                store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at) VALUES(?1,?2,?3,?4,1,?5,?5)",params![crate::id("memory"),content["project_id"].as_str(),body["content"].as_str().or_else(||content["content"].as_str()).unwrap_or("Reviewed workflow"),candidate["scope"].as_str(),crate::now()])?;
+                store.audit(
+                    None,
+                    "client",
+                    "candidate.accepted",
+                    &json!({"candidate_id":candidate_id,"grant_created":false}),
+                )?;
+            }
+            store.conn().execute(
+                "UPDATE candidates SET status='accepted',updated_at=?1,version=version+1 WHERE id=?2 AND status='pending'",
+                params![crate::now(), candidate_id],
+            )?;
+            store.conn().execute("COMMIT", [])?;
+            Ok(store
+                .query("SELECT * FROM candidates WHERE id=?1", [candidate_id])?
+                .first()
+                .cloned()
+                .unwrap_or(json!(null)))
+        })();
+        match result {
+            Ok(updated) => Ok(updated),
+            Err(error) => {
+                let rollback = store.conn().execute("ROLLBACK", []);
+                match rollback {
+                    Ok(_) => Err(error),
+                    Err(failure) => {
+                        Err(error
+                            .context(format!("candidate acceptance rollback failed: {failure}")))
+                    }
+                }
+            }
         }
-        store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at) VALUES(?1,?2,?3,?4,1,?5,?5)",params![crate::id("memory"),content["project_id"].as_str(),body["content"].as_str().or_else(||content["content"].as_str()).unwrap_or("Reviewed workflow"),candidate["scope"].as_str(),crate::now()])?;
-        store.conn().execute(
-            "UPDATE candidates SET status='accepted',updated_at=?1,version=version+1 WHERE id=?2",
-            params![crate::now(), candidate_id],
-        )?;
-        store.audit(
-            None,
-            "client",
-            "candidate.accepted",
-            &json!({"candidate_id":candidate_id,"grant_created":false}),
-        )?;
     } else {
+        if action == "undo" {
+            if candidate["kind"] == "skill" && candidate["status"] != "accepted" {
+                bail!("Only an explicitly accepted Skill can be undone")
+            }
+            // Retraction is separate from proof. It does not repeat the Ticket or Grant.
+            store
+                .conn()
+                .execute("DELETE FROM skills WHERE candidate_id=?1", [candidate_id])?;
+        }
         let status = if action == "later" {
             "later"
         } else if action == "undo" {
@@ -414,6 +497,10 @@ pub fn review_candidate(store: &Store, candidate_id: &str, body: &Value) -> Resu
             "UPDATE candidates SET status=?1,updated_at=?2,version=version+1 WHERE id=?3",
             params![status, crate::now(), candidate_id],
         )?;
+        Ok(store
+            .query("SELECT * FROM candidates WHERE id=?1", [candidate_id])?
+            .first()
+            .cloned()
+            .unwrap_or(json!(null)))
     }
-    Ok(rows.first().cloned().unwrap_or(json!(null)))
 }

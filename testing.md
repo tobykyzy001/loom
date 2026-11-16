@@ -52,6 +52,7 @@ deploy/
 - `node tests/harness/real-delegation.mjs`：同一隔离 DSH Host 的实际父/子 Session、current Assignment Source 验证、原父产物到新 scoped Tool/File/Artifact 与实际父子关系、错误来源拒绝、重开无重复效果。详见 [harness/DELEGATION.md](harness/DELEGATION.md)。默认生产`unsupported`，此例零网络 Stub，不代表自然语言模型质量、物理第二机或任意 Harness。
 - `node tests/direct/loopback-handoff.mjs`：两台同机逻辑 Node之间的真实direct Artifact取源/签名/Grant与nonce不可复用。比较字节hash和父节点谱系，加入取消/stale grant/offline等负例，实测14个断言。见[direct/README.md](direct/README.md)。是同机回环的基础传输证明，不是物理第二机、任意路由、公网/TLS或大文件对账保证。
 - `node tests/harness/real-model-text.mjs --browser`：真正的SDK文本调用、原`invoke_text` Grant和受限Artifact观察入库；renovate撤销后再看只读历史。真实Edge中检查模型观察/撤回、同Ticket Artifact hash和二开响应，发现长内容溢出会失败；不是完整模型目录、真实LLM或移动真机认证。配限方见 [harness/MODEL_TEXT.md](harness/MODEL_TEXT.md)。无`--browser`时只核对原执行和API观察。
+- `node tests/skills/read-replay.mjs`：真实Worker原Grant/Lease下，将read_summary样本重新执行并逐字比较新/老Artifact SHA；refuse客户端自报replay_verified、错误source/root/Grant、撤销后首答。新Skill和偏好Memory分开，永不成为新的持续权限或通用代码运行器。验证入口为[skills/README.md](skills/README.md)；原数据迁移到schema7与早期 ticket/Artifact/audit继续不变。
 - `node scripts/document-pipeline.mjs`：受限原授权两阶段文件转换、`/run`、幂等和中心恢复；不是 M3 通用长图/大规模 Artifact 转运。
 - `node tests/browser/run.mjs --narrow-viewport --keep-evidence`：实际安装的桌面Edge上完成原生Work Space的注册、Grant、读写/效应、取消及窄视口检查。它不是手机、锁屏或iOS/Android真机验证。
 

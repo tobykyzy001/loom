@@ -428,6 +428,10 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
         .route("/audit/verify", get(verify_audit))
         .route("/candidates", get(candidates).post(create_candidate))
         .route("/candidates/{id}", patch(review_candidate))
+        .route(
+            "/candidates/{id}/replay",
+            get(skill_replay).post(skill_replay_start),
+        )
         .route("/models", get(models))
         .route("/models/{id}/place", post(models))
         .route("/pipelines", get(list_pipelines).post(create_pipeline))
@@ -2212,8 +2216,11 @@ async fn models(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>>
 async fn candidates(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
     let rows = store.query("SELECT * FROM candidates ORDER BY created_at DESC", [])?;
+    let replay_proof = crate::skill_replay::list(&store)?;
     Ok(Json(
-        json!({"candidates":rows,"policy":"Observations are not permanent Memory or a Grant"}),
+        json!({"candidates":rows,"skill_replays":replay_proof["skill_replays"],"skills":replay_proof["skills"],
+                "policy":"Observations are not permanent Memory or a Grant; Skill proof is bounded exact deterministic read_summary only, never standing execution authority."}
+        ),
     ))
 }
 async fn create_candidate(
@@ -2234,6 +2241,25 @@ async fn review_candidate(
     Ok(Json(crate::maintenance::review_candidate(
         &store, &candidate, &body,
     )?))
+}
+
+async fn skill_replay_start(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(candidate): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::skill_replay::create_or_get(
+        &store, &candidate, &body,
+    )?))
+}
+
+async fn skill_replay(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(candidate): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::skill_replay::present(&store, &candidate)?))
 }
 
 fn hash_json(value: &Value) -> String {

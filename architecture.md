@@ -266,6 +266,16 @@ schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail�
 
 实际DSH SDK生文本、中心接收、原始Grant/Artifact及恢复后读取由`tests/harness/real-model-text.mjs`验证。模型报告本身是宿主报告，不是Conci erge独立验证任意商业LLM；Stub并不收费或触网。提供方功能、资源生命周期和质量评价仍分别NOT RUN。原任务详情只展示这个边界明确的观察，没有管理模型或浏览器读取Profile/凭据。
 
+### 3.7 受限技能候选与具体重放证明
+
+当前 `SkillCandidate` 与 `Memory` 不共用验收语义。只有**已真实执行过的一个确定性 `read_summary` 样本**可用于当前受限技能重放，不支持任意命令、脚本、HTTP connector、模型学成的通用技能或代理执行。`source_refs` 必须实际含该 source ticket，候选 project、原 Node/Installation/Worker、Grant digest/version、ProjectBinding及其声明 Root都要对应。
+
+`POST /api/v1/candidates/{id}/replay` 在原受信过程及当前权限存在时创建**另一个普通只读 Ticket**，带实时 Assignment/Lease，不复制原始Artifact。它只有等待执行的意义，不是原始标成 Skill 的工具。重放必须重新经过Node、原Grant/root-binding的普通任务流程及报告，产生不同UUID的采样Artifact；controller各自读真实存入字节重新计算hash，要求原内容与replay逐字相等并有确定`loom.synthetic_summary.v1`形态，才保留`loom.skill-replay.v1`验证证明。版本号与SQLite v7完全独立。
+
+Review时客户端`replay_verified:true`不构成证据。完整原source/新replay Assignment、node/worker/attempt/lease和ticket终态、stop意图以及candidate实际附着的source_refs都要一致。First acceptance前必须原Grant尚未撤销、当前Binding及匹配root/worker仍有效；已撤 Grant/Binding的过去replay可以提供历史说明，但**不能因此创建本新的技能审核记录**。已保存skills只是该条作业的proof索引，不是长期执行凭据。`undo`撤销该审核记录，不执行Grant回滚、不重复Task、不抹掉原Artifact或审计，而Memory accept保持独立工作路径。`verified_at`是第一次实际proof形成时间，不因GET刷新。
+
+[tests/skills/README.md](tests/skills/README.md) 的`node tests/skills/read-replay.mjs`真实运行了候选/回放/接收与改变输入不匹配、撤权与重启恢复。当前仍无通用技能runtime、记忆跳跃获授权、分布式技能分发或稳定Skills UI，不能把其视为M5全部完成。
+
 ## 4. 会话可见性与审计架构
 
 ### 4.1 默认简洁，过程可展开

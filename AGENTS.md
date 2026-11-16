@@ -135,7 +135,7 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 
 ## 6. Rust / Vue 实现原则
 
-当前 schema 为 v6；`cancel_requested` 和最终 cancel acknowledging/unknown effect 是不同事实。受限文档 `document_pipeline_runs/stages`、`direct_offers` 与 `model_observations` 保存阶段/原Grant/Ticket投影、直接交接nonce或已登记Artifact的受限模型观察，不是替代权限、目录、产物或完整模型注册/激活的权威。真实增量迁移前，都要保留已有Grant/Ticket/Artifact/审计记录。不得用导出的session_ref或url代替有效Assignment及Grant来源。新增对象仍要有明确的 Assignment/Lease/Grant 关联，不能把 nil/空 Project/Worker ID 当作有效资源权限。
+当前 schema 为 v7；`cancel_requested` 和最终 cancel acknowledging/unknown effect 是不同事实。受限文档 `document_pipeline_runs/stages`、`direct_offers`、`model_observations`、`skill_replays/skills` 保存阶段/原Grant/Ticket投影、直接交接nonce、已登记Artifact或逐项实证的模型与技能观察，不是替代权限、目录、产物、完整模型注册/激活或永久执行技能授权。Skill验证只支持约束内普通`read_summary`重放并由实际Worker输出验收，原始候选或`replay_verified`客户端布尔值不构成验证。`verified_at`是第一次通过证明的时间而不是任意GET观测时间。真实增量迁移前，都要保留已有Grant/Ticket/Artifact/审计记录。不得用导出的session_ref或url代替有效Assignment及Grant来源。新增对象仍要有明确的 Assignment/Lease/Grant 关联，不能把 nil/空 Project/Worker ID 当作有效资源权限。
 
 - Rust 将协议、领域逻辑、服务端和平台适配边界分层，避免 Center 与 Bare Agent 产生各自不同的 Ticket / Grant 定义。
 - Node Envelope 至少带协议版本、Node / Installation 身份、请求 / 幂等 ID、Ticket / Assignment / Lease 关联、时间与能力信息；具体字段以原型验证后固定。
