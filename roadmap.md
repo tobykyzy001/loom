@@ -45,7 +45,8 @@
 
 这并不等同于完整 M0 完成。下述状态在没有对应证据前均不能视为已完成：
 
-- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复；隔离 DSH Profile 的真实安装/Agent工具任务/取消/Session重启恢复也已验证，但这些仍不是完整 M0 业务与多端验收；
+- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复；隔离 DSH Profile 的真实安装/Agent工具任务/取消/Session重启恢复也已验证；独立真实桌面浏览器8阶段与受限 Agent 文件 Tool Effect亦有证据，但这些仍不是完整 M0 业务与多端验收；
+- 受限文档流水线已真实跑通（`read_summary` → 四种允许的文本变换之一 → `edit_file`），包含两张精确Grant 的下发、真实Artifact 接收转换、Node作用域校验、不可变谱系、重复执行保护和中心恢复。这里仍然只是当前受限场景，不能当作后面模型生命周期、任意 DAG、跨机部署、通用 Harness 或 M6 已完成；
 - 已有最小 Host / Project / ResourceBinding / Grant Registry 与 `loom.inventory.v1` 的事实矩阵、来源/freshness 和 PlacementDecision；尚无通用 Model Registry、真实模型生命周期、跨 Host 大 Artifact 直传和完整设备能力发现的全平台验证；
 - 已有版本化 Assignment/Lease、内容哈希与分配的 Artifact 上传，但没有跨机 Host 直连大文件传输或完整双向对账；
 - 已实现 Conversation/Activity/Collaboration 的默认折叠与 Ticket 展开；尚无真实 DSH 子 Agent 的完整会话委托和跨 Harness 过程一致性证据；

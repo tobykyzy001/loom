@@ -206,6 +206,19 @@ Host Agent
 
 该补充是在前述长期架构上的实现策略，不替代其他 Domain 定义，也不宣称 M1 全套能力已验收。实际验证入口与缺口见 [BASELINE.md](BASELINE.md) 与 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
 
+### 3.2 当前受限文档工作流的授权与恢复约束
+
+控制器目前支持一种受限、版本化的两阶段 Document Workflow，而不是通用的行业 Pipeline 或任意 `Command` Graph。它复用现有 Host ProjectBinding 和已授权的 Ticket 与 Lease：
+
+1. 校验两个实际 raw Grant、未撤销 ProjectBinding、ProjectId/Node/Installation/Worker 和所需 read/write operation，再创建授权的 `read_summary` Task。
+2. 只有原 Task 真正成功，且其 Artifact 身份、来源、SHA256 和受限存储的真实 bytes 均有效，才可能创建 `edit_file` 子任务。**客户端不在这两个对象之间新增 Grant**。
+3. 新 Assignment 也必须对应当前 ProjectBinding。下游文件执行器得到的受限 `artifact_input` 只包含已知 parent UUID、origin、source ticket、受控 Artifact location 以及真实 base64 bytes。Local Node 在副作用发生前验证源 hash 和引用，然后为自己的真实输出重新计算 hash；控制面再次校验 parents 与 known immutable dependency，禁止用客户声明的历史替代已验证谱系。
+4. SQLite v4增量保存 `document_pipeline_runs` 与 `document_pipeline_stages`：定义、stage↔rawGrant、真实Ticket链接及停止意图。原Ticket、Grant、Assignment/Epoch、Effect、Artifact和Report依然是任务权威，pipeline只保存检查点与展示投影。
+5. Unknown、Cancelled、Reconciling 的父阶段不能产生新 effect，且不自动重试。停止意图持久化，各 child 继续使用原有取消与恢复流程；不能改写已完成的文件结果，也不能把等待直接标成已结束。
+6. 当前仅支持 `docs/` 内相对文件和四类文本变换。DSH 与 Bare 在未验证共享的 source input 之前，必须拒绝而不是偷偷丢掉上游 provenance 并声称完成。
+
+所有类型与状态验证必须来自真实 HTTP 与文件 effect，不能因出现 `Pipeline` 类型和路由便推断通用工具或 Harness 已可执行。真实第二物理设备、Host直传、模型生命周期、Tauri/Mobile及其他Adapter需要另行验收。
+
 ## 4. 会话可见性与审计架构
 
 ### 4.1 默认简洁，过程可展开
