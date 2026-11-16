@@ -140,7 +140,7 @@ result.overall = failed || result.execution.rust_integration !== 'PASS' ? 'FAIL'
 result.finished_at = new Date().toISOString()
 const json = JSON.stringify(result, null, 2) + '\n'
 await writeFile(join(reportPath, 'verify-baseline-result.json'), json)
-const md = ['# Loom deterministic baseline result', '', `Overall **${result.overall}** (synthetic isolated HTTP fixture; not a complete M0 proof).`, '',
+const md = ['# Loom deterministic baseline result', '', `Overall **${result.overall}** (separate Synthetic fixture and real Rust↔Node HTTP checks; not live DSH completion evidence).`, '',
   `Started: ${result.started_at}`, `Finished: ${result.finished_at}`, '', '| Check | Result | Evidence |', '| --- | --- | --- |',
   ...checks.map((item) => `| ${item.name} | ${item.status} | ${JSON.stringify(item.evidence)} |`), '', '## Real coordinator', '',
   `LOOM_BASE_URL mode: **${result.real_coordinator.overall}**`, ...(result.real_coordinator.checks || []).map((item) => `- ${item.status}: ${item.name} — ${JSON.stringify(item.evidence)}`),

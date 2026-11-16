@@ -37,6 +37,13 @@
 - Baseline's Grant input now supports array Task capabilities and stored Permission read/write. Read_write UI choice deliberately requires both; no implicit permission via capability or HTTP auth.
 - Registry full file map artifact placement hash uses `loom://artifact/<UUID>` global index, controlled host path only separate from global URI. No arbitrary path download.
 
+- Actual single-node integration was finalized: Synthetic9 + Real13 PASS. Real public errors from stale `NodeState.EMPTY` shared object were isolated by cloning initial state; source now has a seventh regression test. A local JSON shape root leak in diagnostics was fixed before final audit; do not trust partial PASS or narrative from either logger alone.
+- Integration tests use isolated temporary project/token dirs and a foreground Rust child closed on finally. `scripts/verify-baseline.mjs` runs `runRealIntegration` by default, child exit status controls overall; no PENDING tolerated. DSH and real platforms still explicitly absent.
+- Safe root solution: host declares mapping in heartbeat, administrator approves a precise binding row, grant pins binding digest+worker+installation; Node executor verifies both central binding root and actual operator configured root with realpath, rather than accepting arbitrary central cwd or Node self-reported access.
+- Stable request replay: same (node,route,request)-persisted RFC attrs results are returned before lease/cancel gates; changed payload digest gets 409. Terminal tickets cannot be rewritten by a different Report. Changed artifacts never overwrite existing files: immutable bytes+lineage checked before exclusive first write, then transactional DB+audit.
+- Startup schema reached v3 with persistent cancel_acknowledged. New DB initialization and existing older Schema migration are intentionally different paths. Register uses explicit `LOOM_CLIENT_TOKEN` not generate-if-missing.
+- Severe edge closure: failed/late reports may not become success, known success cannot be replaced by failure text, completed Assignment no longer repolled into second success. valid early poll must not resurrect old terminal jobs; currently dispatchable ASG must run once and be filtered afterward.
+
 ## Open problems and resolutions
 
 - Scope is large and includes actual hardware, platform-signed distribution and mobile verification. Proceed in evidenced increments rather than marking roadmap milestones complete from mocks, compilation or unit tests.

@@ -4,7 +4,7 @@
 
 ## 1. 当前状态和文档索引
 
-当前仓库只有设计文档；没有 Rust workspace、Vue 工程、DSH 插件、安装器、Compose fixture、可执行构建或测试命令。不要把预期结构写成已经完成的功能，也不要只格式化 / 通过编译就声称任务闭环完成。
+当前仓库已有 Rust 协议/Concierge 初版、Vue 工作空间、TypeScript Local Node 和 DSH Host bundle，以及真实本机确定性基准与 Rust↔TypeScript 集成。不要把全部 M0 或 M1–M6 视为完成，也不要只格式化 / 通过编译就声称任务闭环完成。真实 DSH 安装与任务生命周期、移动真机、平台安装器和后续里程碑仍有未验证缺口；当前开发与验证状态见 `docs/IMPLEMENTATION_STATUS.md`、`BASELINE.md` 和 `MEMORY.md`。
 
 ### 1.1 每份文件负责什么
 
@@ -64,6 +64,8 @@ DSH Loom Plugin        Bare Rust Host Agent
 
 ### DSH Plugin 是一等 Local Node
 
+当前可安装包位于 `plugins/dsh-loom`；仅离线验证和 mock host contract 已覆盖，未安装或修改真实 DSH Profile。
+
 - 实现主动出站的注册、配对、心跳、Assignment / Lease、SessionRef、必要事件流、本机 Grant、ArtifactRef 和 Effect 对账。
 - DSH 机器不因 Loom 再强制安装独立 Rust Agent。DSH 进程中的插件负责复用既有 Agent / Session。
 - 节点附带的本地模型 HTTP 服务可由该节点声明和管理；不要求为模型服务复制一份独立 Agent。
@@ -119,7 +121,7 @@ Device Reachable ≠ Device Trusted
 
 ## 5. DSH Plugin 开发约束
 
-DSH 插件是预期的实现组成部分，但当前仓库尚未存在插件代码。实现时：
+DSH 插件已存在 Host-only bundle，但未完成真实宿主安装与 Agent/Session 验收。修改实现或安装时：
 
 1. 先加载并使用环境中的 `dsh-doc` Skill，阅读当时实际 DSH 版本的 Plugin API、配置和会话机制；不要仅凭本项目文档臆测 DSH 私有服务名或接口。
 2. 选择最小可行的 Node 协议增量，优先复用现有 DSH 能力与事件。需要 UI 时使用实际 DSH Client Slot 体系，不使用不受控 iframe 或外部 DOM。
@@ -132,7 +134,7 @@ DSH 插件是预期的实现组成部分，但当前仓库尚未存在插件代�
 
 ## 6. Rust / Vue 实现原则
 
-这些是实现策略，不是虚构的现有目录：
+当前 schema 为 v3；`cancel_requested` 和最终 cancel acknowledging/unknown effect 是不同事实。实现新增对象要有明确的 Assignment/Lease/Grant 关联，不能把 nil/空 Project/Worker ID 当作有效资源权限。
 
 - Rust 将协议、领域逻辑、服务端和平台适配边界分层，避免 Center 与 Bare Agent 产生各自不同的 Ticket / Grant 定义。
 - Node Envelope 至少带协议版本、Node / Installation 身份、请求 / 幂等 ID、Ticket / Assignment / Lease 关联、时间与能力信息；具体字段以原型验证后固定。
@@ -155,7 +157,7 @@ DSH 插件是预期的实现组成部分，但当前仓库尚未存在插件代�
 
 ### 验证
 
-完整测试策略、1 Concierge + 3 Node 的 Docker 拓扑、硬断言、回放与 Token 预算见 `testing.md`。当前只有文档与设计，尚无 Compose fixture、构建工具链、CI 或 Live LLM 结果。
+完整测试策略、1 Concierge + 3 Node 的 Docker 拓扑、硬断言、回放与 Token 预算见 `testing.md`。本轮按用户要求优先单节点基准，不实现特定 1+3 Compose fixture。尚未建立 CI 或 Live LLM 结果。实际命令：
 
 工具链建立后，应先读 Manifest / CI 并运行对应的最小检查和端到端测试，**不要把下面示例当已生效命令**：
 

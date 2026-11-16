@@ -1,7 +1,7 @@
 # Loom Roadmap
 
-- 状态：proposed；尚无已完成里程碑
-- 基线日期：2026-11-16
+- 状态：M0 实现中；确定性本机任务链已通过，完整 M0 和后续里程碑未完成
+- 基线日期：2026-11-17
 - 计划口径：按验证结果推进，不预设日历日期或固定硬件
 
 本文只回答当前先验证什么、暂缓什么，以及如何用多类真实任务决定下一步。长期产品方向见 [vision.md](vision.md)，架构约束与术语见 [architecture.md](architecture.md)。
@@ -41,13 +41,15 @@
 
 ### 当前
 
-仓库处于设计阶段。下述状态在没有代码或测试证据前均不能视为已完成：
+已有真实 `crates/protocol`、`crates/concierge`、`packages/node-client`、`plugins/dsh-loom` 和 Vue 工程，以及使用前台真实子进程实现的 Rust↔TypeScript 本地任务链。可执行命令和硬断言见 [BASELINE.md](BASELINE.md)，提交与实现/缺口对照见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)，集成缺陷记录见 [MEMORY.md](MEMORY.md)。
 
-- 尚无经过验收的单机任务闭环；
-- 尚无通用的 Host / Project / Model Registry；
-- 尚无跨机 Assignment、Artifact 传输或故障恢复；
-- 尚无 Agent / Worker 会话的折叠与展开实现；
-- 尚未验证 Rust 异步运行时、SQLite 驱动、Tauri Mobile 和具体 Adapter API；主要技术栈与平台边界见上述技术决策。
+这并不等同于完整 M0 完成。下述状态在没有对应证据前均不能视为已完成：
+
+- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复，但尚不能称为 M0 的全部真实 DSH Worker 任务验收已完成；
+- 已有最小 Host / Project / ResourceBinding / Grant Registry；尚无通用 Model Registry、真实模型生命周期和通用设备能力矩阵；
+- 已有版本化 Assignment/Lease、内容哈希与分配的 Artifact 上传，但没有跨机 Host 直连大文件传输或完整双向对账；
+- 已实现 Conversation/Activity/Collaboration 的默认折叠与 Ticket 展开；尚无真实 DSH 子 Agent 的完整会话委托和跨 Harness 过程一致性证据；
+- Rust/Tokio、SQLite、Vue 构建已在当前 macOS 运行；没有 Tauri 工程或真实移动设备行为验证。DSH 0.2.2-rc.3 源文件 API 已用于 Host adapter，但没有当前 Profile 的安装注册、真实任务/取消/Session 重开和 Credential Store 验收。
 
 ### 下一刀：M0 的最小垂直切片
 

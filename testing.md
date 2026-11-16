@@ -1,7 +1,7 @@
 # Loom Testing Strategy
 
-- 状态：测试设计基线；尚无 Compose、Harness fixture、CI 或可执行测试
-- 测试主场景：**1 个 loom-concierge + 3 个 Local Node + 三类不同任务**
+- 状态：已有确定性协议、单元、真实单 Node HTTP 和恢复测试；无 CI、Live LLM 或真实移动设备验证
+- 测试主场景：当前先完成 **1 个 loom-concierge + 1 个真实 Local Node + 实际文件任务**，用户明确要求首版不实现下面的 1+3 Compose 拓扑
 - 质量口径：先验证任务状态与外部事实，再评估自然语言交付；真实模型成本单独管理
 
 本文定义怎么验证 Loom，而不是为完成 Roadmap 的某一页制造一个成功 Demo。实际验收场景与完成标准在 [roadmap.md](roadmap.md)，安全与协议边界在 [architecture.md](architecture.md)，贡献流程在 [AGENTS.md](AGENTS.md)。
@@ -62,7 +62,7 @@ deploy/
 
 ## 4. Deterministic Compose：1 + 3 的日常基线
 
-在 M0 先建立 `loom-concierge + loom-node-a` 的垂直切片；到 M2 扩展为三个 Node。**不要在最小闭环还没成立前就搭建完整多宿主测试平台。**
+本轮仅优先 `loom-concierge + 一个真实 outbound Local Node` 的垂直切片。不要通过下面 Design Topology 推断已经实现 Compose、三个节点、多 Harness 或跨机验收。
 
 ```text
                     ┌─────────────────────────┐
@@ -270,7 +270,33 @@ Provider 只返回估算用量时如实标记 estimated；不宣称 UI 估算等
 
 ## 8. CI 和本地输出
 
-当前没有工具链，以下是目标命令语义，不是仓库中已经可执行的命令：
+当前已建立 Rust workspace 与 JS workspace。以下命令对应当前真实实现（稍后附录保留通用测试 driver 的目标语义）：
+
+```text
+# 协议 fixture、policy、recovery
+cargo test -p loom-protocol --features fixture-signing
+
+# 单进程确定性场景与 SQLite 恢复
+cargo run -p loom-concierge --bin loom -- smoke
+
+# TS Local Node / DSH Host bundle（不会安装插件或改 Profile）
+pnpm --dir packages/node-client test
+pnpm --dir plugins/dsh-loom test
+
+# Vue 3 + TypeScript：SSR/API 约束、类型检查与生产构建
+pnpm --dir apps/web test
+pnpm run build
+
+# 真实前台 Rust↔TypeScript 单节点、真实文件执行/负例
+node scripts/real-integration.mjs
+
+# 独立的 Synthetic 9 与真实单节点场景，顶层 result 必须全部 PASS
+node scripts/verify-baseline.mjs
+```
+
+当前没有 Compose fixture、CI workflow 或 Live LLM 结果；无 iOS/Android/Windows/Linux 目标设备验证。真实 DSH 插件仅离线宿主源与 mock adapter 验证，禁止把其标为已安装/已通过实际 Session 层。
+
+以下是目标 driver 参数的接口形式，尚未提供统一命令行包装：
 
 ```text
 测试驱动参数：
