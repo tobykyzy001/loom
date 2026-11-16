@@ -6,6 +6,7 @@ pub mod inventory;
 pub mod inventory_probe;
 mod maintenance;
 mod node_api;
+pub mod pipeline;
 mod store;
 
 use anyhow::{bail, Result};
@@ -140,7 +141,10 @@ async fn run_cli() -> Result<()> {
             api::serve(Arc::new(state), listen, web_dir).await?;
         }
         Command::Smoke { directory, listen } => command::smoke(directory, listen).await?,
-        Command::Doctor => command::doctor(&cli.data_dir).await?,
+        Command::Doctor => {
+            let token = std::env::var("LOOM_CLIENT_TOKEN").ok();
+            command::doctor(&cli.data_dir, token.as_deref()).await?
+        }
         Command::Reconcile => command::reconcile(&cli.data_dir).await?,
     }
     Ok(())

@@ -173,6 +173,25 @@ fn relative_traversal_and_symlinks_fail_closed() {
     assert!(error.is_err());
 }
 
+#[test]
+fn bare_rejects_unvalidated_artifact_input_before_any_effect() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (assignment, mut state) = executable(&tmp, |raw| {
+        raw["artifact_input"] = json!({"artifact_ref":{"type":"artifact_ref","artifact_id":"not-a-uuid"},"bytes_base64":"unverified"});
+    });
+    let error = executor::execute(
+        &assignment,
+        tmp.path().join("artifacts").as_path(),
+        &mut state,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unvalidated ArtifactInput"));
+    assert!(std::fs::read_dir(tmp.path().join("artifacts"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
 #[cfg(unix)]
 #[test]
 fn executor_rejects_a_symlink_target_without_creating_an_artifact() {

@@ -54,7 +54,7 @@ export async function startRustConcierge({ env = process.env, root } = {}) {
   const clientToken = env.LOOM_CLIENT_TOKEN || testingClientToken()
   if (clientToken.length < 24) throw new Error('The synthetic integration client token must have at least 24 characters')
   const dataDir = join(root, 'concierge')
-  await mkdir(dataDir, { mode: 0o700 })
+  await mkdir(dataDir, { recursive: true, mode: 0o700 })
   let binary
   if (env.LOOM_SERVER_CMD) binary = commandWords(env.LOOM_SERVER_CMD)
   else if (env.LOOM_TARGET_BINARY) binary = [env.LOOM_TARGET_BINARY]

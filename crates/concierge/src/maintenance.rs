@@ -174,6 +174,7 @@ pub fn create_ticket(
 }
 
 pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>> {
+    crate::pipeline::advance_all(store)?;
     let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at, g.operations as grant_operations FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND g.revoked_at IS NULL ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
     if let Some(mut assignment) = assignment {
         let current = assignment["lease_epoch"].as_i64().unwrap_or(0);
@@ -218,6 +219,12 @@ pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>
         )?.into_iter().next().ok_or_else(|| anyhow::anyhow!("The assignment's exact project binding is gone"))?;
         assignment["grant"]["project_root"] = binding["root_scope"].clone();
         assignment["resource"] = binding;
+        if let Some(source) = crate::pipeline::input_for_assignment(
+            store,
+            assignment["ticket_id"].as_str().unwrap_or_default(),
+        )? {
+            assignment["artifact_input"] = source;
+        }
         assignment["grant_status"] = json!(assignment["grant"]["revoked_at"].is_null());
         Ok(Some(assignment))
     } else {

@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { sha256 } from '../src/util.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { verify, createPublicKey, randomUUID } from 'node:crypto'
@@ -113,6 +114,44 @@ test('controlled executor performs read and atomic write only within fixture pro
   assert.throws(() => requireIsolatedRoot('/'))
   assert.throws(() => requireIsolatedRoot('.'))
   assert.equal(requireIsolatedRoot(join(root, 'state')), join(root, 'state'))
+})
+
+test('controlled descendant validates immutable source bytes and blocks tampering', async () => {
+  const root = await fixture(); const project = join(root, 'project')
+  await mkdir(project, { recursive: true, mode: 0o700 })
+  const identity = await NodeIdentity.open(root)
+  const { g } = assignment(project, identity)
+  const executor = new ControlledFileExecutor({ artifactDir: join(root, 'artifacts'), projectRoots: { '1234': project } })
+  const sourceBytes = Buffer.from('alpha  beta\nGamma\n')
+  const sourceId = randomUUID()
+  const assignmentData = {
+    ...assignment(project, identity).a, project_id: '1234', node_id: identity.nodeId,
+    kind: 'edit_file', ticket_id: 'derived-ticket', relative_path: 'docs/derived.txt', content: 'derived fixture content',
+    artifact_input: {
+      artifact_ref: { type: 'artifact_ref', artifact_id: sourceId, ticket_id: 'source-ticket',
+        origin_node_id: 'a'.repeat(64), sha256: sha256(sourceBytes), location: `loom://artifact/${sourceId}`, parents: [] },
+      bytes_base64: sourceBytes.toString('base64'),
+    },
+  }
+  const result = await executor.execute(assignmentData, g)
+  assert.equal(result.state, 'succeeded')
+  assert.deepEqual(result.artifact.metadata.parents, [sourceId])
+  assert.equal(result.artifact.metadata.artifact_ref.artifact_id, sourceId)
+  assert.equal(result.artifact.metadata.origin_node_id, assignmentData.node_id)
+  assert.equal(result.artifact.metadata.sha256, sha256(result.artifact.bytes))
+  assert.notEqual(result.artifact.metadata.sha256, sha256(sourceBytes))
+  assert.equal(await readFile(join(project, 'docs/derived.txt'), 'utf8'), 'derived fixture content')
+  for (const mismatch of [
+    (value) => { value.artifact_input.artifact_ref.sha256 = '0'.repeat(64); return value },
+    (value) => { value.artifact_input.artifact_ref.location = '/etc/passwd'; return value },
+    (value) => { value.artifact_input.artifact_ref.ticket_id = assignmentData.ticket_id; return value },
+  ]) {
+    const bad = structuredClone(assignmentData)
+    mismatch(bad)
+    bad.relative_path = 'docs/must-not-write.txt'
+    await assert.rejects(() => executor.execute(bad, g), /immutable hash|controlled immutable Artifact URI|own descendant/)
+    await assert.rejects(() => readFile(join(project, bad.relative_path)), /ENOENT/)
+  }
 })
 
 test('two fresh isolated NodeState stores never share mutable outbox or identity-bound messages', async () => {

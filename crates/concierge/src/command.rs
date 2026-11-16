@@ -407,8 +407,8 @@ fn check(condition: bool, label: impl AsRef<str>) -> ApiResult<()> {
         )))
     }
 }
-pub async fn doctor(root: &Path) -> Result<()> {
-    let s = crate::api::State::open(root, None)?;
+pub async fn doctor(root: &Path, client_token: Option<&str>) -> Result<()> {
+    let s = crate::api::State::open(root, client_token)?;
     let store = s.lock().map_err(|_| anyhow::anyhow!("store"))?;
     let out = json!({"schema_version":store.conn().query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0))?, "integrity":store.query("PRAGMA integrity_check",[])?,"audit_valid":store.verify_audit()?,"state_dir":root,"online_devices_note":"Actual external device checks require their local runtime; this is a local persistence inspection only."});
     println!("{}", serde_json::to_string_pretty(&out)?);

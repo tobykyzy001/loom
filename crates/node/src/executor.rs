@@ -36,6 +36,9 @@ fn execute_checked(
     state: &mut StateStore,
     cancellation: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Value> {
+    if assignment.raw.get("artifact_input").is_some() {
+        bail!("Bare host does not accept unvalidated ArtifactInput; use a supporting documented adapter");
+    }
     let root = canonical_host_root(&assignment.binding_root, "approved project root")?;
     let effect_id = Uuid::new_v4();
     let artifact_id = Uuid::new_v4();

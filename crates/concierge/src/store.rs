@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current != 0 && current != 1 && current > 3 {
+        if current > 4 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 3)"
+                "database schema is from a newer Loom release (found {current}, supported 4)"
             )
         }
         if current == 0 {
@@ -87,6 +87,21 @@ impl Store {
         }
         if current == 2 {
             self.connection.execute_batch("ALTER TABLE reports ADD COLUMN cancel_acknowledged INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=3;")?;
+        }
+        if current <= 3 {
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS document_pipeline_runs(
+                    id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),name TEXT NOT NULL,
+                    definition_json TEXT NOT NULL,definition_digest TEXT NOT NULL UNIQUE,cancel_requested_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS document_pipeline_stages(
+                    pipeline_id TEXT NOT NULL REFERENCES document_pipeline_runs(id),stage_id TEXT NOT NULL,
+                    ticket_id TEXT UNIQUE REFERENCES tickets(id),raw_grant_id TEXT NOT NULL REFERENCES grants(id),
+                    checkpoint_state TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+                    PRIMARY KEY(pipeline_id,stage_id)
+                );
+                PRAGMA user_version=4;"
+            )?;
         }
         Ok(())
     }

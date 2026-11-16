@@ -365,8 +365,10 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
         .route("/candidates/{id}", patch(review_candidate))
         .route("/models", get(models))
         .route("/models/{id}/place", post(models))
-        .route("/pipelines", get(models).post(models))
-        .route("/pipelines/{id}/run", post(models))
+        .route("/pipelines", get(list_pipelines).post(create_pipeline))
+        .route("/pipelines/{id}", get(pipeline_detail))
+        .route("/pipelines/{id}/run", post(run_pipeline))
+        .route("/pipelines/{id}/cancel", post(cancel_pipeline))
         .route("/inventory", get(inventory))
 }
 
@@ -1952,6 +1954,50 @@ async fn inventory(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Valu
     ))
 }
 #[allow(dead_code)]
+async fn create_pipeline(
+    AppState(state): AppState<Arc<State>>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let mut store = state.lock()?;
+    Ok(Json(crate::pipeline::create(&mut store, &body)?))
+}
+async fn list_pipelines(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(json!({"pipelines":crate::pipeline::list(&store)?})))
+}
+async fn pipeline_detail(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    uuid::Uuid::parse_str(&id).map_err(|_| ApiError::bad("Pipeline ID must be UUID"))?;
+    let store = state.lock()?;
+    Ok(Json(
+        json!({"pipeline":crate::pipeline::detail(&store, &id)?}),
+    ))
+}
+async fn run_pipeline(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    uuid::Uuid::parse_str(&id).map_err(|_| ApiError::bad("Pipeline ID must be UUID"))?;
+    let store = state.lock()?;
+    crate::pipeline::advance_all(&store)?;
+    let store = state.lock()?;
+    Ok(Json(
+        json!({"pipeline":crate::pipeline::detail(&store, &id)?}),
+    ))
+}
+async fn cancel_pipeline(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    uuid::Uuid::parse_str(&id).map_err(|_| ApiError::bad("Pipeline ID must be UUID"))?;
+    let store = state.lock()?;
+    crate::pipeline::cancel(&store, &id)?;
+    Ok(Json(
+        json!({"cancel_requested":true,"pipeline":crate::pipeline::detail(&store, &id)?}),
+    ))
+}
 async fn models(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let _ = state;
     Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "m3_not_available", "Model registry, verified placements and Invoke are not delivered yet. No download or external inference has occurred."))

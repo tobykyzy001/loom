@@ -32,6 +32,42 @@ async function controlledParent(root, parts, create) {
   }
   return current
 }
+function validatedArtifactInput(assignment) {
+  if (assignment.artifact_input === undefined || assignment.artifact_input === null) return null
+  if (assignment.kind !== 'edit_file') throw new Error('An ArtifactInput is only accepted on the bounded document edit step')
+  const input = assignment.artifact_input
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('ArtifactInput must be a bounded object')
+  const source = input.artifact_ref
+  if (!source || typeof source !== 'object' || Array.isArray(source) || source.type !== 'artifact_ref') throw new Error('ArtifactInput needs a structured source ArtifactRef')
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(source.artifact_id)) throw new Error('Source Artifact UUID is required')
+  if (source.ticket_id === assignment.ticket_id) throw new Error('Parent Artifact cannot be its own descendant')
+  if (!/^[a-f0-9]{64}$/.test(source.sha256)) throw new Error('Source Artifact SHA-256 is required')
+  if (typeof source.origin_node_id !== 'string' || !/^[a-f0-9]{64}$/.test(source.origin_node_id)) throw new Error('Source origin identity is missing')
+  if (source.location !== `loom://artifact/${source.artifact_id}`) throw new Error('Source must be a controlled immutable Artifact URI')
+  const parents = source.parents ?? []
+  if (!Array.isArray(parents) || parents.length > 64) throw new Error('Parent lineage must be a bounded list')
+  for (const parent of parents) {
+    if (typeof parent !== 'string' && (!parent || parent.type !== 'artifact_ref')) throw new Error('Only known ArtifactRef lineage can be inherited')
+    if (typeFromValue(parent).artifact_id === source.artifact_id) throw new Error('Parent lineage cannot contain itself')
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(typeFromValue(parent).artifact_id)) throw new Error('Every parent requires a real Artifact UUID')
+    if (typeof parent !== 'string') {
+      if (typeof parent.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(parent.sha256)) throw new Error('Parent lineage digest is not bounded')
+      if (!/^[a-f0-9]{64}$/.test(parent.origin_node_id)) throw new Error('Parent lineage origin is not bounded')
+    }
+  }
+  const encoded = input.bytes_base64
+  if (typeof encoded !== 'string' || encoded.length > 1_400_000 || encoded.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('ArtifactInput needs bounded canonical base64 bytes')
+  const bytes = Buffer.from(encoded, 'base64')
+  if (!bytes.length || bytes.length > MAX_FILE_BYTES || encoded !== bytes.toString('base64')) throw new Error('Source bytes must be non-empty, canonical and bounded')
+  if (sha256(bytes) !== source.sha256) throw new Error('Source Artifact bytes do not match the immutable hash')
+  const ref = { type: 'artifact_ref', artifact_id: source.artifact_id, ticket_id: source.ticket_id,
+    origin_node_id: source.origin_node_id, sha256: source.sha256, location: source.location, parents }
+  return ref
+}
+function typeFromValue(value) {
+  return typeof value === 'string' ? { artifact_id: value } : value
+}
+
 export class ControlledFileExecutor {
   constructor({ artifactDir, projectRoots, now = () => new Date() } = {}) {
     if (!isAbsolute(artifactDir || '')) throw new Error('artifactDir must be an explicitly isolated absolute directory')
@@ -50,6 +86,7 @@ export class ControlledFileExecutor {
       const localRoot = safeProjectRoot(await realpath(this.projectRoots[assignment.project_id]))
       if (localRoot !== root) throw new Error('Executor and Grant project roots do not match exactly')
     }
+    const sourceInput = validatedArtifactInput(assignment)
     const path = safeRelative(assignment.relative_path)
     const kind = assignment.kind
     const inputDigest = sha256(JSON.stringify({ assignment_id: assignment.id, kind, path,
@@ -77,7 +114,7 @@ export class ControlledFileExecutor {
         const summary = summarize(bytes.toString('utf8'), path)
         const content = Buffer.from(summary)
         return await this.finish({ effectId, artifactId, assignment, grant, content, mediaType: 'application/json',
-          root, target, readOnly: true, evidence, finalState: 'confirmed' })
+          root, target, readOnly: true, evidence, finalState: 'confirmed', sourceRef: sourceInput })
       }
       if (kind === 'edit_file') {
         if (typeof assignment.content !== 'string' || Buffer.byteLength(assignment.content) > MAX_FILE_BYTES) {
@@ -106,7 +143,7 @@ export class ControlledFileExecutor {
           await rm(temporary, { force: true }).catch(() => {})
         }
         return await this.finish({ effectId, artifactId, assignment, grant, content, mediaType: 'application/json',
-          root, target, readOnly: false, evidence, finalState: 'confirmed' })
+          root, target, readOnly: false, evidence, finalState: 'confirmed', sourceRef: sourceInput })
       }
       throw new Error('Unsupported operation')
     } catch (error) {
@@ -115,11 +152,15 @@ export class ControlledFileExecutor {
       throw error
     }
   }
-  async finish({ effectId, artifactId, assignment, grant, content, mediaType, readOnly, evidence, finalState }) {
+  async finish({ effectId, artifactId, assignment, grant, content, mediaType, readOnly, evidence, finalState, sourceRef }) {
     const location = join(this.artifactDir, `${artifactId}.bin`)
     await writeFile(location, content, { mode: 0o600, flag: 'wx' })
     const metadata = { name: `${assignment.kind}-${artifactId}.json`, media_type: mediaType, size_bytes: content.length,
       sha256: createHash('sha256').update(content).digest('hex'), origin_node_id: assignment.node_id }
+    if (sourceRef) {
+      metadata.parents = [sourceRef.artifact_id]
+      metadata.artifact_ref = sourceRef
+    }
     const effect = { effect_id: effectId, status: finalStatus(readOnly), evidence }
     await writeJsonAtomic(join(this.artifactDir, `${effectId}.effect.json`), { ...evidence, status: 'confirmed', read_only: readOnly })
     return { state: 'succeeded', summary: `${assignment.kind} completed without calling a model.`,

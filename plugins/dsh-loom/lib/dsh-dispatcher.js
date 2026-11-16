@@ -11,6 +11,9 @@ export class DshDispatcher {
   }
   sessionRefs() { return [...this.adapter.sequence.entries()].map(([assignment_id, record]) => ({ assignment_id, ...this.adapter.sessionRef(record.agent.session) })) }
   async canExecute(assignment) {
+    // The explicit LocalNode input validator is not shared by an arbitrary
+    // LLM tool/provider. Never silently discard that provenance guarantee.
+    if (Object.hasOwn(assignment, 'artifact_input')) return false
     if (!['read_summary', 'edit_file', 'dsh_agent_turn'].includes(assignment.kind)) return false
     try { validateAssignment(assignment, assignment.grant, this.runner.identity); return true } catch { return false }
   }
