@@ -20,12 +20,14 @@ Collapsed Transcript ≠ Deleted Transcript
 Visible Transcript ≠ Authorized Resource Access
 Observed Habit ≠ Confirmed Preference
 Saved Skill ≠ Standing Grant
+Mobile Client ≠ Always-on Host
+Device Reachable ≠ Device Trusted
 ```
 
 - 控制面有唯一任务权威；执行环境和数据保持分布。
 - 只共享路由、授权和必要工作简报，不共享全量记忆。
 - 控制流经过协调器，大数据流尽量直达。
-- 手机、IM 中的自然语言不是天然的系统授权。
+- 手机、IM 中的自然语言不是天然的系统授权；移动端敏感操作使用有明确操作摘要的显式、近期设备确认，必要时采用平台强认证，不能用长期记住的手机 Login 取代 Grant。
 - 模型可以声明任务需要某种能力，但不能自行扩大权限。
 - 没有合适的执行环境就排队或询问，不虚构已经完成的工作。
 - 界面是否展示过程，与系统是否记录过程、用户是否有权访问过程，是三个不同问题。
@@ -99,6 +101,16 @@ Trigger → Eval / Decision → Mandate + Ticket → Assignment → Report
 ```
 
 Host 数量、设备类型、模型能力和任务组合均由用户环境决定，不复制说明性场景中的固定机器名称。
+
+设备角色分开建模：
+
+| 平台 | Client | Host Agent 首版定位 |
+| --- | --- | --- |
+| macOS / Linux / Windows | Web / Desktop Shell | 支持受控 Host、项目访问和 Harness 执行，逐步验证后台服务与开机恢复 |
+| iOS / Android | Web / PWA，必要时薄原生壳 | 用户入口、审批、任务与 Artifact 查看；不是默认可靠的长驻 Host |
+| NAS / 服务器 Linux | Web | 在资源和权限满足时可作为 Host |
+
+移动设备受系统后台限制、锁屏、应用切换、网络迁移和电池策略影响，不自动拥有稳定 Lease，也不以持续轮询或 PWA 保活伪装长期执行能力。其能否作为有限、专有的 Worker，必须独立能力和政策验证。
 
 ### 3.1 Concierge 中心
 
@@ -363,18 +375,36 @@ Register → Approve → Place / Load → Invoke → Retire
 
 ## 7. 首版技术栈与 Harness 接入
 
-### 7.1 首版实现语言
+### 7.1 首版实现语言与多端结构
 
-首版以 **TypeScript** 为统一实现语言：
+首版采用 **Rust 核心 + TypeScript / Vue 薄客户端**：
 
-- Concierge、Host Agent、Registry、任务协议和持久化应用层使用 TypeScript；
-- 默认 Web UI 使用 React + TypeScript；
-- 优先复用已有 Node.js 的强类型 Schema、序列化、事件和依赖注入生态；
-- 协议与持久数据使用版本化、语言中立的 Schema，适配器不能依赖 TypeScript 私有运行时对象。
+- Concierge、Host Agent、Registry、Policy、Lease、任务状态机和持久化应用层使用 Rust；
+- 共享协议与核心数据模型放在一个 Rust workspace，减少控制面与 Host 的定义漂移；
+- 默认 Web / Desktop / Mobile UI 使用 Vue 3 + TypeScript；Rust 核心与 Web 前端通过版本化 API 通信；
+- 桌面壳优先采用 Tauri，以复用 Web UI 并调用受控的 Rust 本机能力；Tauri 的桌面集成不自动证明 iOS / Android 后台能力；
+- 移动端基础采用响应式 PWA，先验证近距离网络通信、通知与强认证；需要应用商店、后台推送和系统能力时再包装为 Tauri Mobile 或薄原生壳；
+- 共享 Vue 领域组件按需要保留平台适配层，不承诺“同一套 DOM 和所有权限在五个平台原样运行”。
 
-首个可用版本以 macOS 开发环境和单用户部署为开发基线，但协议、路径、凭据和包管理不得假设所有 Host 使用 macOS。
+首个开发基线仍是 macOS 上的单用户任务闭环，随后逐个验证 Windows / Linux Host，而不是核心写完就宣称全平台支持。移动浏览器和桌面壳的会话恢复从 M0 开始验证。
 
-这不是“每个组件都必须使用 TypeScript”：已有 Harness、LLM、ComfyUI 或专用 Worker 保留原语言和运行时；确实需要 Python 的模型探测、启停和工具调用放在 Host 侧边界，使用带类型校验的本地协议与 TypeScript Host Agent 通信。首版不让 Python 微服务无边界增长。
+**Rust 的核心价值**是 Host Agent 的单二进制部署、资源占用、进程与文件边界，以及被多个桌面平台共享的策略执行逻辑；不是消除所有平台差异。SQLite 事务驱动、Tokio async runtime、HTTP/WebSocket/SSE API、操作系统 Keychain / Credential Manager / Secret Service 适配等具体 crate 通过 M0 Prototype 选型。
+
+**跨语言不是异常路径**：DSH 薄插件保留 TypeScript / JavaScript；已有 Harness、LLM、ComfyUI 或 Python 助手保留原语言，通过版本化 HTTP、MCP 或受限本地 RPC 通信。核心禁止把 Rust struct、内存指针或私有 FFI ABI 当成公共 Harness 协议。
+
+```text
+Vue 3 + TypeScript
+  ├─ Web / PWA（桌面与移动浏览器）
+  └─ Tauri Shell（桌面优先；移动按需）
+                │ Versioned Client API + Strong Device Authentication
+                ▼
+Rust Control Plane + Rust Host Agent
+  ├─ Persistent State / Policy / Lease / Artifact / Local Broker
+  └─ Versioned Adapter RPC / MCP
+       ├─ DSH TypeScript Thin Plugin（确实需要时）
+       ├─ Native Harness API / CLI
+       └─ Python / Model Runtime Connectors
+```
 
 ### 7.2 不为每种 Harness 强制开发插件
 
@@ -389,7 +419,7 @@ Register → Approve → Place / Load → Invoke → Retire
 
 | Harness / 服务 | 首版策略 |
 | --- | --- |
-| DSH | 复用其配置的 MCP 与外部进程控制能力；标准连接不足时提供一个薄插件，读取必要 Session 事件与提供受控任务入口 |
+| DSH | Rust Host Agent 通过其配置的 MCP 与外部进程控制能力接入；标准连接不足时提供一个 TypeScript 薄插件，读取必要 Session 事件与提供受控任务入口 |
 | 其他 Harness | 优先 Native API / MCP，其次 CLI；不因接入了名称而承诺 Session 级能力 |
 | LLM / 图像等模型服务 | 直接使用已有 HTTP / API Connectors，不默认编写 DSH 或模型服务插件 |
 | ComfyUI | API-first 的模型 Worker Connector，而非通用 Harness 插件 |
@@ -465,6 +495,18 @@ Rollout Plan 至少包含：目标 Host / Worker、包版本、期望状态、�
 ### 8.4 首版范围
 
 先支持可信单用户 LAN 中的 Host Agent、官方 Adapter 和配置 / Skill 包的选择性安装；跨 Harness 插件因宿主版本差异单独打包。持续自动更新、任意第三方插件、跨不受信网络的远程装包暂不进入首版承诺。
+
+### 8.5 平台包矩阵与客户端更新
+
+Package Manifest 按构建 Target 区分 Rust Host 二进制、Harness 插件、语言特定 Connector 和客户端资源，例如 `darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`windows-x64`。这些是部署例子，实际支持列表必须由对应平台的安装和健康检查产生。
+
+- Rust Host Agent 以签名、按 OS / arch 构建的包分发，不把 macOS 二进制或本机编译目录复制到 Windows / Linux。
+- 管理机可以储存多个目标平台的包，但不能假设 macOS 本机具备所有平台的可信构建与签名条件；官方 CI 或单独授权的 Build Host 负责交叉构建和签名。
+- Host Agent 自更新由本机更新器执行，保留旧版本、数据迁移版本和失败回滚；控制面迁移与 Host 更新不得在一个不可恢复步骤中捆绑。
+- Windows 服务、macOS LaunchAgent、Linux systemd 用户服务、目录 ACL 和系统凭据库通过独立平台适配层实现，不使用“一条 Shell 在所有机器有效”的假抽象。
+- Vue 前端资源可由已认证的控制面提供版本化 Web / PWA 更新；桌面 / 移动壳与系统权限的更新仍走对应签名包，不通过 Rollout 静默修改。
+- iOS / Android 客户端首版主要访问已有 Concierge，不接收通用 Harness 和任意 Worker 包。Apple / Google 的签名、发布、推送和后台模式限制不能由本地安装机制绕过。
+- 无 Rust Host 的移动端不能冒充满足任务 Placement；在移动浏览器里保留操作记录与审批能力，不代表用户离开页面后仍能继续后台执行。
 
 ## 9. 授权、调度与可靠性
 
