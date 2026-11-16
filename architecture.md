@@ -1,0 +1,446 @@
+# Loom Architecture
+
+- 状态：设计基线 / proposed
+- 日期：2026-11-16
+
+本文保存 Loom 的长期架构约束、领域边界和不应随实现进度遗忘的设计判断。产品取舍见 [vision.md](vision.md)，分阶段验证见 [roadmap.md](roadmap.md)。
+
+## 1. 核心不变量
+
+```text
+Agent ≠ Host
+Worker ≠ Agent
+Project ≠ Chat
+Discovery ≠ Permission
+Capability ≠ Grant
+Assignment ≠ Ticket
+Delivered ≠ Read
+Unknown Outcome ≠ Failed
+Collapsed Transcript ≠ Deleted Transcript
+Visible Transcript ≠ Authorized Resource Access
+Observed Habit ≠ Confirmed Preference
+Saved Skill ≠ Standing Grant
+```
+
+- 控制面有唯一任务权威；执行环境和数据保持分布。
+- 只共享路由、授权和必要工作简报，不共享全量记忆。
+- 控制流经过协调器，大数据流尽量直达。
+- 手机、IM 中的自然语言不是天然的系统授权。
+- 模型可以声明任务需要某种能力，但不能自行扩大权限。
+- 没有合适的执行环境就排队或询问，不虚构已经完成的工作。
+- 界面是否展示过程，与系统是否记录过程、用户是否有权访问过程，是三个不同问题。
+
+## 2. 从 dsh-superagent 借鉴什么
+
+参考：[deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。公开仓库是研究原型，不能将文章中的所有设想都视为已实现能力。
+
+最值得借鉴的是控制面的四分法：
+
+```text
+Trigger → Eval / Decision → Mandate + Ticket → Assignment → Report
+```
+
+它把事件、授权、持久工作和具体执行分开，而非只给单会话加多个子 Agent。
+
+### 2.1 保留的设计
+
+| 机制 | Loom 的用法 |
+| --- | --- |
+| Trigger / Thread | 统一多端事件身份、顺序和幂等；来源消息不直接取得权限 |
+| Policy Gate + Eval | 模型参与意图判断，代码负责准入；记录决定及依据 |
+| Mandate / Grant | 授权独立于 Session；扩大范围必须取得新授权 |
+| Ticket / Assignment | 工作可以换执行实例；一次执行故障不等于任务终结 |
+| Delivered ≠ Read | 输入经过送达、纳入执行、形成报告等阶段，不能仅靠 MQ ACK |
+| Durable Effects + Outbox | 先持久化待执行效果，再执行并保留恢复依据 |
+| Structured Report / Attention | Worker 提交结构化状态、结果和人工问题，不靠自由文本猜状态 |
+| Quiet by default | 只在有结果、需要决策、受阻或有价值进展时打扰用户 |
+
+### 2.2 不直接照搬的部分
+
+- **Ticket ≠ 本机 DSH Session + 本机绝对目录**：中心只保存逻辑 ProjectRef 和 Placement，Host 在实际执行时绑定本地 Workspace。
+- **不承诺直接迁移 Session**：跨机迁移的是 Task、Grant、必要 Input、报告、Git 引用及 Artifact。
+- **不让第二个 LLM 充当资源调度器**：Resource Scheduler 使用可认证的库存与确定性约束。
+- **不把进程级命令 Shim 当隔离**：公司/个人 Worker 同机时，权限由 Host 强制执行，必要时使用独立 OS 用户或容器。
+- **不把身份映射写进提示词**：跨端用户身份使用经过验证的 Principal 与 Device Link。
+- **不把已有 Effects 当作跨机 exactly-once**：增加 Lease、fencing、unknown outcome 和确定性对账。
+- **将 GitHub PR 生命周期移出通用核心**：通用任务以 Result、Review 和 Artifact 表示交付；PR 终态属于 GitHub 适配器。
+- **SourceKind 与 SourceInstance 分离**：每种入口可以有多个独立来源，各自有身份、游标、Policy 和命名空间。
+
+参考文档：[Domain](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/001-domain.md) · [Authorization](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/002-authorization.md) · [Execution](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/003-execution.md) · [Architecture](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md)。
+
+## 3. 目标架构
+
+```text
+                   Phone / Web / IM / Other Sources
+                                  │
+                            Loom Concierge
+                                  │
+       ┌──────────────────────────┼───────────────────────────┐
+       │                          │                           │
+ Identity / Policy           Ticket + Grant           Resource Registry
+ Router / Eval          Assignment + Placement       Project / Model Index
+ Effects / Outbox        Lease + Reconciliation       Artifact Index
+ Conversation Views         Task / Message Graph           Audit Index
+       │                          │                           │
+       └──────────────────────────┼───────────────────────────┘
+                                  │
+                     Authenticated Host Control Plane
+                                  │
+           ┌──────────────────────┼──────────────────────┐
+           │                      │                      │
+       Trusted Host A          Trusted Host B       Trusted Host C
+       Host Agent              Host Agent           Host Agent
+       Harness / LLM Worker    Model Worker         Project Worker
+       Local Context           Local Models         Project Checkout
+           │                      │                      │
+           └──────────────────────┼──────────────────────┘
+                                  │
+                   Task Reports / Grants / Artifact Refs
+```
+
+Host 数量、设备类型、模型能力和任务组合均由用户环境决定，不复制说明性场景中的固定机器名称。
+
+### 3.1 Concierge 中心
+
+负责：
+
+- 统一聊天入口与用户身份；
+- 意图判断、Policy Gate、Source 与回复 Channel；
+- Ticket、Grant、Assignment 与结构化 Report；
+- Project、Model、Worker、Host 和 Artifact 索引；
+- Placement、Lease、资源配额与任务 DAG；
+- 持久 Effect、恢复、对账及超时；
+- 主 Agent 的路由记忆，不汇聚完整 Worker Transcript。
+
+推荐初期采用中心单写者与事务化存储，不为了“去中心化”引入多主写入。
+
+### 3.2 Host Agent
+
+每台计算机运行一个轻量 Host Agent，负责：
+
+- 设备、硬件、服务和 Worker 注册；
+- GPU、显存、队列、负载、模型的本地探测；
+- 本机 Project 路径与 Workspace Grant；
+- 本机 Harness / Worker 执行；
+- Secret Broker 和实际权限执行；
+- Lease 心跳、停止与过期；
+- 本机 Effect Ledger 和副作用对账；
+- Artifact 内容存储与受控传输。
+
+中心不直接操纵其他机器的 Harness 内部服务，也不假定每台机器模型目录相同。
+
+### 3.3 Router、Project Scheduler、Resource Scheduler
+
+三者不应混为一个路由 LLM：
+
+```text
+Router / Eval
+  → 决定：是否做、做什么、依据与 Grant
+
+Project Scheduler
+  → 决定：任务 DAG、依赖、优先级、项目阶段及输入输出关系
+
+Resource Scheduler
+  → 决定：Host 能力、模型、位置、权限、负载与 Placement
+
+Host Agent
+  → 执行：本机启动、授权、监控、恢复、对账及上报
+```
+
+库存状态是资源事实，不是行动 Grant。
+
+### 3.4 核心领域对象
+
+| 对象 | 含义与关键边界 |
+| --- | --- |
+| Principal | 经过验证的人或组织身份，不是显示昵称 |
+| SourceInstance | 一个具体消息、文件或系统事件来源及其游标和策略 |
+| Trigger | 不可变事件；正文和元数据默认不可信 |
+| Thread | 同一来源的连续事件与路由上下文 |
+| Policy | 经过版本化、由代码执行的准入与行动规则 |
+| Grant | 谁允许哪些动作、作用域与资源，以及何时结束 |
+| Ticket | 用户工作本身的持久身份，独立于某次执行与 Session |
+| Assignment | 将 Ticket 某部分交给一次执行实例，可更换或恢复 |
+| Placement | 一次 Assignment 选择 Host / Harness / Worker 的结果 |
+| Lease | 某 Host 在某时间内执行 Assignment 的短期资格与 fencing epoch |
+| Conversation | 用户、Agent 与 Worker 交流的稳定容器；内部可对应多个执行 Session |
+| ConversationSegment | 主对话、某个 Worker 内部交流或 Worker 间交流等可过滤的消息分区 |
+| MessageRef | 对消息的引用，含发送者、接收者、任务关系、可见性和敏感级别 |
+| SessionRef | 某 Harness 的执行会话引用；不能等同于全局 Task 或 Conversation |
+| Project | 代码、文档、素材及位置、保存方式和权限的集合 |
+| Worker | 某 Host 上有独立职责、上下文、工作记忆和工具权限的执行身份 |
+| Model | 模型的身份、版本、调用方式和各 Host 放置情况 |
+| Effect | 有独立身份、可恢复、可对账的副作用意图 |
+| Artifact | 有版本、位置、语义、生成谱系和访问策略的产物 |
+| Report | Worker 对 Assignment 的结构化状态、证据和人工问题 |
+| HabitObservation | 对重复选择或工作流的临时观察，有来源、作用域、置信度和保留期限，不是长期事实 |
+| MemoryCandidate | 等待用户确认的偏好或经验草案；接受后才成为对应作用域的 Memory |
+| SkillCandidate | 从重复会话提炼的工作流草案，含适用条件、输入、步骤、验证和产物，不自动取得执行权 |
+
+## 4. 会话可见性与审计架构
+
+### 4.1 默认简洁，过程可展开
+
+用户面对一个稳定联系人，但一个 Ticket 可以产生多个 Agent / Worker ConversationSegment。UI 至少区分：
+
+- **Conversation**：用户提出的需求、必要确认和最终结果；
+- **Activity**：任务阶段、执行位置、关键状态与阻塞；
+- **Collaboration**：Agent / Worker 之间的消息、委派、回复和共享简报；
+- **Worker detail**：某次 Assignment 的执行 Session、工具调用摘要、产物和报告。
+
+界面提供全局偏好与单次任务覆盖设置：默认折叠、始终展开、只看关键协作或完全隐藏过程。偏好不得改变已保存数据，也不得绕过访问权限。
+
+### 4.2 展示与协议边界
+
+- 不把所有 Agent / Worker 之间消息转发到用户主聊天流。
+- 不把原始 Transcript 当作结构化状态的唯一来源；消息展示与 Report / Effect / Artifact 记录分别建模。
+- 消息需有稳定 ID、Ticket / Assignment 关联、发送者与接收者、时间或顺序信息、来源和可见性策略。
+- 展开视图至少要能回答：谁在协作、为何委派、交接了什么、达成了什么结论、哪里需要用户。
+- 工具调用可默认展示摘要，原始参数和输出按权限与敏感级别访问；不得因“可展开”而暴露 Secret、私有模型权重或越权项目内容。
+- 外部 Harness 的内部 Session 通过 Adapter 映射为 ConversationSegment / MessageRef，不要求统一其内部存储格式。
+- 不支持读取完整 Transcript 的 Harness，应明确标记可见性缺口，不得伪造完整交流记录。
+- 折叠或隐藏只改变视图；保留、归档与删除策略独立控制。
+- 用户可隐藏或删除自己的过程展示，不代表系统可以删除尚未完成的 Grant、Effect 和必要审计事实。
+- 消息导出、复制、检索和跨 Worker 引用必须重新检查可见性与 Grant。
+
+### 4.3 存储与性能边界
+
+初期不要求把全部原始 Worker Transcript 汇聚到中心。中心可以保存：
+
+- 用户主对话和关键协作消息；
+- 有界 Shared Brief；
+- 指向 Host 侧原始 Transcript 的受控引用；
+- 消息索引、可见性、摘要和审计元数据。
+
+用户展开细节时，可以按需从有权限的 Host 获取。离线 Host 的不可读取记录应显示“暂不可用”，不能把摘要冒充完整原文。
+
+## 5. 记忆、上下文与归档
+
+### 5.1 记忆分层
+
+| 层 | 内容 | 默认行为 |
+| --- | --- | --- |
+| Concierge Memory | 用户偏好、Agent / Host 索引、授权关系、活跃项目索引 | 长期保存，路由时按需使用 |
+| Agent / Worker Memory | 各角色长期规则、项目经验和局部上下文 | 留在所属 Worker，不默认共享 |
+| Task Working Memory | 当前约束、阶段状态、错误、局部决策 | 只交给相关任务和后续 Worker |
+| Shared Brief | Worker 提交给协调器的结论、证据、阻塞与 Artifact 引用 | 有界、结构化、与权限分开 |
+| Cold Archive | 原始会话、日志、旧资料、生成参数和历史版本 | 不主动注入，按需检索和恢复 |
+
+### 5.2 记忆保留规则
+
+- 当前活跃任务的约束优先保留；
+- 用户确认的稳定偏好和长期安全规则不会因时间自动过期；
+- 被替代的信息标记为历史版本，不当作当前事实；
+- 原始过程与老日志进入冷档案，不反复占用 Token；
+- 重复、无效中间过程可以淘汰；
+- 未完成的承诺、Grant 和审计事实不能由模型自行清理；
+- 长期记忆的自动整理支持预览、纠错和恢复。
+
+记忆可见性不等于资源访问权限。即使某 Worker 看到项目引用，也不自动取得该项目的读取权。会话折叠偏好是展示设置，不是记忆清理指令。
+
+### 5.3 从使用习惯形成 Memory / Skill 建议
+
+采用“观察 → 提议 → 审核 → 保存 → 验证 / 撤回”的生命周期：
+
+```text
+Explicit Remember ───────────────────────┐
+                                        ↓
+Conversation → HabitObservation → Candidate → User Review → Memory / Skill
+                       │                        ├→ Reject
+                       └→ Expire / Forget       └→ Edit → Save
+```
+
+**显式记住与自动建议分开：**
+
+- 用户明确说“记住我偏好……”时，可以直接保存为明确的 Memory，但敏感信息、权限和无限期后台行为仍需单独确认；
+- 系统观察到稳定习惯时，只创建临时 HabitObservation，不直接写成长期事实；
+- 多次出现且足够一致时，生成 MemoryCandidate 或 SkillCandidate，在合适时机集中提出，避免每次会话都追问；
+- 用户可预览、编辑、接受、拒绝、稍后处理、暂停此类建议或永久遗忘；
+- 接受 Memory / Skill 时可以限定全局、当前项目、某 Worker 或某 Host 作用域，默认最小可用范围。
+
+**Memory 与 Skill 的边界：**
+
+- Memory 表达偏好、事实和过去确认过的经验，例如“报告默认使用中文”“此项目优先使用指定 Worker”；
+- Skill 表达可复用的任务方法，至少包括名称、适用条件、必要输入、步骤、验证方式、预期 Artifact、来源和版本；
+- 持续性操作步骤不应只埋在 Memory；不确定是否稳定的选择不应固化成 Skill；
+- Skill 保存后仍需经过测试或样例回放才能标为已验证，运行时的资源、路径、模型和副作用权限逐次由 Grant 决定；
+- 工作流中包含 Secret、完整私有会话或不必要的原文时，候选必须排除或引用化，不能复制进 Skill 正文。
+
+**来源、冲突与保留：**
+
+- 候选保留来源 Ticket / ConversationRef、出现次数、首次与最近观察时间、作用域及摘要；出于隐私设置的证据不可用时，显示“依据不足”，不得编造出处；
+- 用户可以查看候选依据，也可以删除用于学习的历史记录；删除后是否撤销派生 Memory / Skill 应给出明确选择；
+- 新的明确指令优先于旧习惯，候选与已有规则冲突时必须询问，不得静默覆盖；
+- 不能仅凭“用户经常批准”推断出永久授权；Grant、Policy 和审计事实绝不能由习惯学习自动扩大；
+- 被拒绝的建议应降低同类提醒频率，用户可选择“不再建议”；拒绝本身不得被模型重新解释为一个新的长期偏好；
+- 候选及其接受、修改、拒绝、停用均有审计记录，但普通操作日志不应因此无期限保留。
+
+## 6. Resource、Project 与 Model Registry
+
+### 6.1 Host / Worker 能力声明
+
+```yaml
+host: gpu-example
+online: true
+hardware:
+  gpu: Example GPU
+  vram_total: 12 GiB
+  vram_free: 9.4 GiB
+services:
+  - kind: comfyui
+    endpoint: http://127.0.0.1:8188
+models:
+  - ref: example-model-revision
+    kind: lora
+    placement: local-only
+policy:
+  public_upload: deny
+  external_model_download: ask
+```
+
+字段值仅为 Schema 示例，不代表用户必须拥有 GPU、ComfyUI 或本地模型。
+
+信息来源：
+
+- Host 自报硬件、目录、Worker 和在线状态；
+- Controller 实测模型健康、显存、队列、服务与延迟；
+- 用户声明生产用途、隐私范围、是否允许无人值守；
+- 历史记录提供冷启动时间、成功率和任务耗时。
+
+Worker 自己宣称“可以跑”不是最终资源事实。
+
+**能力未知也是一种有效探测结果。** 没有本地图像生成能力、没有兼容运行时或无法读取某台 Host 时，系统必须返回未安装、不支持、未实测、离线或缺少授权等明确状态，而不是输出静态“可用能力”清单。
+
+### 6.2 Project 位置模型
+
+必须区分：
+
+1. **Canonical Remote**：GitHub / GitLab 等权威远端；
+2. **Working Tree**：某台机器上正在修改的工作树；
+3. **Generated Workspace**：某次任务创建的 Worktree、分支或临时目录；
+4. **Credential Location**：允许 Clone、Pull 或 Push 的凭据位置。
+
+```yaml
+project: example-project
+locations:
+  working_tree:
+    host: trusted-host
+    path: /work/ExampleProject
+canonical_source:
+  type: git
+  remote: git@github.com:me/ExampleProject.git
+  branch: develop
+contents:
+  docs: docs/
+  references: assets/references/
+permissions:
+  read: granted
+  write: ask
+```
+
+行为要求：
+
+- 优先复用已授权的本地工作树，避免重复 Clone；
+- 检测到未提交修改时保留并明确说明；
+- 并行代码修改优先使用独立 Worktree；
+- Clone 是独立操作，不是“知道有 Git URL”就自动执行；
+- Git 或登录凭据留在本机 Broker，不进入模型上下文；
+- 不把某机器的本地绝对路径当作全局 Artifact URI。
+
+### 6.3 模型的注册、批准与放置
+
+Model Registry 管模型的身份、版本、适用环境、可用范围和放置计划；Host 管实际存放、加载与调用。
+
+```text
+Register → Approve → Place / Load → Invoke → Retire
+```
+
+- 私有模型可以声明 `no-copy`、`local-only` 或指定 Host 专用；
+- 中心可以看到模型元数据，不等于可把权重复制到另一个环境；
+- 外部下载、公开上传、模型迁移分别有权限；
+- 权重不进入提示词或普通事件记录；
+- 任务结果记录模型、LoRA、参数、Revision 和执行环境。
+
+## 7. 授权、调度与可靠性
+
+### 7.1 Grant 与 Lease 分离
+
+- **Grant**：用户允许哪项任务使用哪些资源、目录、模型、操作及数据。
+- **Lease**：协调器允许某 Host 在某时段执行某 Assignment。
+
+二者分别版本化：用户禁止外发是 Policy，GPU 从忙碌变空闲是 Resource State。资源变化不能扩大 Grant；Policy 撤销后新执行必须停止，旧 Lease 失效，旧 Agent 的后续写入需被 fencing。
+
+### 7.2 Assignment 的建议字段
+
+```text
+assignment_id / ticket_id / grant_digest
+host_selector / selected_host_id / worker_id
+project_ref / revision / workspace_hint
+required_resources / resource_snapshot
+lease_epoch / heartbeat / expires_at
+budget / deadline
+attempt / cancellation_state
+report / reconciliation_state
+```
+
+一次换机是新 Assignment 或明确 Attempt，不延续原机器的本地会话假设。
+
+### 7.3 Effect 与 Unknown Outcome
+
+跨机采用 **at-least-once + 对账**，不承诺无法证明的 exactly-once：
+
+```text
+queued → leased → confirmed
+              └→ unknown → reconciling → confirmed | needs_person
+```
+
+每个不可合并副作用有不可变 `effect_id`、输入哈希、执行 Host 和证据。断线或崩溃后，先查 Host Ledger 或权威远端：
+
+- Git：核对 ref / commit；
+- 外部平台：利用幂等键或记录标记；
+- 本地文件：临时文件 + 原子替换 + 哈希日志；
+- 模型生成：记录任务 ID、输入摘要、产物哈希和生成状态。
+
+无法证明是否成功的敏感效果，询问用户而非盲目重跑。模型“先检查一下再决定”可辅助恢复，但不能代替确定性证据。
+
+### 7.4 调度失败与离线
+
+- 无符合 Host：排队、等待指定设备上线，或向用户提供替代方案；
+- Host 离线：Task 保留，不能伪装为执行失败或成功；
+- Worker 失联：Assignment 失联，与 Ticket 状态分别处理；
+- 重试：先处理 Unknown Outcome，防止重复副作用；
+- 通知可以广播预热，真正的副作用必须获得中心 Lease；
+- 多机暂不采用无中心争抢任务，避免双写和权限不明确。
+
+### 7.5 Host 与外部 Watchdog
+
+- Host Watchdog：检查进程、资源、Lease、任务、磁盘与对账；
+- Independent Watchdog：在另一设备或独立 Profile 检查协调器；
+- 仅重启可解决的运行故障；配置错误、无权限和持续偏离目标须报告；
+- 手动停止是尊重的持久意图，不应被自动恢复覆盖；
+- 检查进展而非仅检查进程是否活着。
+
+## 8. 用户交互与 Worker 放置
+
+保持单联系人的体验，但用以下视图提供可控性：
+
+- **Chat**：需求、确认、关键决策和最终结果；过程消息默认不占满主时间线；
+- **Activity**：任务在哪个 Host / Worker、当前阶段和阻塞；
+- **Collaboration**：可展开、可过滤的 Agent / Worker 交流、委派和共享简报；
+- **Fleet**：设备、Worker、模型、能力和在线状态；
+- **Project / Artifact**：项目来源、版本、产物及生成谱系；
+- **Memory / Access**：工作记忆摘要、Memory / Skill 建议、权限、撤回和审计。
+
+用户不必每次选机器，但首次创建以下边界时应提供选择：
+
+- 新 Agent / Worker；
+- 新项目或敏感资料目录；
+- 本地专有模型；
+- 多机都满足且长期成本、权限或体验有明显差别；
+- 长期无人值守或高成本任务。
+
+例：
+
+> 某个长期项目 Worker 要放在哪台机器？是复用已有项目环境，还是更适合模型推理的另一台设备？
+
+保存用户的默认规则，后续常规任务自动执行，冲突或成本变化时再询问。会话展开/折叠也属于可保存的默认规则，但单任务覆盖不改变长期偏好。
