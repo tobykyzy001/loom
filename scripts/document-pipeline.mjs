@@ -154,7 +154,7 @@ try {
     assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
     const doctor = await promisify(execFile)('cargo', ['run', '-q', '-p', 'loom-concierge', '--bin', 'loom', '--', '--data-dir', server.dataDir, 'doctor'], { encoding: 'utf8', env: { ...process.env, LOOM_CLIENT_TOKEN: server.clientToken } })
     const recovered = JSON.parse(doctor.stdout)
-    assert.equal(recovered.schema_version, 7)
+    assert.equal(recovered.schema_version, 8)
     assert.equal(recovered.integrity[0].integrity_check, 'ok')
     assert.equal(recovered.audit_valid, true)
     return { schema: 5, no_duplicate_child: true, liveness_resume: true }

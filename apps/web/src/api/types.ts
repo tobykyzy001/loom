@@ -1,4 +1,4 @@
-export type Page = 'conversation' | 'activity' | 'devices' | 'projects' | 'memories' | 'skills' | 'access' | 'help'
+export type Page = 'conversation' | 'activity' | 'devices' | 'projects' | 'plans' | 'memories' | 'skills' | 'access' | 'help'
 export type ProjectMode = 'read_only' | 'read_write'
 export type TicketKind = 'read_summary' | 'edit_file' | 'model_text'
 export type TicketStatus =
@@ -322,6 +322,64 @@ export interface AuditEntry {
   created_at?: string
   summary?: string
   details?: Record<string, unknown>
+}
+
+export type InstallTargetStatus = 'pending_approval' | 'approved' | 'healthy_observed' | 'health_failed' | 'rollback_approved' | 'rolled_back_observed' | 'unknown' | 'not_selected' | 'incompatible'
+export type InstallOutcome = 'healthy' | 'health_failed' | 'connection_lost'
+export interface InstallTarget {
+  id: string
+  host_key: string
+  os: string
+  arch: string
+  baseline_version: string
+  requested_version: string
+  selected: boolean
+  status: InstallTargetStatus
+  current_version: string
+  current_operation_id?: string | null
+  approved_at?: string | null
+  rollback_parent_operation_id?: string | null
+  observations?: Array<{
+    operation_id: string
+    operation: 'apply' | 'rollback'
+    outcome: InstallOutcome
+    reported_at: string
+    report_kind: 'manual_synthetic_inventory_report'
+    simulated: true
+  }>
+}
+export interface InstallComponent {
+  kind: 'bare_host' | string
+  version: string
+  sha256: string
+  source: 'local_package_candidate' | string
+}
+export interface InstallPlan {
+  id: string
+  schema: 'loom.install-plan.v1' | string
+  version: number
+  plan_digest: string
+  proof_kind: 'synthetic_plan_only' | string
+  source: string
+  component: InstallComponent
+  authorization_revision: string
+  host_execution: false
+  created_at: string
+  updated_at: string
+  targets: InstallTarget[]
+}
+export interface InstallPlanPolicy {
+  simulation_only: boolean
+  fixture_reporting: boolean
+  remote_execution: boolean
+  proof_kind: 'synthetic_plan_only' | string
+}
+export interface InstallPlanData { plan: InstallPlan; policy: InstallPlanPolicy }
+export type InstallPlanAction = 'approve' | 'rollback' | 'observe'
+export interface InstallObservationRequest {
+  target_id: string
+  operation: 'apply' | 'rollback'
+  outcome: InstallOutcome
 }
 
 export interface ApiErrorBody {

@@ -68,7 +68,7 @@ export async function startRustConcierge({ env = process.env, root } = {}) {
   const log = []
   const child = spawn(executable, [...args, '--data-dir', dataDir, 'serve', '--listen', `127.0.0.1:${port}`], {
     cwd: repository, shell: false,
-    env: { LOOM_CLIENT_TOKEN: clientToken, PATH: env.PATH || process.env.PATH, RUST_LOG: 'loom_concierge=warn' },
+    env: { LOOM_CLIENT_TOKEN: clientToken, PATH: env.PATH || process.env.PATH, RUST_LOG: 'loom_concierge=warn', ...(env.LOOM_INSTALL_SIMULATION ? { LOOM_INSTALL_SIMULATION: env.LOOM_INSTALL_SIMULATION } : {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let earlyExit = null

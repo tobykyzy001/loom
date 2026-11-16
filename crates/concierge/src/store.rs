@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 7 {
+        if current > 8 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 7)"
+                "database schema is from a newer Loom release (found {current}, supported 8)"
             )
         }
         if current == 0 {
@@ -155,6 +155,20 @@ impl Store {
                     definition_json TEXT NOT NULL, proof_json TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 PRAGMA user_version=7;"
+            )?;
+        }
+        if current < 8 {
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS install_plans(
+                    id TEXT PRIMARY KEY, plan_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS install_targets(
+                    plan_id TEXT NOT NULL REFERENCES install_plans(id), target_id TEXT NOT NULL,
+                    target_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id,target_id)
+                );
+                PRAGMA user_version=8;",
             )?;
         }
         Ok(())
@@ -330,6 +344,16 @@ impl Store {
         Ok(true)
     }
 }
+pub fn audit_tx_plan(
+    connection: &Connection,
+    actor: &str,
+    action: &str,
+    evidence: &Value,
+) -> Result<()> {
+    // Plans deliberately have no Ticket foreign key, but share the same hash chain.
+    audit_tx(connection, None, actor, action, evidence)
+}
+
 pub fn audit_tx(
     connection: &Connection,
     ticket: Option<&str>,
@@ -461,7 +485,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);
@@ -494,6 +518,11 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM skill_replays", [], |r| r.get(0))
             .unwrap();
         assert_eq!(replay_tables, 0);
+        let install_plans: i64 = reopened
+            .conn()
+            .query_row("SELECT COUNT(*) FROM install_plans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(install_plans, 0);
         let skills: i64 = reopened
             .conn()
             .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))

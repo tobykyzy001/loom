@@ -438,6 +438,17 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
         .route("/pipelines/{id}", get(pipeline_detail))
         .route("/pipelines/{id}/run", post(run_pipeline))
         .route("/pipelines/{id}/cancel", post(cancel_pipeline))
+        .route(
+            "/install-plans",
+            get(install_plans).post(create_install_plan),
+        )
+        .route("/install-plans/{id}", get(install_plan_detail))
+        .route("/install-plans/{id}/approve", post(approve_install_plan))
+        .route(
+            "/install-plans/{id}/rollback-approve",
+            post(rollback_install_plan),
+        )
+        .route("/install-plans/{id}/observe", post(observe_install_plan))
         .route("/inventory", get(inventory))
 }
 
@@ -2260,6 +2271,54 @@ async fn skill_replay(
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
     Ok(Json(crate::skill_replay::present(&store, &candidate)?))
+}
+
+async fn create_install_plan(
+    AppState(state): AppState<Arc<State>>,
+    Json(input): Json<crate::install_plan::CreateInput>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::install_plan::create(&store, input)?))
+}
+async fn install_plans(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::install_plan::list(&store)?))
+}
+async fn install_plan_detail(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::install_plan::detail(&store, &id)?))
+}
+async fn approve_install_plan(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(input): Json<crate::install_plan::ApproveInput>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::install_plan::approve(&store, &id, input)?))
+}
+async fn rollback_install_plan(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(input): Json<crate::install_plan::RollbackInput>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::install_plan::rollback_approve(
+        &store, &id, input,
+    )?))
+}
+async fn observe_install_plan(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(input): Json<crate::install_plan::ObserveInput>,
+) -> ApiResult<Json<Value>> {
+    if std::env::var("LOOM_INSTALL_SIMULATION").ok().as_deref() != Some("synthetic_inventory") {
+        return Err(ApiError::new(StatusCode::NOT_IMPLEMENTED,"synthetic_install_observation_disabled","Only the explicitly enabled synthetic Inventory driver can report fixture observations; actual Host execution is unavailable."));
+    }
+    let store = state.lock()?;
+    Ok(Json(crate::install_plan::observe(&store, &id, input)?))
 }
 
 fn hash_json(value: &Value) -> String {

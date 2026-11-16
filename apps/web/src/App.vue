@@ -14,13 +14,14 @@ import ActivityView from './views/ActivityView.vue'
 import DevicesView from './views/DevicesView.vue'
 import ProjectsView from './views/ProjectsView.vue'
 import MemoriesView from './views/MemoriesView.vue'
+import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
-import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill } from './state/workspace'
+import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
 import { grantOperationsSummary } from './lib/permissions'
-import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate } from './api/types'
+import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate, InstallOutcome, InstallPlan, InstallTarget } from './api/types'
 
 const { state, ticket, projects, tickets, nodes, bootstrap, expanded } = useWorkspace()
 const showProjects = ref(false)
@@ -40,6 +41,7 @@ const nodeStatus = computed(() => !state.connected ? '未连接' : !nodes.value.
 const navItems: { page: Page; label: string; icon: IconName }[] = [
   { page: 'conversation', label: '对话', icon: 'conversation' }, { page: 'activity', label: '活动', icon: 'activity' },
   { page: 'devices', label: '设备', icon: 'devices' }, { page: 'projects', label: '项目', icon: 'projects' },
+  { page: 'plans', label: '部署', icon: 'shield' },
   { page: 'memories', label: '记忆', icon: 'memories' }, { page: 'skills', label: '技能', icon: 'sparkle' }, { page: 'access', label: '权限', icon: 'access' },
 ]
 const ticketOpen = computed(() => state.page === 'conversation' && !!state.selectedTicketId)
@@ -58,6 +60,7 @@ function changePage(page: Page) {
   if (['devices', 'access', 'memories'].includes(page)) void loadResources()
   if (page === 'projects') void refresh()
   if (page === 'skills') void loadSkillEvidence()
+  if (page === 'plans') void loadInstallPlans()
 }
 function selectTask(id: string) { void selectTicket(id, 'conversation') }
 function skillReplay(candidate: SkillCandidate, sourceTicketId: string) {
@@ -72,6 +75,18 @@ function skillReview(candidate: SkillCandidate, decision: 'accept' | 'reject' | 
     danger: decision !== 'accept',
     confirmLabel: decision === 'accept' ? '确认保存证明' : decision === 'undo' ? '确认撤销审阅' : '确认拒绝候选',
   }, () => reviewSkill(candidate, decision))
+}
+function createPlan(ids: string[]) {
+  ask({ title: '创建合成 Inventory 审阅计划？', effect: '只记录 Bare 0.1.0 候选包的审阅计划，不下载、不安装、不注册节点，也不会改变任何授权或真实主机。', changes: [`选中的 fixture：${ids.join('、')}`, '未选目标和不兼容目标分别保留自己的只读状态', '服务端将生成 ID 与不可变 plan_digest，之后再逐目标审阅。'], confirmLabel: '确认创建审阅计划' }, () => createInstallPlan(ids))
+}
+function approveTarget(plan: InstallPlan, target: InstallTarget) {
+  ask({ title: '审阅此一个目标的 apply？', effect: '只为此目标绑定当前计划的快照。不是批准全部目标，也不使合成菜单变成执行授权。', changes: [`目标：${target.host_key} / ${target.id}`, `计划摘要：${plan.plan_digest}`, '签发仅计划用途的操作引用；需单独记录受控 fixture 观察。'], confirmLabel: '确认审阅此目标' }, () => approveInstallTarget(plan, target))
+}
+function rollbackTarget(plan: InstallPlan, target: InstallTarget) {
+  ask({ title: '审阅此合成 apply 的回滚？', effect: '只记录对已有合成 apply 的回滚计划；不会在真实主机上回滚、不会改为已经回退的版本，也不撤销原观察记录。', changes: [`目标：${target.host_key} / ${target.id}`, `已知合成操作：${target.current_operation_id}`, '回滚仍需一次独立的合成观察。失联/未知操作不允许用于此操作。'], danger: true, confirmLabel: '确认审阅回滚' }, () => rollbackInstallTarget(plan, target))
+}
+function observeTarget(plan: InstallPlan, target: InstallTarget, operation: 'apply' | 'rollback', outcome: InstallOutcome) {
+  ask({ title: '提交这条受控 fixture 观察？', effect: '这是一次由用户提供的 fixture 报告，仅服务端在合成模式开启时保存。不是主机遥测、真实安装结果或独立外部验证。', changes: [`目标：${target.host_key} / ${target.id}`, `操作：${operation}；报告：${outcome}`, outcome === 'connection_lost' ? '将保留 Unknown：需具名对账，不能自动再次执行或用另一结果重分类。' : '仅改变服务端此条合成计划的记录；不会安装或激活任何对象。'], danger: outcome !== 'healthy', confirmLabel: '确认记录合成观察' }, () => observeInstallTarget(plan, target, { target_id: target.id, operation, outcome }))
 }
 function ticketCancel() {
   const id = ticket.value?.id
@@ -121,6 +136,7 @@ function onVisibility() { if (document.visibilityState === 'visible') void refre
 onMounted(() => {
   void refresh()
   if (state.page === 'skills') void loadSkillEvidence()
+  if (state.page === 'plans') void loadInstallPlans()
   startPolling()
   document.addEventListener('visibilitychange', onVisibility)
 })
@@ -155,6 +171,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
         </section>
         <ActivityPanel :class="{ 'mobile-inline-activity': ticketOpen }" :ticket="ticketOpen ? ticket : null" :audit="state.audit" :expanded="expanded" :preferences="state.preferences" :audit-error="state.errors.audit" @save="(value, sender) => void updatePreferences(value, sender, state.selectedTicketId ?? undefined)" />
       </template>
+      <InstallPlansView v-else-if="state.page === 'plans'" :plans="state.installPlans" :policy="state.installPlanPolicy" :loading="state.busy.plans" :busy="state.busy['plan-write']" :error="state.errors['plan-write']" :read-error="state.errors.plans" @create="createPlan" @approve="approveTarget" @rollback="rollbackTarget" @observe="observeTarget" @refresh="void loadInstallPlans()" />
       <ActivityView v-else-if="state.page === 'activity'" :tickets="tickets" :projects="projects" :audit="state.audit" @select="selectTask" />
       <template v-else-if="state.page === 'devices'">
         <DevicesView ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" @enroll="void enroll()" />
@@ -168,7 +185,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
       <p v-if="state.errors.preferences" class="preferences-error" role="status">{{ state.errors.preferences }}</p>
     </main>
     <button v-if="!ticketOpen" class="mobile-new-task button primary" aria-label="新建任务" @click="startNewTicket"><AppIcon name="plus" :size="20" /></button>
-    <nav class="mobile-tabs" aria-label="移动端工作空间"><button v-for="item in navItems.slice(0, 4)" :key="item.page" :class="{ active: state.page === item.page }" :aria-current="state.page === item.page ? 'page' : undefined" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="20" /><span>{{ item.label }}</span></button><button :class="{ active: showMore || ['memories', 'skills', 'access', 'help'].includes(state.page) }" :aria-expanded="showMore" @click="showMore = !showMore"><AppIcon name="menu" :size="20" /><span>更多</span></button></nav>
+    <nav class="mobile-tabs" aria-label="移动端工作空间"><button v-for="item in navItems.slice(0, 4)" :key="item.page" :class="{ active: state.page === item.page }" :aria-current="state.page === item.page ? 'page' : undefined" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="20" /><span>{{ item.label }}</span></button><button :class="{ active: showMore || ['memories', 'skills', 'plans', 'access', 'help'].includes(state.page) }" :aria-expanded="showMore" @click="showMore = !showMore"><AppIcon name="menu" :size="20" /><span>更多</span></button></nav>
     <nav v-if="showMore" class="mobile-more" aria-label="更多工作空间"><button v-for="item in navItems.slice(4)" :key="item.page" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="18" />{{ item.label }}</button><button @click="changePage('help')"><AppIcon name="help" :size="18" />帮助</button><button @click="showMore = false; showConnection = true"><AppIcon name="settings" :size="18" />连接设置</button></nav>
     <ProjectDialog v-if="showProjects" :busy="state.busy.project" :error="state.errors.project" @close="showProjects = false" @submit="saveProject" />
     <ConnectionDialog v-if="showConnection" @saved="onConnectionSaved" />

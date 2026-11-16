@@ -1,11 +1,14 @@
 import { reactive, toRefs } from 'vue'
 import { ApiError, LoomClient } from '../api/client'
 import { auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
-import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, Ticket } from '../api/types'
+import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, InstallObservationRequest, InstallTarget, InstallPlan, InstallPlanData, InstallPlanPolicy, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, Ticket } from '../api/types'
 import { PAGE_KEY, TICKET_KEY, TOKEN_KEY, cachedExpanded, localRead, localWrite } from '../lib/storage'
 import { SkillActions, type SkillWorkspaceReference } from '../lib/skillActions'
+import { InstallPlanActions, type InstallPlanRefresh } from '../lib/installPlan'
 export interface WorkspaceState {
   page: Page
+  installPlans: InstallPlan[]
+  installPlanPolicy: InstallPlanPolicy | null
   expanded: boolean
   selectedTicketId: string | null
   ticket: Ticket | null
@@ -24,17 +27,19 @@ export interface WorkspaceState {
   errors: Record<string, string>
 }
 
-const pages: Page[] = ['conversation', 'activity', 'devices', 'projects', 'memories', 'skills', 'access', 'help']
+const pages: Page[] = ['conversation', 'activity', 'devices', 'projects', 'plans', 'memories', 'skills', 'access', 'help']
 const savedPage = localRead(PAGE_KEY) as Page
 const state = reactive<WorkspaceState>({
   page: pages.includes(savedPage) ? savedPage : 'conversation',
   expanded: cachedExpanded(),
   selectedTicketId: localRead(TICKET_KEY),
   ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], grants: [], audit: [], artifacts: {}, skillData: null,
+  installPlans: [], installPlanPolicy: null,
   preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, busy: {}, errors: {},
 })
 const client = new LoomClient({ token: () => localRead(TOKEN_KEY) ?? '' })
 const skillActions = new SkillActions(client)
+const installActions = new InstallPlanActions(client)
 let detailVersion = 0
 let refreshInFlight: Promise<void> | null = null
 let poll: ReturnType<typeof setInterval> | undefined
@@ -311,6 +316,34 @@ export async function reviewSkill(candidate: SkillCandidate, decision: 'accept' 
   state.skillData = result.data
   state.tickets = result.tickets
   return true
+}
+
+export async function loadInstallPlans(): Promise<boolean> {
+  const result = await run('plans', () => installActions.list())
+  return applyPlans(result)
+}
+function applyPlans(result?: InstallPlanRefresh): boolean {
+  if (result === undefined) return false
+  state.installPlans = result.plans
+  state.installPlanPolicy = result.policy
+  return true
+}
+export async function createInstallPlan(selected: string[]): Promise<boolean> {
+  return applyPlans(await run('plan-write', () => installActions.create(selected)))
+}
+export async function approveInstallTarget(plan: InstallPlan, target: InstallTarget): Promise<boolean> {
+  return applyPlans(await run('plan-write', () => installActions.approve(plan, target)))
+}
+export async function rollbackInstallTarget(plan: InstallPlan, target: InstallTarget): Promise<boolean> {
+  return applyPlans(await run('plan-write', () => installActions.rollback(plan, target)))
+}
+export async function observeInstallTarget(plan: InstallPlan, target: InstallTarget, request: InstallObservationRequest): Promise<boolean> {
+  const policy = state.installPlanPolicy
+  if (!policy) {
+    state.errors['plan-write'] = '尚未读取合成 Inventory 的边界策略，未记录观察。'
+    return false
+  }
+  return applyPlans(await run('plan-write', () => installActions.observe(plan, target, request, policy)))
 }
 
 export function useWorkspace() { return { state, ...toRefs(state) } }

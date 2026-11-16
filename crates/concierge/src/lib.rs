@@ -3,6 +3,7 @@
 pub mod api;
 mod command;
 mod direct_offer;
+mod install_plan;
 pub mod inventory;
 pub mod inventory_probe;
 mod maintenance;
@@ -460,7 +461,7 @@ mod skill_replay_regressions {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert!(store
             .query("SELECT * FROM skill_replays", [])
             .unwrap()

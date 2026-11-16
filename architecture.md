@@ -597,6 +597,10 @@ permissions_requested / declared_effects / default_disabled
 
 Rollout Plan 至少包含：目标 Node / Worker、包版本、期望状态、逐项安装 Grant、超时、是否允许重启、健康检查和回滚版本。Bootstrap Plan 另外声明连接方式、目标凭据引用、是否允许 sudo、配对方式、安装范围和卸载 / 回滚策略。
 
+**当前实现只证明了合成 Inventory 的计划与人工观察**：`loom.install-plan.v1` 使用固定的、已实测 Bare 候选描述符与显式 `fixture-*` 目标，服务生成的 `plan_digest` 与每个目标的 `current_operation_id` 约束审批操作。SQLite schema 8 仅追加计划和目标 JSON/时间戳；每个 fixture 观察带有当前 `operation_id` 与人工 `manual_synthetic_inventory_report` 标记，回滚保留父 apply/自身 op 的关系。这不是主机报告、Grant、配对或 Artifact，也不是已安装、可启动的主机身份。背景枚举和回环使用静态清单，`LOOM_INSTALL_SIMULATION=synthetic_inventory` 是仅供测试的 explicit process opt-in，未启用默认501，client不可自行宣称拥有一个有效 fixture service。未知状态保持未知，不可换结果盲目 rollout/rollback，也不由 UI直接反写为健康。合成的健康失败记录不会自动抹除原证据或生成第二张工单。真正的宿主安装、真实效果entry和可追溯session必须另作明确对接，不能靠视口/模拟观察升格。
+
+真实 `node tests/install/plan.mjs` 的HTTP、回滚/未知与controller重启，以及`node tests/install/browser.mjs`的实际创建确认和审批、失败与父关联回滚、Unknown和窄屏已形成一处基础证据。此前UI只检查所有历史 observation便阻止下一次合法回滚的错误，已限定为当前operation ID校验。合成观察可以见证历史 apply 和新的 rollback 两类独立操作，但不会互相篡改或者授予真实执行权。范围、迁移和证据见 [tests/install/README.md](tests/install/README.md)。
+
 运维可以自带 SSH Config 或 Ansible Inventory / Playbook 选择目标，但 Loom 不能静默扫描并接管整个网段。Ansible 或其他安装器应作为外部工具 Adapter 生成审计结果，不依赖模型临时拼出的脚本。
 
 中心先把可信包放入可寻址 Store；Host 在线时拉取或经 LAN 点对点获取。包体不经聊天 Router，不重复传大文件。不同 OS / arch 选择对应产物，不兼容的设备明确跳过。

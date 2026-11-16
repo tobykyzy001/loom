@@ -57,6 +57,8 @@ deploy/
 - `node tests/harness/bundle-preflight.mjs`：实际插件manifest/export/path/locale/icon和默认关闭等31项**不安装、不激活**源检查；临时副本导入shape，不调用`apply`，不能代替真实宿主兼容性。缺真正依赖 claim明确NOT RUN。详见 [harness/BUNDLE_PREFLIGHT.md](harness/BUNDLE_PREFLIGHT.md)。
 - `node tests/harness/real-bundle-lifecycle.mjs`：唯一临时profile中的真plugin安装、worker禁用、metadata-only remove/add/重启、坏包不覆盖和**精确匹配原worker/Grant**的撤权保持。仅本地`file:`流程，不等于生产桌面安装、GUI registry更新或真实 LLM。见 [harness/BUNDLE_LIFECYCLE.md](harness/BUNDLE_LIFECYCLE.md)。
 - `node scripts/bare-package-smoke.mjs`：当前macOS arm64真实 Bare native binary 的12项打包检查，包括offline构建、实际执行、SHA/权限、不注册的help/version、非法root/配对和截断/symlink/hardlink/空binary拒绝。只有当前host，不是通用安装器。原生读写/取消/恢复另实跑 `node scripts/bare-integration.mjs`。见 [BARE_PACKAGE.md](docs/BARE_PACKAGE.md)。
+- `node tests/install/plan.mjs`：真实HTTP和持久化合成 Inventory 计划；审核 immutable digest，逐目标审批、health_failed/healthy、父 apply 绑定回滚、Unknown只保留原记录。默认服务未启用 fixture 观察时返回501，跨端口重启保持原关系与审计。所有selected目标`fixture-*`，不会真实安装/注册；存储schema8，不影响既有 Skill replay.version仍为1。
+- `node tests/install/browser.mjs`：真实Edge中合成 Inventory 的计划创建与确认，批准digest、失败报告、二次独立回滚观察和Unknown无retry，390 viewport溢出检查。当前op的回归 guard修复已验证有先前 apply 历史时仍合法报告新 rollback，而不是清空历史/继续create。仅受控远程无 Host、SSH或凭据；限界见 [install/README.md](tests/install/README.md)。
 - `node tests/browser/run.mjs --narrow-viewport --keep-evidence`：实际安装的桌面Edge上完成原生Work Space的注册、Grant、读写/效应、取消及窄视口检查。它不是手机、锁屏或iOS/Android真机验证。
 
 此节只记录既有测试入口，不因命令存在自动认定成功，也不以此代替用户明确暂缓的1+3 Compose 拓扑。
