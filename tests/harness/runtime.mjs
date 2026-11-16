@@ -7,12 +7,12 @@ import { PROFILE, installation, profilePatch, redact, sleep } from './environmen
 
 /** Exactly the installed SDK JSON-RPC wire protocol, with private stderr and no secret fields. */
 export class FixtureHost extends EventEmitter {
-  constructor(root, env, secrets = []) {
+  constructor(root, env, secrets = [], initializeModel = { provider: 'loom-stub', model: 'loom-stub-v1' }) {
     super()
-    this.root = root; this.env = env; this.secrets = secrets
+    this.root = root; this.env = env; this.secrets = secrets; this.initializeModel = initializeModel
     this.pending = new Map(); this.frames = []; this.events = []; this.text = ''
     this.earlyExit = null
-    this.stderr = []; this.child = null; this.next = 1; this.draining = false
+    this.stderr = []; this.protocolFramingErrors = []; this.child = null; this.next = 1; this.draining = false
   }
   async start() {
     if (this.child) throw new Error('Host already started')
@@ -34,7 +34,7 @@ export class FixtureHost extends EventEmitter {
     }
     this.child.once('error', (error) => onExit({ error: error.message }))
     this.child.once('exit', (code, signal) => onExit({ code, signal }))
-    await this.raw('initialize', { cwd: join(this.root, 'project'), provider: 'loom-stub', model: 'loom-stub-v1', approvalRequests: true }, 60_000)
+    await this.raw('initialize', { cwd: join(this.root, 'project'), ...this.initializeModel, approvalRequests: true }, 60_000)
     await appendFile(join(this.root, 'private', 'host-lifecycle.jsonl'), JSON.stringify({ event: 'initialized', dsh_profile: PROFILE, argv: ['--profile', PROFILE, '--patch', '<fixture>/patch/fixture.yml'] }) + '\n', { mode: 0o600 })
     return this
   }
@@ -49,7 +49,7 @@ export class FixtureHost extends EventEmitter {
       const line = this.text.slice(0, index); this.text = this.text.slice(index + 1)
       if (!line.trim()) continue
       let frame
-      try { frame = JSON.parse(line) } catch (error) { this.emit('protocol-error', error); continue }
+      try { frame = JSON.parse(line) } catch (error) { this.protocolFramingErrors.push(redact(error.message, this.secrets)); this.emit('protocol-error', error); continue }
       this.frames.push(frame)
       if (frame.method) this.emit(frame.method, frame.params)
       if (frame.method === 'session.event') this.events.push(frame.params)
