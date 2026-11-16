@@ -1,0 +1,23 @@
+{
+  "protocol": "loom.node.v1",
+  "node_id": "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+  "installation_id": "fixture-installation",
+  "public_key": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "enrollment_code": "synthetic-enrollment-code",
+  "nonce": "0909090909090909090909090909090909090909090909090909090909090909",
+  "signed_challenge": "rwg3aX5lPSfDQNENI2b_kjS26Ehy_mUofWztC3nyvzLieIj2TtQXLtaqCKxWFfcG7em8_tWvz-Bb_vTdx94vDg",
+  "request_id": "99999999-9999-4999-8999-999999999902",
+  "capabilities": [
+    {
+      "ticket_kind": "read_summary",
+      "permission": "read"
+    },
+    {
+      "ticket_kind": "edit_file",
+      "permission": "write"
+    }
+  ],
+  "worker_id": "fixture-worker",
+  "harness_kind": "dsh",
+  "profile_id": "fixture-profile"
+}

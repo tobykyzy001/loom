@@ -1,0 +1,33 @@
+{
+  "protocol": "loom.node.v1",
+  "node_id": "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+  "installation_id": "fixture-installation",
+  "request_id": "99999999-9999-4999-8999-999999999920",
+  "sent_at": "2027-01-15T08:00:39Z",
+  "ticket_id": "99999999-9999-4999-8999-999999999910",
+  "artifact_id": "99999999-9999-4999-8999-999999999915",
+  "assignment_id": "99999999-9999-4999-8999-999999999911",
+  "lease_id": "99999999-9999-4999-8999-999999999912",
+  "lease_epoch": 1,
+  "grant_digest": "74e540838a313452db2ab6d4beb544cb773a5275dc77def8778854e83817940a",
+  "metadata": {
+    "schema": "loom.artifact.v1",
+    "artifact_id": "99999999-9999-4999-8999-999999999915",
+    "ticket_id": "99999999-9999-4999-8999-999999999910",
+    "assignment_id": "99999999-9999-4999-8999-999999999911",
+    "origin_node_id": "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+    "location": "loom-artifact://local/99999999-9999-4999-8999-999999999915",
+    "media_type": "text/plain",
+    "size_bytes": 6,
+    "sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+    "parents": [],
+    "evidence": [
+      {
+        "kind": "atomic_file_replace",
+        "digest": "0ba57761d5f851f3873e9d7cec8c7faa92a9f38932de88294f7ef7a4741824e8",
+        "uri": null
+      }
+    ]
+  },
+  "bytes_base64": "aGVsbG8K"
+}

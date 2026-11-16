@@ -1,0 +1,27 @@
+{
+  "assignment": {
+    "id": "99999999-9999-4999-8999-999999999911",
+    "ticket_id": "99999999-9999-4999-8999-999999999910",
+    "node_id": "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+    "installation_id": "fixture-installation",
+    "worker_id": "fixture-worker",
+    "attempt": 1,
+    "lease_id": "99999999-9999-4999-8999-999999999912",
+    "lease_epoch": 1,
+    "lease_expires_at": "2027-01-15T08:03:20Z",
+    "grant_digest": "74e540838a313452db2ab6d4beb544cb773a5275dc77def8778854e83817940a",
+    "operation": {
+      "edit_file": "notes/out.txt"
+    },
+    "session": {
+      "harness_kind": "dsh",
+      "profile_id": "fixture-profile",
+      "session_id": "synthetic-session",
+      "revision": 1
+    }
+  },
+  "ticket_id": "99999999-9999-4999-8999-999999999910",
+  "project_id": "99999999-9999-4999-8999-999999999914",
+  "objective": "Write the synthetic hello fixture",
+  "kind": "read_summary"
+}

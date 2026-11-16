@@ -1,0 +1,29 @@
+[package]
+name = "loom-protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Versioned wire contracts and deterministic M0 domain checks for Loom"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+
+[[example]]
+name = "generate_fixtures"
+required-features = ["fixture-signing"]
+
+[features]
+# Test-only synthetic fixture generation. Do not enable for real key storage.
+fixture-signing = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

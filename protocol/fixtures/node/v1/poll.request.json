@@ -1,0 +1,9 @@
+{
+  "protocol": "loom.node.v1",
+  "node_id": "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+  "installation_id": "fixture-installation",
+  "request_id": "99999999-9999-4999-8999-999999999904",
+  "sent_at": null,
+  "last_assignment_id": null,
+  "wait_seconds": 20
+}

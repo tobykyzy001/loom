@@ -1,0 +1,12 @@
+/target/
+**/*.rs.bk
+.DS_Store
+/node_modules/
+/apps/*/node_modules/
+/packages/*/node_modules/
+/.loom/
+/test-results/
+/tests/artifacts/
+*.local
+.env
+scripts/verify-baseline.mjs.result.json
