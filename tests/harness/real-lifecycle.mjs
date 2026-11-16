@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { randomUUID, createHash } from 'node:crypto'
+import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { installation, isolatedEnv, fixtureRoot, installBundles, command, redact, sleep, PROFILE } from './environment.mjs'
@@ -11,7 +11,7 @@ import { LoomHttpClient } from '../../packages/node-client/src/http.js'
 export async function runRealLifecycle({ output = process.env.LOOM_TEST_OUTPUT ? resolve(process.env.LOOM_TEST_OUTPUT) : undefined, root: requestedRoot } = {}) {
   const root = await fixtureRoot(requestedRoot)
   const checks = []
-  const facts = { real_dsh: 'NOT RUN', install: 'NOT RUN', register: 'NOT RUN', task: 'NOT RUN', cancellation: 'NOT RUN', resume: 'NOT RUN', live_llm: 'NOT RUN (zero network Stub)' }
+  const facts = { real_dsh: 'NOT RUN', install: 'NOT RUN', register: 'NOT RUN', task: 'NOT RUN', programming_write: 'NOT RUN', traversal_failure: 'NOT RUN', cancellation: 'NOT RUN', resume: 'NOT RUN', live_llm: 'NOT RUN (zero network Stub)' }
   const log = async (name, evidence) => { checks.push({ name, status: 'PASS', evidence }); console.log(`PASS real DSH: ${name}`) }
   const failure = (error) => {
     const text = redact(error.stack || error.message || error, secrets)
@@ -65,7 +65,7 @@ export async function runRealLifecycle({ output = process.env.LOOM_TEST_OUTPUT ?
     const binding = await admin.post('/api/v1/project-bindings', { project_id: projectId, node_id: node.id, worker_id: 'default', root_scope: projectRoot })
     const grantResponse = await admin.post('/api/v1/grants', { project_id: projectId, node_id: node.id, worker_id: 'default', operations: ['read', 'write'] })
     const grantId = grantResponse.grant.id
-    const createTicket = (objective, kind = 'read_summary') => admin.post('/api/v1/tickets', { project_id: projectId, node_id: node.id, grant_id: grantId, worker_id: 'default', objective, kind, relative_path: 'not-a-file-operation' })
+    const createTicket = (objective, kind = 'read_summary', relativePath = 'not-a-file-operation') => admin.post('/api/v1/tickets', { project_id: projectId, node_id: node.id, grant_id: grantId, worker_id: 'default', objective, kind, relative_path: relativePath })
     const followup = await createTicket(`LOOM_FIXTURE_READ ${randomUUID()} Please call the controlled inspect tool for project ORBITAL-731.`)
     await host.waitFor(() => readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8').then((value) => JSON.parse(value).assignments.length > 0, () => false), 45_000, 'real own DSH Agent Session creation')
     const mapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
@@ -88,6 +88,59 @@ export async function runRealLifecycle({ output = process.env.LOOM_TEST_OUTPUT ?
     assert.equal((await stat(join(root, 'node-state', 'dsh-session-map.json'))).mode & 0o777, 0o600)
     facts.task = 'PASS'
     await log('actual Loom Ticket to real DSH Agent followup + controlled tool + immutable artifact', { ticket_id: followup.id, assignment_id: completed.assignments[0].id, session_id: sessionId, host_tool_calls: 1, final_reason: 'completed', report_state: 'succeeded', artifact_id: artifact.artifact.id, source: 'DSH committed assistant/message', effect_kind: 'none (read-only inspect tool)', project_binding_id: binding.id })
+    const programming = await createTicket('Create a small semantic HTML page with the specified fixture title "Loom verifier portal". LOOM_FIXTURE_FILE_WRITE', 'edit_file', 'demo.html')
+    const writeCompleted = await waitTicket(admin, programming.id, ['succeeded', 'failed', 'reconciling', 'cancelled'], 60_000)
+    assert.equal(writeCompleted.status, 'succeeded', JSON.stringify({ reports: writeCompleted.reports, status: writeCompleted.status }))
+    const writeMapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+    const writeSessionId = writeMapping.assignments.find((entry) => entry.assignment_id === programming.assignments[0].id)?.session_id
+    assert.ok(writeSessionId, 'Programming Assignment requires its own actual DSH SessionRef')
+    const writeCall = host.sessionEvents(writeSessionId, ['tool/call']).find((entry) => entry.event.data?.name === 'loom_fixture_write')
+    assert.ok(writeCall?.event.data.callId, 'The public DSH Agent must actually declare the bounded file-write tool call')
+    const writeArguments = JSON.parse(writeCall.event.data.arguments)
+    assert.equal(writeArguments.path, 'demo.html')
+    assert.equal(writeArguments.title, 'Loom verifier portal')
+    const writeResult = host.sessionEvents(writeSessionId, ['tool/result']).find((entry) => entry.event.data?.message?.toolCallId === writeCall.event.data.callId)
+    assert.ok(writeResult?.event.data.message, 'Actual public bounded write ToolResult is required')
+    assert.equal(writeResult.event.data.message.isError, false)
+    const file = join(projectRoot, 'demo.html')
+    const fileBytes = await readFile(file)
+    const contentHash = createHash('sha256').update(fileBytes).digest('hex')
+    assert.equal(writeResult.event.data.message.content[0].text, JSON.stringify({ created: true, path: 'demo.html', sha256: contentHash, size_bytes: fileBytes.length, title: 'Loom verifier portal' }))
+    assert.match(fileBytes.toString('utf8'), /<title>Loom verifier portal<\/title>/)
+    assert.match(fileBytes.toString('utf8'), /<main><h1>Loom verifier portal<\/h1>/)
+    assert.equal(writeCompleted.effects.length, 1)
+    assert.equal(writeCompleted.effects[0].status, 'confirmed')
+    assert.equal(writeCompleted.effects[0].assignment_id, programming.assignments[0].id)
+    assert.deepEqual(writeCompleted.effects[0].artifacts, writeCompleted.artifacts.map((entry) => entry.id))
+    assert.match(JSON.stringify(writeCompleted.effects[0].evidence), /loom_fixture_write/)
+    const htmlArtifact = await admin.get(`/api/v1/tickets/${programming.id}/artifacts/${writeCompleted.artifacts[0].id}`)
+    assert.equal(htmlArtifact.artifact.sha256, contentHash)
+    assert.equal(htmlArtifact.artifact.media_type, 'text/html')
+    assert.deepEqual(Buffer.from(htmlArtifact.content), fileBytes)
+    await sleep(2200)
+    const repeatedWrites = controlRead(root).filter((entry) => entry.type === 'tool-execute' && entry.name === 'loom_fixture_write')
+    assert.equal(repeatedWrites.length, 1, 'Settled Assignment must not invoke a second file-writing tool')
+    assert.deepEqual((await admin.get(`/api/v1/tickets/${programming.id}`)).effects.length, 1)
+    const immutableReport = await admin.get(`/api/v1/tickets/${programming.id}`, {})
+    assert.equal(immutableReport.reports.length, 1)
+    assert.equal(immutableReport.artifacts.length, 1)
+    facts.programming_write = 'PASS'
+    await log('bounded DSH semantic HTML task creates actual file with ToolResult-centered Effect lineage', { ticket_id: programming.id, assignment_id: programming.assignments[0].id, session_id: writeSessionId, tool: 'loom_fixture_write', call_id: writeCall.event.data.callId, tool_result_id: writeResult.event.data.message.id, effect_id: writeCompleted.effects[0].id, artifact_id: writeCompleted.artifacts[0].id, sha256: contentHash, size_bytes: fileBytes.length, repeated_tool_executions: 0 })
+    const traversal = await createTicket('LOOM_FIXTURE_TRAVERSAL The tool must reject a path outside the exact project root')
+    const traversalDetail = await waitTicket(admin, traversal.id, ['failed', 'succeeded', 'cancelled', 'reconciling'], 45_000)
+    assert.equal(traversalDetail.status, 'failed', JSON.stringify({ reports: traversalDetail.reports, status: traversalDetail.status }))
+    await host.waitFor(() => readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8').then((value) => JSON.parse(value).assignments.some((entry) => entry.assignment_id === traversal.assignments[0].id), () => false), 20_000, 'actual traversal SessionRef mapping')
+    const traversalMapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+    const traversalSessionId = traversalMapping.assignments.find((entry) => entry.assignment_id === traversal.assignments[0].id)?.session_id
+    assert.ok(traversalSessionId, 'Traversal must have its own actual SessionRef, never borrow the successful write Session')
+    const invalidResult = host.sessionEvents(traversalSessionId, ['tool/result']).find((entry) => entry.event.data.message?.toolCallId === 'loom-fixture-invalid-write')
+    assert.ok(invalidResult, 'The traversal attempt must enter the public DSH tool dispatcher and produce a real failed result')
+    assert.equal(invalidResult.event.data.message.isError, true)
+    assert.match(invalidResult.event.data.message.content.map((block) => block.text || '').join('\n'), /limited to demo.html/)
+    await assert.rejects(() => access(join(root, 'escape.html')), (error) => error.code === 'ENOENT')
+    assert.equal((await readFile(file)).toString('base64'), fileBytes.toString('base64'), 'Traversal must never modify the previously proven output')
+    facts.traversal_failure = 'PASS'
+    await log('public tool traversal refusal leaves no out-of-root output', { ticket_id: traversal.id, report_state: 'failed', tool_result_error: true, no_file_effect: true, output_untouched_sha256: contentHash })
     const cancellation = await createTicket('LOOM_FIXTURE_CANCEL hold until DSH demonstrably aborts this turn')
     await host.waitFor(() => controlRead(root).some((entry) => entry.type === 'hold'), 30_000, 'Stub hold')
     assert.equal((await admin.post(`/api/v1/tickets/${cancellation.id}/cancel`, {})).status, 'cancel_requested')

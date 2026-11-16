@@ -18,6 +18,7 @@ export const Config = z.object({
   artifact_dir: z.string().default('').description('Required explicitly isolated directory for generated artifacts.'),
   enrollment_code: z.string().description('One-use enrollment code, obtained by an administrator; leave empty for fixed-token testing only.'),
   allow_dsh_agent_creation: z.boolean().default(false).description('Allow creation of an owned Agent; otherwise use existing agent_session_id and never dispose it.'),
+  bounded_fixture_effects: z.boolean().default(false).description('Test-only: verify a registered synthetic fixture write, never general provider side effects. Disabled by default.'),
   agent_session_id: z.string().default('').description('Optional existing DSH Session id; resume failures are reported, not faked.'),
   profile_id: z.string().default('isolated').description('Loom worker-scope label, not a source of host authorization.'),
   project_roots: z.any().default({}).description('Explicit host-declared projectId to absolute synthetic/project root mapping; no implicit authorization.'),
@@ -60,7 +61,8 @@ export async function apply(ctx, config) {
       if (!ctx.agents || typeof ctx.agents.get !== 'function') throw new Error('Unsupported DSH executor: verified ctx.agents service is not mounted')
       const adapter = new DshAdapter(ctx, { allowCreation: config.allow_dsh_agent_creation,
         agentSessionId: config.agent_session_id, snapshotDir: config.artifact_dir,
-        sessionMapPath: `${config.state_dir}/dsh-session-map.json` })
+        sessionMapPath: `${config.state_dir}/dsh-session-map.json`,
+        allowBoundedFixtureEffects: config.bounded_fixture_effects })
       // Project roots are explicitly host declarations, never implicit execution Grants.
       loop = await runLocalDshPlugin(config, {
         createClient: undefined,

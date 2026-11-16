@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, realpath, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve, sep } from 'node:path'
+import { createHash } from 'node:crypto'
+import { stableArtifactId } from './ids.js'
 
 /**
  * DSH 0.2.2-rc.3 public adapter. Sources verified in the installed ASAR:
@@ -8,9 +10,10 @@ import { join } from 'node:path'
  * No private event types, Session.appendPluginRecord, synthetic transcript, or hidden protocol.
  */
 export class DshAdapter {
-  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '' } = {}) {
+  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false } = {}) {
     if (!ctx || typeof ctx.on !== 'function') throw new Error('A real Host Context is required')
     this.ctx = ctx; this.allowCreation = allowCreation; this.agentSessionId = agentSessionId; this.snapshotDir = snapshotDir
+    this.allowBoundedFixtureEffects = allowBoundedFixtureEffects
     this.sessionMapPath = sessionMapPath; this.sessionMap = null
     this.owned = new Map(); this.waiters = new Map(); this.latest = new Map(); this.sequence = new Map()
     this.sessionOwners = new Map()
@@ -26,6 +29,37 @@ export class DshAdapter {
       this.sequence.get(assignmentId).last_seq = event.seq
       this.sequence.get(assignmentId).session_ref = {
         session_id: session.id, harness: 'dsh', host_api: '0.2.2-rc.3', protocol: 'dsh-session-log', observed_seq: event.seq,
+      }
+      if (this.allowBoundedFixtureEffects && event.type === 'tool/call' && event.data?.name === 'loom_fixture_write') {
+        this.sequence.get(assignmentId).calls ||= new Map()
+        let args
+        try {
+          if (event.data.arguments.length > 4096) throw new Error('Fixture call exceeds 4 KiB')
+          const parsed = JSON.parse(event.data.arguments)
+          args = { path: parsed.path, title: parsed.title, seq: event.seq }
+        } catch { args = null }
+        this.sequence.get(assignmentId).calls.set(event.data.callId, { name: event.data.name, args, seq: event.seq })
+      }
+      if (this.allowBoundedFixtureEffects && event.type === 'tool/result') {
+        const tracked = this.sequence.get(assignmentId)
+        const call = tracked.calls?.get(event.data.message?.toolCallId) || tracked.calls?.get(event.data.message?.source?.callId)
+        if (call?.name !== 'loom_fixture_write') return
+        tracked.tool_records ||= []
+        const text = (event.data.message?.content || []).filter((block) => block.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('\n')
+        const record = { call, call_id: event.data.message?.toolCallId || event.data.message?.source?.callId,
+          result_id: event.data.message?.id, result_seq: event.seq, is_error: event.data.message?.isError === true, session: this.sessionRef(session) }
+        if (record.is_error) record.text = text.slice(0, 2048)
+        else if (text.length <= 4096) {
+          try {
+            const value = JSON.parse(text)
+            if (value.created !== true || typeof value.path !== 'string' || typeof value.title !== 'string'
+              || !/^[a-f0-9]{64}$/.test(value.sha256) || !Number.isSafeInteger(value.size_bytes) || value.size_bytes < 1 || value.size_bytes > 4096) {
+              throw new Error('Fixture tool result shape/size is outside the bounded contract')
+            }
+            record.result = { created: true, path: value.path, sha256: value.sha256, size_bytes: value.size_bytes, title: value.title }
+          } catch (error) { record.invalid_error = error.message.slice(0, 512); record.is_error = true }
+        } else { record.invalid_error = 'Fixture tool response exceeds 4 KiB'; record.is_error = true }
+        tracked.tool_records.push(record)
       }
       if (event.type === 'assistant/message') {
         const previous = this.latest.get(assignmentId) || { full_text: '' }
@@ -49,6 +83,45 @@ export class DshAdapter {
     const agents = this.ctx.agents
     return Boolean(agents && typeof agents.create === 'function' && typeof agents.resume === 'function'
       && typeof agents.get === 'function' && typeof agents.list === 'function')
+  }
+  async boundedFileEffects(assignment, config, record) {
+    const toolRecords = record?.tool_records || []
+    const failed = toolRecords.find((entry) => entry.is_error && entry.call?.name === 'loom_fixture_write')
+    if (this.allowBoundedFixtureEffects && failed) return { state: 'failed', summary: `DSH ToolResult rejected the authorized file operation: ${failed.text || failed.invalid_error || 'invalid bounded tool result'}`,
+      session_ref: this.sessionRef(record.agent.session), effects: [], artifacts: [], evidence: [failed] }
+    if (!this.allowBoundedFixtureEffects || !toolRecords.some((entry) => entry.call?.name === 'loom_fixture_write')) return { effects: [], artifacts: [] }
+    const effects = [], artifacts = []
+    // The exact Grant root is checked; no profile/cwd prefix heuristic authorizes a path.
+    const rootInput = config.projectRoot || assignment.grant?.project_root
+    if (!rootInput) throw new Error('A file effect requires the exact ProjectBinding root')
+    const projectRoot = await realpath(resolve(rootInput))
+    if (assignment.grant?.project_root && await realpath(resolve(assignment.grant.project_root)) !== projectRoot) throw new Error('Effect root differs from the exact ProjectBinding root')
+    for (const entry of toolRecords) {
+      if (entry.is_error || entry.call?.name !== 'loom_fixture_write' || !entry.call.args) continue
+      if (typeof entry.call.args.path !== 'string' || entry.call.args.path.length > 128
+        || typeof entry.call.args.title !== 'string' || entry.call.args.title.length > 256 || !entry.call_id || !entry.result_id) continue
+      const parsed = entry.result
+      if (!parsed || parsed.path !== 'demo.html' || entry.call.args.path !== parsed.path || entry.call.args.title !== parsed.title) {
+        throw new Error('Committed ToolCall and ToolResult do not name the same bounded fixture artifact')
+      }
+      const actualFile = await realpath(resolve(projectRoot, parsed.path)).catch((error) => { throw new Error('Committed file is missing or unreadable', { cause: error }) })
+      if (dirname(actualFile) !== projectRoot) throw new Error('The bounded file output escaped the exact Grant root')
+      const bytes = await readFile(actualFile)
+      const sha256 = createHash('sha256').update(bytes).digest('hex')
+      if (bytes.length !== parsed.size_bytes || sha256 !== parsed.sha256) throw new Error('Actual Artifact bytes differ from the committed public ToolResult')
+      const artifactId = stableArtifactId(`${assignment.id}:artifact:${entry.call_id}:${sha256}`)
+      const effectId = stableArtifactId(`${assignment.id}:effect:${entry.call_id}:${sha256}`)
+      const reference = { type: 'dsh-tool-result', name: 'loom_fixture_write', path: 'demo.html', title: parsed.title,
+        call_id: entry.call_id, call_seq: entry.call.seq, result_id: entry.result_id, result_seq: entry.result_seq,
+        session: entry.session, sha256, size_bytes: bytes.length, actual_file: parsed.path }
+      artifacts.push({ artifact_id: artifactId, bytes,
+        metadata: { artifact_id: artifactId, name: parsed.path, media_type: 'text/html', origin_node_id: assignment.node_id,
+          size_bytes: bytes.length, sha256, parents: [], evidence: [reference] } })
+      const inputDigest = createHash('sha256').update(JSON.stringify({ path: parsed.path, title: parsed.title })).digest('hex')
+      effects.push({ effect_id: effectId, ticket_id: assignment.ticket_id, assignment_id: assignment.id, node_id: assignment.node_id,
+        attempt: assignment.attempt, input_digest: inputDigest, status: 'confirmed', evidence: [reference], artifacts: [artifactId] })
+    }
+    return { effects, artifacts }
   }
   sessionRef(session) {
     // A reference to Session's real ordinary log, not a second transcript or private event source.
@@ -119,7 +192,17 @@ export class DshAdapter {
       await settled
       const snapshot = this.latest.get(assignment.id)
       if (!snapshot || !snapshot.full_text) throw new Error('DSH completed without an assistant message; no success can be inferred')
+      const fileEvidence = await this.boundedFileEffects(assignment, config, this.sequence.get(assignment.id))
+      if (assignment.kind === 'edit_file' && !fileEvidence.effects?.length && fileEvidence.state !== 'failed') throw new Error('A file-write assignment completed without a verified actual file Effect')
+      if (fileEvidence.state === 'failed') return { ...fileEvidence, content: Buffer.from(JSON.stringify({ tool_rejection: true, session_ref: fileEvidence.session_ref, evidence: fileEvidence.evidence })), artifacts: [] }
       const text = snapshot.full_text.slice(0, 64_000)
+      if (fileEvidence.artifacts?.length) {
+        const metadata = fileEvidence.artifacts[0].metadata
+        if (this.snapshotDir) await writeFile(join(this.snapshotDir, `${assignment.id}.html`), fileEvidence.artifacts[0].bytes, { mode: 0o600, flag: 'wx' })
+        return { state: 'succeeded', summary: 'DSH Agent produced a verified file effect through ordinary public tool results.',
+          effects: fileEvidence.effects, artifacts: fileEvidence.artifacts, session_ref: this.sessionRef(agent.session),
+          evidence: [{ source: 'dsh-tool-result', session_ref: this.sessionRef(agent.session), artifact_ids: fileEvidence.artifacts.map((item) => item.artifact_id) }], metadata }
+      }
       const bytes = Buffer.from(JSON.stringify({ source: 'dsh-assistant-messages', assignment_id: assignment.id, text }, null, 2))
       const metadata = { name: `loom-session-${assignment.id}.json`, media_type: 'application/json', origin_node_id: assignment.node_id,
         // Source is the ordinary committed DSH message in this assignment, not a fabricated parent Artifact UUID.
@@ -131,6 +214,7 @@ export class DshAdapter {
       // A known observer cancellation is not "unknown" merely because SessionRef was reported.
       error.session_ref ||= this.sequence.get(assignment.id)?.session_ref
       if (!['cancelled', 'failed'].includes(error.state) && this.sequence.get(assignment.id)?.refReported) error.state = 'unknown'
+      process.stderr.write(`[loom-local-node] DSH execution error ${assignment.id}: ${error.message}\n`)
       throw error
     } finally { this.waiters.delete(assignment.id) }
   }

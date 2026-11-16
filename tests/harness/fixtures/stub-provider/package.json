@@ -2,7 +2,7 @@
   "name": "@loom/dsh-fixture-stub-provider",
   "version": "0.0.0",
   "private": true,
-  "description": "Disposable zero-network DSH fixture: deterministic provider and exclusively allocated controlled tests.",
+  "description": "Disposable zero-network DSH fixture: deterministic provider, inspect-only and explicitly bounded project writing tests.",
   "type": "module",
   "exports": { ".": "./index.js" },
   "files": ["index.js", "cordis.patch.yml"],

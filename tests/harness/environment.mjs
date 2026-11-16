@@ -140,6 +140,7 @@ export function profilePatch() {
 - id: loom-fixture-stub-provider
   config:
     control_path: !!js process.env.LOOM_FIXTURE_CONTROL_PATH
+    project_root: !!js process.env.LOOM_FIXTURE_PROJECT_ROOT
 - id: loom-local-node
   config:
     enabled: true
@@ -150,6 +151,7 @@ export function profilePatch() {
     artifact_dir: !!js process.env.LOOM_FIXTURE_ARTIFACT_DIR
     enrollment_code: !!js process.env.LOOM_FIXTURE_ENROLLMENT_CODE || ''
     allow_dsh_agent_creation: true
+    bounded_fixture_effects: true
     agent_session_id: !!js process.env.LOOM_FIXTURE_AGENT_SESSION_ID || ''
     profile_id: loom-local-fixture
     project_roots: !!js JSON.parse(process.env.LOOM_FIXTURE_PROJECT_MAPPING || '{}')

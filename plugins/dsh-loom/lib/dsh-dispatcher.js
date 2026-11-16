@@ -1,10 +1,6 @@
 import { validateAssignment } from '../src/validation.js'
 import { canonical, sha256 } from '../src/util.js'
-function stableUUID(value) {
-  const hex = sha256(value).slice(0, 32).split('')
-  hex[12] = '4'; hex[16] = '89ab'[Number.parseInt(hex[16], 16) % 4]
-  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`
-}
+import { stableArtifactId as stableUUID } from './ids.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
@@ -37,6 +33,7 @@ export class DshDispatcher {
       })
       const digest = sha256(canonical({ assignment_id: assignment.id, kind: assignment.kind, objective: assignment.objective }))
       const result = await this.runner.state.once(assignment.id, digest, operation)
+      // Effects and artifact bytes must originate from committed tool/session facts, not narrative assertions.
       if (result.state === 'unknown' && result.content) {
         const previous = this.runner.state.data.deliveries?.find((item) => item.kind === 'artifact' && item.body?.metadata?.name === `loom-session-${assignment.id}.json`)
         if (previous && !this.runner.state.outbox.some((item) => item.kind === 'artifact' && item.digest === previous.digest)) {
@@ -44,7 +41,7 @@ export class DshDispatcher {
         }
         result.content = null
       }
-      if (!result.artifact && result.content) result.artifact = { artifact_id: stableUUID(`${digest}:loom-dsh-assistant-artifact:v1`), metadata: result.metadata, bytes: result.content }
+      if (!result.artifact && result.content && ['succeeded', 'unknown'].includes(result.state)) result.artifact = { artifact_id: stableUUID(`${digest}:loom-dsh-assistant-artifact:v1`), metadata: result.metadata, bytes: result.content }
       if (result.artifact) {
         if (typeof result.artifact.artifact_id !== 'string' || !result.artifact.artifact_id) throw new Error('A completed DSH report requires its actual stable UUID Artifact ID')
         const metadata = { ...(result.artifact.metadata || {}), artifact_id: result.artifact.artifact_id }
