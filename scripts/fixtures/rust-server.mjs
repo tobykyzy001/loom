@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { access, mkdtemp, mkdir, writeFile, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, realpath } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -56,8 +58,11 @@ export async function startRustConcierge({ env = process.env, root } = {}) {
   let binary
   if (env.LOOM_SERVER_CMD) binary = commandWords(env.LOOM_SERVER_CMD)
   else if (env.LOOM_TARGET_BINARY) binary = [env.LOOM_TARGET_BINARY]
-  else if (await access(join(repository, 'target/debug/loom')).then(() => true, () => false)) binary = [join(repository, 'target/debug/loom')]
-  else binary = ['cargo', 'run', '--quiet', '-p', 'loom-concierge', '--bin', 'loom', '--']
+  else {
+    // Never silently test the previous successful build after current edits.
+    await promisify(execFile)('cargo', ['build', '--locked', '-p', 'loom-concierge', '--bin', 'loom'], { cwd: repository, timeout: 120000 })
+    binary = [join(repository, 'target/debug/loom')]
+  }
   const [executable, ...args] = binary
   const port = await availablePort()
   const log = []

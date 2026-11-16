@@ -45,11 +45,11 @@
 
 这并不等同于完整 M0 完成。下述状态在没有对应证据前均不能视为已完成：
 
-- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复，但尚不能称为 M0 的全部真实 DSH Worker 任务验收已完成；
+- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复；隔离 DSH Profile 的真实安装/Agent工具任务/取消/Session重启恢复也已验证，但这些仍不是完整 M0 业务与多端验收；
 - 已有最小 Host / Project / ResourceBinding / Grant Registry 与 `loom.inventory.v1` 的事实矩阵、来源/freshness 和 PlacementDecision；尚无通用 Model Registry、真实模型生命周期、跨 Host 大 Artifact 直传和完整设备能力发现的全平台验证；
 - 已有版本化 Assignment/Lease、内容哈希与分配的 Artifact 上传，但没有跨机 Host 直连大文件传输或完整双向对账；
 - 已实现 Conversation/Activity/Collaboration 的默认折叠与 Ticket 展开；尚无真实 DSH 子 Agent 的完整会话委托和跨 Harness 过程一致性证据；
-- Rust/Tokio、SQLite、Vue 构建已在当前 macOS 运行；没有 Tauri 工程或真实移动设备行为验证。DSH 0.2.2-rc.3 源文件 API 已用于 Host adapter，但没有当前 Profile 的安装注册、真实任务/取消/Session 重开和 Credential Store 验收。
+- Rust/Tokio、SQLite、Vue 在当前 macOS 验证；尚无 Tauri 或真实移动设备验证。DSH 0.2.2-rc.3 在专用临时 Profile 已跑过真实安装、任务、取消和原 Session 重开（见 `e1da1f0`）；这不是当前用户 Profile、系统 Credential Store 或真实 Live LLM 的验收。
 
 ### 下一刀：M0 的最小垂直切片
 
@@ -57,7 +57,7 @@
 
 先证明这条链路，再扩展项目索引、设备感知和多机调度。
 
-M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 项针对缺失/陈旧/忙碌/未知/拒绝/权限隔离的测试；`crates/concierge/src/inventory_probe.rs` 仅执行受限 canonical root、只读解析和显式 opt-in 的 `uname/system_profiler` 查询，未宣称真实 GPU/模型/图片能力。PlacementDecision 仅解释已绑定 Grant 的可用性，不另发证。接口和平台验证范围见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
+M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 项针对缺失/陈旧/忙碌/未知/拒绝/权限隔离的测试，另有执行时 busy/offline/unknown 分支。`crates/concierge/src/inventory_probe.rs` 仅执行受限 canonical root、只读解析和显式 opt-in 的 `uname/system_profiler` 查询，未宣称真实 GPU/模型/图片能力。PlacementDecision 仅解释已绑定 Grant 的可用性，不另发证。接口和平台验证范围见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
 
 `ticket.status` 额外包含 `cancel_requested` 过渡态：停止意图已持久但尚未证实取消或完成对账，不能被 UI 当成最终取消。Task unknown/reconciling 不会被盲目重试。
 

@@ -1,0 +1,316 @@
+{
+  "schema": "loom.artifact_handoff.evidence.v1",
+  "overall": "PASS",
+  "started_at": "2026-11-16T18:02:27.685Z",
+  "finished_at": "2026-11-16T18:03:34.618Z",
+  "scope": "Same single macOS host; two isolated logical Nodes, Installation identities, Ed25519 keys, state, artifact stores, Project roots, Workers and Grants. No physical second machine.",
+  "physical_cross_machine": "NOT TESTED",
+  "real_second_machine": false,
+  "milestone_scope": "Supplemental to M0/M1; broader M2 and geo-distributed validation remain unfinished.",
+  "dsh_profile_or_host": "NOT TOUCHED",
+  "live_llm": "NOT RUN",
+  "model_calls": 0,
+  "transport": "Real loopback HTTP through a foreground Rust Concierge; not a SyntheticCoordinator.",
+  "direct_host_transport": "NOT IMPLEMENTED",
+  "inline_artifact_limit_bytes": 8388608,
+  "forge_protection": {
+    "a": {
+      "same_request_id_replayed": "e9652006-8eb7-43f2-8096-9069bc1ef4e7",
+      "forged_sha256_rejected": true,
+      "changed_bytes_rejected": true,
+      "changed_parents_rejected": false,
+      "bytes_unchanged": true
+    },
+    "b": {
+      "same_request_id_replayed": "ec2510bf-fcc7-49d7-86b3-2cb6251bdfde",
+      "forged_sha256_rejected": true,
+      "changed_bytes_rejected": true,
+      "changed_parents_rejected": true,
+      "bytes_unchanged": true
+    }
+  },
+  "projects": {
+    "a": "project_d007a76658e54323a615a8eed41fb712",
+    "b": "project_071e73bf9fde4520ab9e16844a5f582a",
+    "roots": "isolated temporary directories (paths intentionally omitted from evidence)"
+  },
+  "node_a": {
+    "node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+    "installation_id": "74485c5b-9250-46f8-ba2f-3dfb75a04126",
+    "worker_id": "worker-a",
+    "grant_id": "grant_b726ce14be934dbba36225b124832737",
+    "revocation": "REVOKED AFTER READ"
+  },
+  "node_b": {
+    "node_id": "d4683315d28f4f4b2fdb018a3e8f6744d5e3eb20e87bc493e7c9ca77198f71c5",
+    "installation_id": "ef7bd6e8-ea3f-446e-97c5-97e64a608d2e",
+    "worker_id": "worker-b",
+    "grant_id": "grant_a805e380c968443681ca115228cffffc",
+    "revocation": "ACTIVE"
+  },
+  "offline": {
+    "actual_poll_and_heartbeat_stopped": true,
+    "stale_cutoff_seconds": 60,
+    "last_heartbeat": "2026-11-16T18:02:28.314008+00:00",
+    "stale_observed_at": "2026-11-16T18:03:28.568Z",
+    "node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055"
+  },
+  "source_artifact": {
+    "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+    "ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d",
+    "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+    "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+    "size_bytes": 225,
+    "parents": [],
+    "report_request_id": "8015c331-e0bb-4a89-897b-6fdcaa377e7a"
+  },
+  "destination_artifact": {
+    "artifact_id": "d4bbb490-e286-4448-9e6f-4ffe1e861004",
+    "ticket_id": "tkt_540d0979a9f342ce98c07867d233cfeb",
+    "origin_node_id": "d4683315d28f4f4b2fdb018a3e8f6744d5e3eb20e87bc493e7c9ca77198f71c5",
+    "sha256": "32d0af3d62b8aff13e245d46d919de27c83dba2f0b0c744091086cb3b7dcaf63",
+    "size_bytes": 1512,
+    "parents": [
+      {
+        "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+        "artifact_ref": {
+          "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+          "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+          "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d"
+        },
+        "component_sha256": "32d0af3d62b8aff13e245d46d919de27c83dba2f0b0c744091086cb3b7dcaf63",
+        "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+        "parents": [],
+        "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+        "source_location": "loom://artifact/b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+        "source_ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d",
+        "type": "artifact_ref"
+      }
+    ],
+    "submitted_provenance": {
+      "parents": [
+        "b01848f4-1c5f-4124-9d74-09d7e3499d6b"
+      ],
+      "artifact_ref": {
+        "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+        "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+        "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+        "parents": [],
+        "location": "loom://artifact/b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+        "type": "artifact_ref",
+        "ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d"
+      }
+    },
+    "effect_id": "71db6ace-8bcf-46a9-8860-60627c70a591",
+    "report_request_id": "1a10d9c0-9829-4eaa-b081-75eae3522e09"
+  },
+  "generated_payload": {
+    "schema": "loom.artifact_handoff.generated_payload.v1",
+    "source_artifact": {
+      "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+      "ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d",
+      "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+      "location": "loom://artifact/b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+      "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+      "parents": []
+    },
+    "derived_summary": {
+      "path": "input.txt",
+      "lines": [
+        "Node A observed: alpha, beta, gamma.",
+        "This is deterministic input, not a model response."
+      ]
+    },
+    "operator_effect": "edit_file",
+    "conversion": "deterministic-verified-artifact-summary",
+    "no_model": true
+  },
+  "checks": [
+    {
+      "name": "real Rust center is the only authority",
+      "status": "PASS",
+      "evidence": {
+        "server": "rust-concierge",
+        "api": "api.v1",
+        "foreground_child": true,
+        "base_url": "http://127.0.0.1:61038"
+      }
+    },
+    {
+      "name": "two POST /projects create independent read_write Project IDs and roots",
+      "status": "PASS",
+      "evidence": {
+        "project_ids_distinct": true,
+        "modes": [
+          "read_write",
+          "read_write"
+        ],
+        "roots_independent": true
+      }
+    },
+    {
+      "name": "distinct Ed25519 identities, installation credentials and heartbeat mappings",
+      "status": "PASS",
+      "evidence": {
+        "distinct_ed25519_keys": true,
+        "distinct_tokens": true,
+        "distinct_installations": true,
+        "roots_scoped_to_own_project": true,
+        "worker_ids": [
+          "worker-a",
+          "worker-b"
+        ]
+      }
+    },
+    {
+      "name": "one node credential cannot become the other node identity",
+      "status": "PASS",
+      "evidence": {
+        "cross_node_bearer_rejected": 401
+      }
+    },
+    {
+      "name": "admin approves exact bindings; read-only A and write-only B grants cannot exchange roots",
+      "status": "PASS",
+      "evidence": {
+        "approved_bindings": 2,
+        "read_only_grant": true,
+        "write_only_grant": true,
+        "foreign_root_rejected": true,
+        "out_of_scope_operations_rejected": true
+      }
+    },
+    {
+      "name": "A executes actual read_summary and exports input-derived immutable Artifact",
+      "status": "PASS",
+      "evidence": {
+        "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+        "ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d",
+        "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+        "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+        "size_bytes": 225,
+        "parents": [],
+        "report_request_id": "8015c331-e0bb-4a89-897b-6fdcaa377e7a"
+      }
+    },
+    {
+      "name": "A accepts exact Artifact replay but rejects mutated lineage before revocation",
+      "status": "PASS",
+      "evidence": {
+        "same_request_id_replayed": "e9652006-8eb7-43f2-8096-9069bc1ef4e7",
+        "forged_sha256_rejected": true,
+        "changed_bytes_rejected": true,
+        "changed_parents_rejected": false,
+        "bytes_unchanged": true
+      }
+    },
+    {
+      "name": "A really stops heartbeat and polling; fresh center presence is stale offline",
+      "status": "PASS",
+      "evidence": {
+        "actual_poll_and_heartbeat_stopped": true,
+        "stale_cutoff_seconds": 60,
+        "last_heartbeat": "2026-11-16T18:02:28.314008+00:00",
+        "stale_observed_at": "2026-11-16T18:03:28.568Z",
+        "node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055"
+      }
+    },
+    {
+      "name": "offline and revoked A retains history; terminal work cannot be polled or assigned again",
+      "status": "PASS",
+      "evidence": {
+        "historical_reports_preserved": true,
+        "original_artifact_readable_and_verified": true,
+        "additional_assignments": 0,
+        "b_received_a_work": false,
+        "cross_node_report_rejected": 403,
+        "revoked_new_ticket_rejected": 403
+      }
+    },
+    {
+      "name": "verified A bytes produce the specified B edit_file JSON through the existing operator DTO",
+      "status": "PASS",
+      "evidence": {
+        "input_sha256_verified": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+        "source_artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+        "ticket_b_will_use_existing_kind": "edit_file",
+        "direct_host_transport": "NOT IMPLEMENTED"
+      }
+    },
+    {
+      "name": "B writes only root B and emits an Artifact with actual A parents",
+      "status": "PASS",
+      "evidence": {
+        "artifact_id": "d4bbb490-e286-4448-9e6f-4ffe1e861004",
+        "ticket_id": "tkt_540d0979a9f342ce98c07867d233cfeb",
+        "origin_node_id": "d4683315d28f4f4b2fdb018a3e8f6744d5e3eb20e87bc493e7c9ca77198f71c5",
+        "sha256": "32d0af3d62b8aff13e245d46d919de27c83dba2f0b0c744091086cb3b7dcaf63",
+        "size_bytes": 1512,
+        "parents": [
+          {
+            "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+            "artifact_ref": {
+              "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+              "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+              "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d"
+            },
+            "component_sha256": "32d0af3d62b8aff13e245d46d919de27c83dba2f0b0c744091086cb3b7dcaf63",
+            "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+            "parents": [],
+            "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+            "source_location": "loom://artifact/b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+            "source_ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d",
+            "type": "artifact_ref"
+          }
+        ],
+        "submitted_provenance": {
+          "parents": [
+            "b01848f4-1c5f-4124-9d74-09d7e3499d6b"
+          ],
+          "artifact_ref": {
+            "artifact_id": "b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+            "sha256": "8c8055bd4422e49f114c65c20204825a249e43629a6eda241172fd8d09da564d",
+            "origin_node_id": "a9811577d270c5eff5f753f868e7a65dc24db6cff3b11f287c86ec440ecef055",
+            "parents": [],
+            "location": "loom://artifact/b01848f4-1c5f-4124-9d74-09d7e3499d6b",
+            "type": "artifact_ref",
+            "ticket_id": "tkt_99c2b054eeb64744b31cd2557eb2ef1d"
+          }
+        },
+        "effect_id": "71db6ace-8bcf-46a9-8860-60627c70a591",
+        "report_request_id": "1a10d9c0-9829-4eaa-b081-75eae3522e09"
+      }
+    },
+    {
+      "name": "B tamper cannot write root A, spoof Artifact SHA or replay completed work",
+      "status": "PASS",
+      "evidence": {
+        "completed_assignment_not_repeated": true,
+        "worker_b_root_a_effect_denied_before_write": true,
+        "missing_verified_parent_rejected": true
+      }
+    },
+    {
+      "name": "B bytes and lineage survive immutable replay and mutation attempts",
+      "status": "PASS",
+      "evidence": {
+        "same_request_id_replayed": "ec2510bf-fcc7-49d7-86b3-2cb6251bdfde",
+        "forged_sha256_rejected": true,
+        "changed_bytes_rejected": true,
+        "changed_parents_rejected": true,
+        "bytes_unchanged": true
+      }
+    },
+    {
+      "name": "bounded center transport and evidence do not leak credentials",
+      "status": "PASS",
+      "evidence": {
+        "audit_chain_valid": true,
+        "inline_artifact_limit_bytes": 8388608,
+        "http_body_limit_bytes": 16777216,
+        "direct_host_transport": "NOT IMPLEMENTED",
+        "evidence_credentials_redacted": true
+      }
+    }
+  ]
+}

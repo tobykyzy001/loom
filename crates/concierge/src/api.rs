@@ -613,6 +613,7 @@ async fn nodes(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> 
             .as_str()
             .and_then(|s| parse_time(s).ok());
         let online = n["revoked_at"].is_null()
+            && n["status"] != "offline"
             && last.is_some_and(|at| chrono::Utc::now() - at < chrono::Duration::seconds(60));
         n["online"] = json!(online);
         n["freshness"] = if online {
@@ -1076,7 +1077,70 @@ async fn artifact_upload(
     if media.len() > 100 || name.len() > 200 {
         return Err(ApiError::bad("Artifact metadata too long "));
     };
+    let mut lineage = Vec::new();
     let mut store = state.lock()?;
+    if metadata["parents"].is_object() || metadata["parents"].is_string() || metadata["parents"].is_number() || metadata["parents"].is_boolean() {
+        return Err(ApiError::bad("Artifact parents must be an empty list or an explicit bounded SourceRef"));
+    }
+    if (!metadata["artifact_ref"].is_null() && !metadata["artifact_ref"].is_object())
+        || (metadata["artifact_ref"].is_null() && metadata["parents"].as_array().is_some_and(|parents| !parents.is_empty()))
+    {
+        if store.get("artifacts", &artifact)?.is_some_and(|existing| existing["lineage"].as_array().is_some_and(|parents| !parents.is_empty())) {
+            return Err(ApiError::conflict("artifact_conflict", "Removing an established Artifact's immutable parent lineage is forbidden"));
+        }
+        return Err(ApiError::bad("Each declared parent needs a valid artifact_ref and controller-verified lineage"));
+    }
+    if let Some(reference) = metadata["artifact_ref"].as_object() {
+        let source_id = reference
+            .get("artifact_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad("Source dependency requires an actual Artifact UUID"))?;
+        let source_hash = reference
+            .get("sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad("Source dependency requires its SHA-256"))?;
+        if uuid::Uuid::parse_str(source_id).is_err() || source_hash.len() != 64 {
+            return Err(ApiError::bad("Invalid source artifact reference"));
+        }
+        let parent = store.get("artifacts", source_id)?.ok_or_else(|| {
+            ApiError::denied(
+                "unknown_artifact_input",
+                "Only an uploaded known Artifact can be a source",
+            )
+        })?;
+        if parent["sha256"] != source_hash {
+            return Err(ApiError::denied(
+                "artifact_input_hash_mismatch",
+                "The source hash does not match the immutable Artifact index",
+            ));
+        }
+        if reference
+            .get("origin_node_id")
+            .and_then(Value::as_str)
+            .is_some_and(|origin| origin != parent["origin_node_id"].as_str().unwrap_or_default())
+        {
+            return Err(ApiError::denied(
+                "origin_mismatch",
+                "The named source host does not match the actual Artifact origin",
+            ));
+        }
+        lineage.push(json!({
+        "type": "artifact_ref", "artifact_id":source_id, "origin_node_id":parent["origin_node_id"],
+        "sha256":parent["sha256"],"component_sha256":digest,
+        "source_location":parent["location"],
+        "source_ticket_id":parent["ticket_id"],
+        "artifact_ref":{"artifact_id":parent["id"],"sha256":parent["sha256"],"origin_node_id":parent["origin_node_id"]},
+        "parents":parent["lineage"],
+    }));
+        if metadata["parents"].as_array().is_some_and(|declared| {
+            declared.len() > 1
+                || declared
+                    .first()
+                    .is_some_and(|entry| entry.as_str() != Some(source_id))
+        }) {
+            return Err(ApiError::conflict("inexact_lineage", "Parents may only hold the source UUID string or be empty; provenance fields are center-verified"));
+        }
+    }
     let path = store
         .root
         .join("artifacts")
@@ -1089,6 +1153,9 @@ async fn artifact_upload(
             || current["origin_node_id"] != node
             || current["name"] != name
             || current["media_type"] != media
+            || current["lineage"]
+                .as_array()
+                .is_some_and(|existing_lineage| existing_lineage != &lineage)
         {
             return Err(ApiError::conflict(
                 "artifact_conflict",
@@ -1125,7 +1192,7 @@ async fn artifact_upload(
     }
     let tx = store.conn_mut().transaction()?;
     let result = (|| -> rusqlite::Result<()> {
-        tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),metadata["parents"].to_string(),now()])?;
+        tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),serde_json::Value::Array(lineage.clone()).to_string(),now()])?;
         store::audit_tx(
             &tx,
             Some(&ticket),
@@ -1342,9 +1409,10 @@ async fn artifact(
     axum::extract::Path((ticket, artifact)): axum::extract::Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
-    let a = store
+    let mut a = store
         .get("artifacts", &artifact)?
         .ok_or_else(|| ApiError::missing("Artifact unknown"))?;
+    a["location"] = json!(format!("loom://artifact/{artifact}"));
     if a["ticket_id"] != ticket {
         return Err(ApiError::denied(
             "artifact_scope",
@@ -1473,6 +1541,26 @@ async fn create_ticket(
             "read_only",
             "Project has no write authorization",
         ));
+    }
+    if let Some(node_id) = &body.node_id {
+        if grant["node_id"] != "auto" && grant["node_id"].as_str() != Some(node_id.as_str()) {
+            return Err(ApiError::denied(
+                "placement_scope",
+                "This Task selects a Node different from the Grant's authorized placement",
+            ));
+        }
+    }
+    if let Some(requested_worker) = &body.worker_id {
+        if grant["worker_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .is_some_and(|authorized| authorized != requested_worker)
+        {
+            return Err(ApiError::denied(
+                "worker_scope",
+                "The requested Worker is not the Grant's authorized Worker scope",
+            ));
+        }
     }
     let wanted = body.node_id.or_else(|| {
         grant["node_id"]

@@ -9,7 +9,7 @@ Loom is an implementation-in-progress of a personal Agent fabric: a single authe
 - Versioned Rust wire/domain protocol (`crates/protocol`) with synthetic Ed25519 fixtures and Grant/Lease fencing tests.
 - SQLite single-writer Concierge with client/session authentication, single-use enrollment, signed Node identity challenges, authorized assignment polling, structured reports, at-least-once effects, bounded artifacts, explicit memory and a hash-chained audit digest.
 - Vue 3 + TypeScript authenticated conversation, task evidence, Project/Grant/Memory, display-preference, node fleet and activity views. No mocked Agents or fake completed tasks.
-- Outbound TypeScript deterministic Local Node client and a buildable Host-only DSH bundle. The bundle only starts work when explicit config enables it. DSH Host adapters are based on installed DSH 0.2.2-rc.3 APIs; installation and live Agent/Session operations remain separately unverified here.
+- Outbound TypeScript deterministic Local Node client and a buildable Host-only DSH bundle. The bundle only starts work when explicit config enables it. DSH Host adapters are based on installed DSH 0.2.2-rc.3 APIs; installed-DSH APIs. Under an isolated temporary `DSH_HOME/HOME`, `tests/harness/real-lifecycle.mjs` has actually installed and activated the bundle, registered a node, issued an actual DSH Agent followup, executed a controlled tool and returned a hash-checked Artifact. Those cases do not yet prove cancellation or Session resume; the live-model quality and full M0 product acceptance remain incomplete.
 
 This is a **development baseline**, not an approved production release. No arbitrary terminal-command Runner, model download, silent clone/upload, automatic LAN takeover, unmanaged profile updates or privileged remote installers have been added. Natural-language chat text alone is not a permission grant.
 
@@ -56,8 +56,20 @@ See `IMPLEMENTATION_PLAN.md`, `packages/node-client/README.md`, `plugins/dsh-loo
 
 ## Test boundary
 
-`loom smoke` exercises real (process-local) Rust HTTP registration, signed identities, authorized assignment, hash-checked immutable Artifact, exactly repeated report idempotency, persistence reopen, cancellation fencing, revoked-Grant Unknown outcomes, and retry barriers using a synthetic project only.
+The following independent levels are intentionally different:
 
-The reference Node client and plugin have separate tests. DSH Host-only bundle metadata and disabled application can be checked without changing the current profile. The 1-Concierge + 3-Node Compose topology, live paid model calls, live DSH installed Agent/Session lifecycle, Android/iOS browser/lock-screen recovery, Windows/Linux installers and system credential integration have **not** been verified by those commands. Do not regard protocol or unit/PASS output as production M0 acceptance across all of them.
+```sh
+cargo test -p loom-node
+node scripts/bare-integration.mjs
+node scripts/real-integration.mjs
+node scripts/verify-baseline.mjs
+node scripts/dsh-fixture-runner/run.mjs
+```
 
-The older `testing.md` describes the target layered test strategy; `MEMORY.md` records which implementation checks have actually run. `model`/`pipeline` endpoints are intentionally unavailable rather than pretending to schedule real models or DAGs.
+- Bounded deterministic local-node core: 11 shared-entity safety cases at present plus true foreground Rust↔TypeScript workflows.
+- Bare Rust local-node protocol and real read/write/restart behavior.
+- **Actual installed DSH isolated fixture**: plugin CLI install/activation, signed registration, real DSH Agent turn/tool/Artifact. Cancellation and resumed Session are still gates in this same runner, so observe its actual completion result rather than claiming it because installation succeeded. A zero-network Stub Provider exercises orchestration, not live model behavior.
+
+No 1 Concierge + 3 Node Compose topology was built per the initial request. There are no paid LLM calls, no Chrome/iOS/Android/Windows/Linux host tests recorded yet, no signed installers, and no integrated OS credential store. Protocol/unit PASS or a working DSH task does not mean production acceptance across all of these.
+
+Live LLM and real multi-agent programming remain a separate enabled next-level test with explicit budgets and provider configuration. Never create them by reading an existing user's DSH profile, credentials, browser token or private project paths. `model`/`pipeline` endpoints are intentionally unavailable until real adapters and complete DAG scheduling can be validated.

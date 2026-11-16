@@ -64,7 +64,7 @@ DSH Loom Plugin        Bare Rust Host Agent
 
 ### DSH Plugin 是一等 Local Node
 
-当前可安装包位于 `plugins/dsh-loom`；仅离线验证和 mock host contract 已覆盖，未安装或修改真实 DSH Profile。
+当前可安装包位于 `plugins/dsh-loom`；临时专用 `loom-local-fixture` Profile 已实际安装、启用并执行过真实 DSH Agent/受控 Tool/Artifact 流程。它没有修改或读取当前 `desktop` Profile，也没有使用系统 Credential Store、真实模型或用户凭据。完整 Cancel/Resume 验收必须以 `tests/harness` 的最新实际报告为准，不从旧探针或局部 PASS 推断完成。
 
 - 实现主动出站的注册、配对、心跳、Assignment / Lease、SessionRef、必要事件流、本机 Grant、ArtifactRef 和 Effect 对账。
 - DSH 机器不因 Loom 再强制安装独立 Rust Agent。DSH 进程中的插件负责复用既有 Agent / Session。
@@ -121,7 +121,7 @@ Device Reachable ≠ Device Trusted
 
 ## 5. DSH Plugin 开发约束
 
-DSH 插件已存在 Host-only bundle，但未完成真实宿主安装与 Agent/Session 验收。修改实现或安装时：
+DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过真实安装、注册、Agent/Tool/Artifact，但完整取消/恢复和最终持续验收仍未完成。修改实现或安装时：
 
 1. 先加载并使用环境中的 `dsh-doc` Skill，阅读当时实际 DSH 版本的 Plugin API、配置和会话机制；不要仅凭本项目文档臆测 DSH 私有服务名或接口。
 2. 选择最小可行的 Node 协议增量，优先复用现有 DSH 能力与事件。需要 UI 时使用实际 DSH Client Slot 体系，不使用不受控 iframe 或外部 DOM。

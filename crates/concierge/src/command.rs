@@ -236,14 +236,21 @@ async fn run(
         conflict_status == 409 && conflict["error"]["code"] == "artifact_conflict",
         "different bytes sharing existing ID must be rejected before overwrite",
     )?;
+    let mut forged_source = upload.clone();
+    forged_source["metadata"]["artifact_ref"] = json!({
+        "artifact_id":uuid::Uuid::new_v4(),"sha256":digest,"origin_node_id":node_id,
+    });
+    let (invalid_ref_status, invalid_ref) = b.auth_request("/artifacts", forged_source).await?;
+    check(
+        invalid_ref_status == 403 && invalid_ref["error"]["code"] == "unknown_artifact_input",
+        "a downstream artifact may not cite an unknown source or arbitrary parent",
+    )?;
     let original_path = root
         .join("center/artifacts")
         .join(format!("{artifact}.artifact"));
     check(
         fs::read_to_string(original_path)?
-            == String::from_utf8_lossy(
-                &"Deterministic fixture summary: PROJECT ALPHA\n".as_bytes(),
-            ),
+            == String::from_utf8_lossy("Deterministic fixture summary: PROJECT ALPHA\n".as_bytes()),
         "original artifact bytes unchanged by colliding upload",
     )?;
     let original_index = state
@@ -284,7 +291,7 @@ async fn run(
     check(
         invalid_replay_status == 409,
         "the same Request ID with altered evidence is rejected",
-    );
+    )?;
     let fresh = crate::api::State::open(root.join("center"), Some(&token))?;
     let persisted = fresh.lock()?.detail(tid)?.clone();
     check(
@@ -313,7 +320,7 @@ async fn run(
             .is_some_and(|s| s.contains("PROJECT ALPHA")),
         "authoritative artifact bytes can be retrieved by an authenticated client",
     )?;
-    let (_, edit) = b
+    let (_, _edit) = b
         .auth_request("/assignments/poll", json!({"wait_seconds":0}))
         .await?;
     let (_,t2)=b.admin("/tickets",json!({"project_id":pid,"objective":"Mutation then cancellation must not claim success","kind":"edit_file","relative_path":"result.txt","content":"fixture output","grant_id":gid,"worker_id":"default"})).await?;

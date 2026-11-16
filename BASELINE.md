@@ -4,7 +4,7 @@ Execution date: 2026-11-17, local macOS development host.
 
 ## Runners and actual state
 
-The test fixture uses only synthetic files and short-lived test credentials under a unique temporary directory. The coordinator and deterministic tasks use real HTTP, a real bundled-SQLite database and real filesystem reads/writes. They do not invoke Anthropic/OpenAI/DeepSeek or any other model, attach to DSH, write the Desktop profile, or run a 1+3 topology.
+Every fixture uses only synthetic files and short-lived test credentials under a unique temporary directory. The coordinator and deterministic tasks use real HTTP, a real bundled-SQLite database and real filesystem reads/writes. The deterministic tests do not contact a paid model, modify the active Desktop profile, change the system's Credential Store or run a 1+3 topology. The separately named installed-DSH runner creates its own temporary `DSH_HOME/HOME` and explicitly isolated `loom-local-fixture` profile, with an in-process, zero-network Stub Provider; it tests the real DSH Process Agent/Session machinery, not live LLM quality.
 
 Run the authoritative version in this repository rather than treating this document as a self-verifying artifact:
 
@@ -46,8 +46,10 @@ pnpm run build
 
 ## Explicitly NOT verified
 
-- Actual DSH Host installation, configured model providers, Agent create/resume/tool tool results, event replay and cancellation through a real Host. A local deterministic file Node is not “DSH execution”.
-- True Rust↔TypeScript actual-file task until the separately named `scripts/run-real-integration.mjs` result exists and passes. Unit protocol fixtures alone do not prove it.
+- **Live LLM provider/model behavior, quality and production credentials.** The actual DSH fixture has passed plugin installation, signed outbound Node registration, Agent followup, controlled tool execution and immutable Artifact return through the real installed Host. Its cancellation and resumed-Session proof must be checked from the actual final `node scripts/dsh-fixture-runner/run.mjs` report; do not mark cancellation/resume PASS merely because the fixture exists. A deterministic file Node is not “DSH execution” and a Stub is not a live model.
+- Cross-machine second physical Host, direct large-file transport, Beacon/discovery, remote administration or the deferred 1Lis/Compose fleet. The optional local double-isolated Node Artifact handoff does not authenticate a remote machine or a TLS relay.
+- OS Linux and Windows hosts, hardware provisioning, signed installers/service integration and OS credential stores.
+- Mobile real-device Web/PWA cases, lockscreen/kill-process/resume behavior, desktop installation and rollback.
 - 1 Concierge + 3 workers Compose topology (intentionally deferred per user request).
 - Mobile real-device Web/PWA cases, lockscreen/kill-process/resume, desktop installers, OS system credential stores, Linux/Windows Host behavior and signed update/rollback.
 - Actual research/programming/graphics multi-agent live LLM tasks, non-synthetic data, GPU models or industry pipeline. There is no GPU or physical-device assumption.
