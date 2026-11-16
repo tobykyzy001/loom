@@ -20,6 +20,21 @@ function setEnrollment(value: unknown) {
   }
   copied.value = false
 }
+function factValue(node: LoomNode, resource: string): string {
+  const facts = (node as unknown as { inventory?: { facts?: Array<{ resource?: string; value?: string | number | boolean | null; confidence?: string; source?: string }> } }).inventory?.facts ?? []
+  const fact = facts.find(entry => entry.resource === resource)
+  if (!fact) return '尚未探测'
+  if (fact.value === null || fact.value === undefined) return fact.confidence === 'unknown' ? '未知（未验证）' : '无已记录事实'
+  return fact.resource === 'hardware.memory_bytes' && typeof fact.value === 'number'
+    ? `${(fact.value / (1024 ** 3)).toFixed(1)} GiB · 主机上报`
+    : `${fact.value} · ${fact.source === 'controller_probed' ? '控制器探测' : '主机上报'}`
+}
+function factStatus(node: LoomNode, resource: string): string {
+  const inventory = (node as unknown as { inventory?: { facts?: Array<{ resource?: string; confidence?: string }>; issues?: Array<{ resource?: string; code?: string }> } }).inventory
+  const confidence = inventory?.facts?.find(fact => fact.resource === resource)?.confidence ?? 'unknown'
+  const warnings = inventory?.issues?.filter(issue => issue.resource?.startsWith(resource) || issue.resource === 'workers').map(issue => issue.code) ?? []
+  return [...new Set([confidence === 'unknown' ? '未知' : confidence, ...warnings])].join(' / ')
+}
 const onlineCount = (nodes: Nodes) => nodes.filter(node => nodeConnected(node.status) && !heartbeatStale(node.last_heartbeat ?? node.last_seen_at)).length
 async function copyCode() {
   copyError.value = false
@@ -58,7 +73,8 @@ defineExpose({ setEnrollment })
             <div class="node-meta"><span><AppIcon name="clock" :size="14" />最后心跳 {{ formatTime(node.last_heartbeat ?? node.last_seen_at, true) }}</span><span v-if="node.installation_id">安装 {{ node.installation_id.slice(0, 14) }}</span></div>
             <div v-if="node.capabilities?.length" class="capability-list"><span v-for="capability in node.capabilities" :key="capabilityName(capability)">{{ capabilityName(capability) }}</span></div><p v-else class="muted small">未声明可用能力。不能按在线状态假定任务可执行。</p>
           </div>
-          <div class="node-trust"><AppIcon :name="node.trusted === false ? 'warning' : 'lock'" :size="15" />{{ node.trusted === false ? '尚未信任' : node.trusted ? '已明确信任' : '信任详情未提供' }}</div>
+          <div class="node-facts"><span>系统 · {{ factValue(node, 'hardware.os') }}</span><span>架构 · {{ factValue(node, 'hardware.arch') }}</span><span>内存 · {{ factValue(node, 'hardware.memory_bytes') }}</span><span>模型适配 · {{ factValue(node, 'model.adapter') }}</span></div>
+          <div class="node-trust"><AppIcon :name="node.trusted === false ? 'warning' : 'lock'" :size="15" />{{ node.trusted === false ? '尚未信任' : node.trusted ? '已明确信任' : '信任详情未提供' }}<span v-if="factStatus(node, 'hardware') !== 'unknown'"> · {{ factStatus(node, 'hardware') }}</span></div>
         </article>
       </div>
     </div>

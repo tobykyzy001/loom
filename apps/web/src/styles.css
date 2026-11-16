@@ -498,6 +498,16 @@ details pre { background: #fbf8fc; padding: 14px; border-radius: 6px; max-height
   .activity-panel { width: 290px; }
   .ticket-list.card { margin-top: 43px; }
 }
+.node-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 15px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 @media (max-width: 1150px) {
   .workspace-header { padding: 0 27px; }
   .workspace-content { padding: 37px 28px; }

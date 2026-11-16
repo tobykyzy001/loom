@@ -4,6 +4,28 @@ use anyhow::{bail, Context, Result};
 use rusqlite::params;
 use serde_json::{json, Value};
 
+pub fn grant_binding_for_placement(store: &Store, grant_id: &str) -> Result<Option<String>> {
+    let Some(grant) = store.get("grants", grant_id)? else {
+        return Ok(None);
+    };
+    let binding = grant["project_binding_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if binding.is_empty() {
+        return Ok(None);
+    }
+    let root = store.query(
+        "SELECT id FROM project_bindings WHERE id=?1 AND revoked_at IS NULL",
+        [&binding],
+    )?;
+    if root.len() == 1 {
+        Ok(Some(binding))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn matching_physical_node(
     store: &Store,
     capability: &str,
@@ -70,6 +92,7 @@ pub fn matching_physical_node(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_ticket(
     store: &Store,
     project_id: &str,
@@ -91,11 +114,41 @@ pub fn create_ticket(
     )?;
     let now = crate::now();
     let ticket = id("tkt");
+    let binding = grant_binding_for_placement(store, grant_id)?;
+    let mut placement = if let Some(binding_id) = &binding {
+        crate::inventory::decide_placement(
+            store,
+            &crate::inventory::PlacementRequest {
+                project_id: project_id.to_owned(),
+                capability: capability.unwrap_or(kind).to_owned(),
+                worker_id: worker.unwrap_or("default").to_owned(),
+                preferred_node_id: preferred.map(ToOwned::to_owned),
+                grant_id: grant_id.to_owned(),
+                project_binding_id: binding_id.clone(),
+                evaluated_at: chrono::Utc::now(),
+                hardware: None,
+            },
+        )?
+    } else {
+        crate::inventory::PlacementDecision {
+            schema: crate::inventory::INVENTORY_SCHEMA.to_owned(),
+            selected: None,
+            waiting: vec![],
+            explanation: "No authorized ProjectBinding covers this placement.".to_owned(),
+            existing_grant_matching_passed: false,
+            permission_boundary: crate::inventory::DISCOVERY_BOUNDARY.to_owned(),
+        }
+    };
+    placement.explanation = if binding.is_some() {
+        placement.explanation
+    } else {
+        "No exact, authorized ProjectBinding covers this task.".to_owned()
+    };
     let Some(node_id) = node_id else {
         let worker = worker.unwrap_or("default");
         let node = preferred.unwrap_or("waiting_for_host");
         store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'waiting_approval',?7,'',?8,'',?9,?10,?10)",params![ticket,project_id,objective,kind,path,content,grant_id,node,worker,now])?;
-        store.audit(Some(&ticket),"controller","assignment.waiting",&json!({"required_capability":capability.unwrap_or(kind),"grant_id":grant_id,"hint":"Wait for a covered node or explicitly reassign with a new Grant."}))?;
+        store.audit(Some(&ticket),"controller","assignment.waiting",&json!({"required_capability":capability.unwrap_or(kind),"grant_id":grant_id,"hint":"Wait for a covered node or explicitly reassign with a new Grant.","placement":&placement}))?;
         return store.detail(&ticket).context("new queued ticket");
     };
     let grant = store.get("grants", grant_id)?.context("Grant not found")?;
@@ -115,7 +168,7 @@ pub fn create_ticket(
         Some(&ticket),
         "controller",
         "assignment.leased",
-        &json!({"assignment_id":assignment,"node_id":node_id["id"],"grant_id":grant_id}),
+        &json!({"assignment_id":assignment,"node_id":node_id["id"],"grant_id":grant_id,"placement":&placement}),
     )?;
     store.detail(&ticket)
 }
@@ -267,7 +320,16 @@ pub fn observation_candidate(store: &Store, body: &Value) -> Result<Value> {
     }
     let id = crate::id("candidate");
     let kind = body["kind"].as_str().unwrap_or("memory");
-    if !matches!(kind,"memory"|"skill"|"route") ||store.query("SELECT id FROM candidates WHERE content LIKE ?1 AND status IN ('pending','accepted','rejected')",[format!("%{fingerprint}%")])?.len()>0{return Ok(json!({"duplicate_or_blocked":true,"no_standing_permission":true}))}
+    if !matches!(kind, "memory" | "skill" | "route") {
+        bail!("invalid candidate kind")
+    }
+    let previous_candidates = store.query(
+        "SELECT id FROM candidates WHERE content LIKE ?1 AND status IN ('pending','accepted','rejected')",
+        [format!("%{fingerprint}%")],
+    )?;
+    if !previous_candidates.is_empty() {
+        return Ok(json!({"duplicate_or_blocked":true,"no_standing_permission":true}));
+    }
     let candidate = json!({"content":value,"fingerprint":fingerprint,"project_id":project,"kind":kind,"source":"repeated_explicit_choices","replay_state":"unverified"});
     store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'pending',1,?6,?6)",params![id,kind,project,serde_json::to_string(&candidate)?,body["source_refs"].to_string(),crate::now()])?;
     Ok(

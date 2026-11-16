@@ -5,7 +5,7 @@ use axum::{
     extract::State as AppState,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, patch, post, put},
+    routing::{get, patch, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -244,12 +244,14 @@ fn deserialize<T: serde::de::DeserializeOwned>(body: &Value) -> ApiResult<T> {
     serde_json::from_value(body.clone()).map_err(|e| ApiError::bad(e.to_string()))
 }
 // Responses use Json wrappers directly to preserve status and error codes.
-fn admin_routes(state: Arc<State>) -> Router<Arc<State>> {
+fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
     Router::new()
         .route("/bootstrap", get(bootstrap))
         .route("/projects", get(projects).post(create_project))
         .route("/projects/{id}/probe", post(probe_project))
         .route("/project-bindings", post(create_project_binding))
+        .route("/placement/evaluate", post(evaluate_placement))
+        .route("/nodes/{id}/inventory", get(node_inventory))
         .route("/grants", get(grants).post(create_grant))
         .route("/grants/{id}/revoke", post(revoke_grant))
         .route("/nodes", get(nodes))
@@ -422,7 +424,8 @@ fn explicit_permissions(body: &Value) -> ApiResult<Vec<&'static str>> {
         match operation {
             "read"|"read_summary"=>if !permissions.contains(&"read"){permissions.push("read")},
             "write"|"edit_file"=>if !permissions.contains(&"write"){permissions.push("write")},
-            "read_write"=>{if !permissions.contains(&"read"){permissions.push("read");}if !permissions.contains(&"write"){permissions.push("write");}},
+            "read_write"=>{if !permissions.contains(&"read"){permissions.push("read");}
+                if !permissions.contains(&"write"){permissions.push("write");}},
             _=>return Err(ApiError::bad("Grant operations must be read_summary/read or edit_file/write/read_write explicitly.")),
         }
     }
@@ -430,6 +433,42 @@ fn explicit_permissions(body: &Value) -> ApiResult<Vec<&'static str>> {
         return Err(ApiError::bad("Grant operations must not be empty."));
     }
     Ok(permissions)
+}
+async fn evaluate_placement(
+    AppState(state): AppState<Arc<State>>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let project_id = required(&body, "project_id", 160)?.to_owned();
+    let capability = required(&body, "capability", 128)?.to_owned();
+    let grant_id = required(&body, "grant_id", 160)?.to_owned();
+    let project_binding_id = required(&body, "project_binding_id", 160)?.to_owned();
+    let request = crate::inventory::PlacementRequest {
+        project_id,
+        capability,
+        worker_id: body["worker_id"].as_str().unwrap_or("default").to_owned(),
+        preferred_node_id: body["node_id"].as_str().map(ToOwned::to_owned),
+        grant_id,
+        project_binding_id,
+        evaluated_at: chrono::Utc::now(),
+        hardware: if body["hardware"].is_object() {
+            Some(crate::inventory::HardwareTarget {
+                os: body["hardware"]["os"].as_str().map(str::to_lowercase),
+                arch: body["hardware"]["arch"].as_str().map(str::to_lowercase),
+                minimum_memory_bytes: body["hardware"]["minimum_memory_bytes"].as_u64(),
+            })
+        } else {
+            None
+        },
+    };
+    let store = state.lock()?;
+    let decision = crate::inventory::decide_placement(&store, &request)?;
+    Ok(Json(serde_json::to_value(decision).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inventory_encoding",
+            "Cannot encode placement evaluation",
+        )
+    })?))
 }
 async fn create_project_binding(
     AppState(state): AppState<Arc<State>>,
@@ -569,6 +608,7 @@ async fn create_grant(
 async fn nodes(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let mut nodes = state.lock()?.list("nodes")?;
     for n in &mut nodes {
+        let declared_roots = n["inventory"]["project_roots"].clone();
         let last = n["last_heartbeat"]
             .as_str()
             .and_then(|s| parse_time(s).ok());
@@ -581,6 +621,58 @@ async fn nodes(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> 
             json!("stale_offline")
         };
         n["source"] = json!("host_heartbeat");
+        let installation_id = n["installation_id"].as_str().unwrap_or_default().to_owned();
+        let identity = crate::inventory::InstallationIdentity {
+            node_id: n["id"].as_str().unwrap_or_default().to_owned(),
+            installation_id,
+        };
+        let view = crate::inventory::node_view(&identity, Some(n), chrono::Utc::now());
+        n["inventory"] = serde_json::to_value(view).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inventory_encoding",
+                "Cannot encode node inventory",
+            )
+        })?;
+        if declared_roots.is_object() {
+            n["inventory"]["project_roots"] = declared_roots;
+        }
+        if let Value::Array(ref mut workers) = n["workers"] {
+            for worker in workers.iter_mut() {
+                if let Value::Object(ref mut map) = worker {
+                    map.retain(|key, _| {
+                        [
+                            "id",
+                            "worker_id",
+                            "profile_id",
+                            "harness_kind",
+                            "status",
+                            "capabilities",
+                            "supported_effects",
+                        ]
+                        .contains(&key.as_str())
+                    });
+                }
+            }
+        }
+        if let Value::Array(ref mut workers) = n["workers"] {
+            for worker in workers {
+                if let Value::Object(ref mut map) = worker {
+                    map.retain(|key, _| {
+                        [
+                            "id",
+                            "worker_id",
+                            "profile_id",
+                            "harness_kind",
+                            "status",
+                            "supported_effects",
+                            "capabilities",
+                        ]
+                        .contains(&key.as_str())
+                    });
+                }
+            }
+        }
     }
     Ok(Json(json!({"nodes":nodes})))
 }
@@ -742,7 +834,7 @@ pub(crate) async fn register(
     let token = token();
     let cap = serde_json::to_string(&request.capabilities).unwrap();
     let workers = json!([{"id":request.worker_id.as_str(),"worker_id":request.worker_id.as_str(),"profile_id":request.profile_id.as_str(),"harness_kind":request.harness_kind.as_str()}]);
-    let inventory = json!({"worker_id":request.worker_id.as_str(),"profile_id":request.profile_id.as_str(),"harness_kind":request.harness_kind.as_str(),"source":"self_report","observed_at":now()});
+    // Registration keeps a compact self-reported worker snapshot; heartbeat supplies live inventory.
     store.conn().execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES(?1,?2,?3,?4,'online',?5,?6,?7,?8,?8) ON CONFLICT(id,installation_id) DO UPDATE SET token_hash=excluded.token_hash,status='online',last_heartbeat=excluded.last_heartbeat,workers=excluded.workers,inventory=excluded.inventory,capabilities=excluded.capabilities",params![node,installation,request.public_key,store::hash(&token),cap,serde_json::to_string(&workers).unwrap(),workers.to_string(),now()])?;
     store.audit(
         None,
@@ -753,6 +845,54 @@ pub(crate) async fn register(
     Ok(Json(
         json!({"node_id":node,"installation_id":installation,"token":token,"node_token":token,"grant_digest":null,"protocol":"loom.node.v1"}),
     ))
+}
+#[derive(serde::Deserialize)]
+struct InventorySelector {
+    installation_id: Option<String>,
+}
+async fn node_inventory(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(raw_id): axum::extract::Path<String>,
+    axum::extract::Query(selector): axum::extract::Query<InventorySelector>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    let mut candidates = store.query("SELECT id,installation_id,status,capabilities,workers,inventory,last_heartbeat,revoked_at FROM nodes WHERE id=?1", [&raw_id])?;
+    if let Some(installation_id) = selector
+        .installation_id
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        candidates
+            .retain(|node| node["installation_id"].as_str() == Some(installation_id.as_str()));
+    }
+    if candidates.len() > 1 {
+        return Err(ApiError::conflict(
+            "exact_installation_required",
+            "Select one exact installation instead of mixing worker/profile inventories",
+        ));
+    }
+    let record = candidates.first();
+    let installation_id = record
+        .map(|row| {
+            row["installation_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .or(selector.installation_id)
+        .unwrap_or_default();
+    let identity = crate::inventory::InstallationIdentity {
+        node_id: raw_id,
+        installation_id,
+    };
+    let view = crate::inventory::node_view(&identity, record, chrono::Utc::now());
+    Ok(Json(serde_json::to_value(view).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inventory_encoding",
+            "Cannot encode resource inventory",
+        )
+    })?))
 }
 pub(crate) async fn heartbeat(
     AppState(state): AppState<Arc<State>>,
@@ -831,8 +971,12 @@ pub(crate) async fn event(
         .filter(|x| x.len() <= 8000 && !x.is_empty())
         .ok_or_else(|| ApiError::bad("A bounded visible event summary is required"))?;
     valid_lease(&state.lock().unwrap(), &body, &node, true)?;
+    let session_reference = body
+        .get("session_ref")
+        .cloned()
+        .unwrap_or_else(|| json!({"assignment_id":assignment}));
     let store = state.lock()?;
-    store.conn().execute("INSERT OR IGNORE INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES(?1,?2,?3,'concierge',?4,?5,?6,'summary',?7,?8)",params![id("message"),ticket,body["sender"].as_str().unwrap_or("worker"),body["kind"].as_str().unwrap_or("activity"),content,body["session_ref"].as_str(),now(),body["request_id"].as_str()])?;
+    store.conn().execute("INSERT OR IGNORE INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES(?1,?2,?3,'concierge',?4,?5,?6,'summary',?7,?8)",params![id("message"),ticket,body["sender"].as_str().unwrap_or("worker"),body["kind"].as_str().unwrap_or("activity"),content,session_reference.to_string(),now(),body["request_id"].as_str()])?;
     Ok(Json(json!({"accepted":true,"node_id":node})))
 }
 
@@ -880,7 +1024,7 @@ async fn artifact_upload(
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
     let (node, _) = node(&state, &headers, &body)?;
-    let (ticket, assignment, epoch) = valid_lease(&state.lock().unwrap(), &body, &node, false)?;
+    let (ticket, assignment, _) = valid_lease(&state.lock().unwrap(), &body, &node, false)?;
     let metadata = if body["metadata"].is_object() {
         body["metadata"].clone()
     } else {
@@ -1246,9 +1390,10 @@ struct TicketRequest {
     worker_id: Option<String>,
     capability: Option<String>,
 }
+#[allow(clippy::too_many_arguments)]
 async fn create_ticket(
     AppState(state): AppState<Arc<State>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<TicketRequest>,
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;

@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 pub mod api;
 mod command; // CLI
+pub mod inventory;
+pub mod inventory_probe;
 mod maintenance;
 mod node_api;
 mod store;
