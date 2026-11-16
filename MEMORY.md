@@ -44,6 +44,9 @@
 - Startup schema reached v3 with persistent cancel_acknowledged. New DB initialization and existing older Schema migration are intentionally different paths. Register uses explicit `LOOM_CLIENT_TOKEN` not generate-if-missing.
 - Severe edge closure: failed/late reports may not become success, known success cannot be replaced by failure text, completed Assignment no longer repolled into second success. valid early poll must not resurrect old terminal jobs; currently dispatchable ASG must run once and be filtered afterward.
 
+- Native Bare Agent incorporated as commit `514809c`: actual `loom-node bind/start` in isolated /tmp test fixtures. macOS temporary root aliases are canonicalized for bindings. It passed 14 tests and real read/edit/cancel/reopen. Runtime atomic-file cancel racing is reconciling/unknown with private evidence (never converted to cancelled/success); report/artifact fencing preserves bytes for manual reconciliation, without exactly-once/rollback promises. Node's state/identity files mode 600. No chmod on existing parent dirs: earlier recursive private-permission guard was corrected to only newly-created owned directories.
+- Worker storage private sibling directories are protected from containing Project root or being contained by it; signed binding declarations have a specific node+installation key. Unit fixtures verify tampering/reassigned installation/symlink traversal and no default cwd fallback.
+
 ## Open problems and resolutions
 
 - Scope is large and includes actual hardware, platform-signed distribution and mobile verification. Proceed in evidenced increments rather than marking roadmap milestones complete from mocks, compilation or unit tests.

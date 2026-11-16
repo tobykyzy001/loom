@@ -198,6 +198,65 @@ impl StateStore {
         self.flush()
     }
 
+    /// A completed file effect can race cancellation before transport. Keep its
+    /// immutable request identity, but remove any claim of confirmed delivery and
+    /// quarantine the normal artifact upload. Local bytes remain in artifact storage.
+    pub fn record_cancellation_race(&mut self, assignment_id: &str) -> Result<bool> {
+        let mut changed = false;
+        for item in &mut self.data.outbox {
+            if item.kind != "report"
+                || item.body["assignment_id"] != assignment_id
+                || item.body["requested_state"] != "succeeded"
+            {
+                continue;
+            }
+            let artifact_evidence = item.body["artifacts"].clone();
+            let original_effect = item.body["effects"].clone();
+            if let Some(effects) = item.body["effects"].as_array_mut() {
+                for effect in effects {
+                    effect["status"] = json!("unknown");
+                    effect["artifacts"] = json!([]);
+                }
+            }
+            item.body["requested_state"] = json!("unknown");
+            item.body["state"] = json!("unknown");
+            item.body["status"] = json!("unknown");
+            item.body["summary"] = json!("Cancellation raced the completed local effect before normal delivery; report is evidence for reconciliation, not confirmed success.");
+            item.body["artifacts"] = json!([]);
+            item.body["artifact_ids"] = json!([]);
+            item.body["cancel_acknowledged"] = json!(false);
+            item.body["evidence"] = json!([{"kind":"cancellation_race","local_artifacts":artifact_evidence,
+                "original_effect_evidence":original_effect,"effect_file_remains_unconfirmed":true}]);
+            item.digest = digest_json(&item.body);
+            item.next_attempt_at = chrono::Utc::now().to_rfc3339();
+            changed = true;
+        }
+        if let Some(completion) = self.data.completions.get_mut(assignment_id) {
+            if completion["state"] == "succeeded" {
+                completion["state"] = json!("unknown");
+                completion["summary"] = json!("Local effect completed before cancellation was observed; delivery outcome is unknown pending reconciliation.");
+                if let Some(effects) = completion["effects"].as_array_mut() {
+                    for effect in effects {
+                        effect["status"] = json!("unknown");
+                        effect["artifacts"] = json!([]);
+                    }
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            for item in &mut self.data.outbox {
+                if item.kind == "artifact" && item.body["assignment_id"] == assignment_id {
+                    item.last_error = Some("Normal artifact transport was quarantined because cancellation raced the local effect; bytes and metadata are retained locally for reconciliation.".to_owned());
+                    item.next_attempt_at = "+999999999-12-31T23:59:59Z".to_owned();
+                    changed = true;
+                }
+            }
+            self.flush()?;
+        }
+        Ok(changed)
+    }
+
     pub fn set_cancel_requested(&mut self, id: &str, value: bool) -> Result<()> {
         if let Some(assignment) = self.data.assignments.get_mut(id) {
             assignment["cancel_requested"] = json!(value);

@@ -287,6 +287,32 @@ fn restart_running_completion_turns_unknown_and_does_not_reexecute() {
 }
 
 #[test]
+fn transport_cancellation_race_is_reconciliation_not_success_or_reexecution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (assignment, mut state) = executable(&tmp, |_| {});
+    executor::execute(&assignment, &tmp.path().join("artifacts"), &mut state).unwrap();
+    let request = state.data.outbox[1].body["request_id"].clone();
+    assert!(state.record_cancellation_race(&assignment.id).unwrap());
+    assert_eq!(
+        state.data.completions[assignment.id.as_str()]["state"],
+        "unknown"
+    );
+    let report = state
+        .data
+        .outbox
+        .iter()
+        .find(|item| item.kind == "report")
+        .unwrap();
+    assert_eq!(report.body["request_id"], request);
+    assert_eq!(report.body["requested_state"], "unknown");
+    assert_eq!(report.body["artifact_ids"], json!([]));
+    assert_eq!(report.body["effects"][0]["status"], "unknown");
+    assert_eq!(report.body["effects"][0]["artifacts"], json!([]));
+    assert_eq!(report.body["cancel_acknowledged"], false);
+    assert!(!state.record_cancellation_race(&assignment.id).unwrap());
+}
+
+#[test]
 fn observed_abort_before_read_is_unknown_not_success_or_cancel_acknowledgement() {
     let tmp = tempfile::tempdir().unwrap();
     let (assignment, mut state) = executable(&tmp, |_| {});

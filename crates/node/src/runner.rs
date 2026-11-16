@@ -273,6 +273,19 @@ impl LocalNodeRunner {
         };
         self.state = completion_state;
         let assignment = final_assignment;
+        // One last exact-attempt observation may beat the normal transport even
+        // when the deterministic filesystem operation finished in microseconds.
+        let observed_cancellation = observed_cancellation
+            || self
+                .client
+                .cancellation_for(&self.identity, &assignment.id, &assignment.ticket_id)
+                .await
+                .unwrap_or(false);
+        if observed_cancellation {
+            self.state.record_cancellation_race(&assignment.id)?;
+        }
+        let mut assignment = assignment;
+        assignment.cancel_requested = observed_cancellation;
         // Acknowledge only after executor completion and its effect/report facts are
         // durable. Delivery itself remains asynchronous and idempotent.
         let accepted = outcome["state"] == "succeeded";
