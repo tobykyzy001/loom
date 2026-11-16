@@ -14,12 +14,13 @@ import ActivityView from './views/ActivityView.vue'
 import DevicesView from './views/DevicesView.vue'
 import ProjectsView from './views/ProjectsView.vue'
 import MemoriesView from './views/MemoriesView.vue'
+import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
-import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources } from './state/workspace'
+import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
 import { grantOperationsSummary } from './lib/permissions'
-import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode } from './api/types'
+import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate } from './api/types'
 
 const { state, ticket, projects, tickets, nodes, bootstrap, expanded } = useWorkspace()
 const showProjects = ref(false)
@@ -30,8 +31,8 @@ const showMore = ref(false)
 const confirmation = ref<Confirmation | null>(null)
 const pendingAction = ref<(() => Promise<boolean>) | null>(null)
 const devicesView = ref<InstanceType<typeof DevicesView>>()
-const confirmationBusy = computed(() => state.busy['ticket-write'] || state.busy['grant-write'] || state.busy['memory-write'] || state.busy['binding-write'])
-const confirmationError = computed(() => state.errors['ticket-write'] || state.errors['grant-write'] || state.errors['memory-write'] || state.errors['binding-write'] || state.errors.confirm)
+const confirmationBusy = computed(() => state.busy['ticket-write'] || state.busy['grant-write'] || state.busy['memory-write'] || state.busy['binding-write'] || state.busy['skill-write'])
+const confirmationError = computed(() => state.errors['ticket-write'] || state.errors['grant-write'] || state.errors['memory-write'] || state.errors['binding-write'] || state.errors['skill-write'] || state.errors.confirm)
 const greeting = computed(() => new Date().getHours() < 12 ? '早上好' : new Date().getHours() < 18 ? '下午好' : '晚上好')
 const principalName = computed(() => bootstrap.value?.principal?.display_name ?? bootstrap.value?.principal?.name ?? bootstrap.value?.identity?.name ?? bootstrap.value?.identity?.principal ?? '个人工作空间')
 const protocolName = computed(() => bootstrap.value?.client_api ?? bootstrap.value?.api ?? bootstrap.value?.protocol_version ?? bootstrap.value?.version ?? '协议版本未知')
@@ -39,7 +40,7 @@ const nodeStatus = computed(() => !state.connected ? '未连接' : !nodes.value.
 const navItems: { page: Page; label: string; icon: IconName }[] = [
   { page: 'conversation', label: '对话', icon: 'conversation' }, { page: 'activity', label: '活动', icon: 'activity' },
   { page: 'devices', label: '设备', icon: 'devices' }, { page: 'projects', label: '项目', icon: 'projects' },
-  { page: 'memories', label: '记忆', icon: 'memories' }, { page: 'access', label: '权限', icon: 'access' },
+  { page: 'memories', label: '记忆', icon: 'memories' }, { page: 'skills', label: '技能', icon: 'sparkle' }, { page: 'access', label: '权限', icon: 'access' },
 ]
 const ticketOpen = computed(() => state.page === 'conversation' && !!state.selectedTicketId)
 
@@ -56,8 +57,22 @@ function changePage(page: Page) {
   navigate(page)
   if (['devices', 'access', 'memories'].includes(page)) void loadResources()
   if (page === 'projects') void refresh()
+  if (page === 'skills') void loadSkillEvidence()
 }
 function selectTask(id: string) { void selectTicket(id, 'conversation') }
+function skillReplay(candidate: SkillCandidate, sourceTicketId: string) {
+  ask({ title: '确认这次有限回放？', effect: '仅读取相同原始样本，不修改文件，创建一个新的普通 read_summary Ticket。不是运行任意代码，不创建 Grant，也不会由浏览器启动 Worker。', changes: [`原始任务：${sourceTicketId}`, '生成独立 Ticket 与（节点报告后）可能的 Artifact', '提交后回到此候选；需显式刷新以观察真实报告'], confirmLabel: '确认发起普通只读回放' }, () => startSkillReplay(candidate, sourceTicketId))
+}
+function skillReview(candidate: SkillCandidate, decision: 'accept' | 'reject' | 'undo') {
+  const replay = state.skillData?.skill_replays.find(item => item.candidate_id === candidate.id)
+  ask({
+    title: decision === 'accept' ? '接受这项回放证据？' : decision === 'undo' ? '撤销已保存的审阅？' : '拒绝这个 Skill 候选？',
+    effect: decision === 'accept' ? '保存原任务与真实新回放之间的只读证明。不会提供 Skill 运行、激活或后续执行权限。' : decision === 'undo' ? '移除保存的审阅结果，原任务、回放、Grant 和关联审计仍保留，不会删除历史事实。' : '只记录候选的审阅决定，不自动回放、不更改原任务、Memory 或 Grant。',
+    changes: decision === 'accept' && replay ? [`原 Ticket：${replay.source_ticket_id}`, `回放 Ticket：${replay.replay_ticket_id}`, `SHA-256：${replay.expected_sha256}`] : [`Candidate：${candidate.id}`],
+    danger: decision !== 'accept',
+    confirmLabel: decision === 'accept' ? '确认保存证明' : decision === 'undo' ? '确认撤销审阅' : '确认拒绝候选',
+  }, () => reviewSkill(candidate, decision))
+}
 function ticketCancel() {
   const id = ticket.value?.id
   if (!id) return
@@ -105,6 +120,7 @@ function onConnectionSaved() { showConnection.value = false; void refresh() }
 function onVisibility() { if (document.visibilityState === 'visible') void refresh() }
 onMounted(() => {
   void refresh()
+  if (state.page === 'skills') void loadSkillEvidence()
   startPolling()
   document.addEventListener('visibilitychange', onVisibility)
 })
@@ -145,13 +161,14 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
         <p v-if="state.errors.enrollment" class="form-error" role="alert">{{ state.errors.enrollment }}</p>
       </template>
       <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy.preferences" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />
+      <SkillsView v-else-if="state.page === 'skills'" :data="state.skillData" :tickets="tickets" :projects="projects" :loading="state.busy.skills" :busy="state.busy['skill-write']" :error="!state.busy.skills ? state.errors.skills : ''" :load-error="state.errors.skills" @refresh="void loadSkillEvidence()" @replay="skillReplay" @review="skillReview" @ticket="selectTask" />
       <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" />
       <AccessView v-else-if="state.page === 'access'" :grants="state.grants" :projects="projects" :nodes="nodes" :busy="state.busy['grant-write']" :error="state.errors['grant-write'] || (!state.busy.resources ? state.errors.resources : '')" @create="grantCreate" @revoke="revokeGrantWithConfirmation" />
       <HelpView v-else @connect="showConnection = true" />
       <p v-if="state.errors.preferences" class="preferences-error" role="status">{{ state.errors.preferences }}</p>
     </main>
     <button v-if="!ticketOpen" class="mobile-new-task button primary" aria-label="新建任务" @click="startNewTicket"><AppIcon name="plus" :size="20" /></button>
-    <nav class="mobile-tabs" aria-label="移动端工作空间"><button v-for="item in navItems.slice(0, 4)" :key="item.page" :class="{ active: state.page === item.page }" :aria-current="state.page === item.page ? 'page' : undefined" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="20" /><span>{{ item.label }}</span></button><button :class="{ active: showMore || ['memories', 'access', 'help'].includes(state.page) }" :aria-expanded="showMore" @click="showMore = !showMore"><AppIcon name="menu" :size="20" /><span>更多</span></button></nav>
+    <nav class="mobile-tabs" aria-label="移动端工作空间"><button v-for="item in navItems.slice(0, 4)" :key="item.page" :class="{ active: state.page === item.page }" :aria-current="state.page === item.page ? 'page' : undefined" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="20" /><span>{{ item.label }}</span></button><button :class="{ active: showMore || ['memories', 'skills', 'access', 'help'].includes(state.page) }" :aria-expanded="showMore" @click="showMore = !showMore"><AppIcon name="menu" :size="20" /><span>更多</span></button></nav>
     <nav v-if="showMore" class="mobile-more" aria-label="更多工作空间"><button v-for="item in navItems.slice(4)" :key="item.page" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="18" />{{ item.label }}</button><button @click="changePage('help')"><AppIcon name="help" :size="18" />帮助</button><button @click="showMore = false; showConnection = true"><AppIcon name="settings" :size="18" />连接设置</button></nav>
     <ProjectDialog v-if="showProjects" :busy="state.busy.project" :error="state.errors.project" @close="showProjects = false" @submit="saveProject" />
     <ConnectionDialog v-if="showConnection" @saved="onConnectionSaved" />

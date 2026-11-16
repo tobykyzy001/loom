@@ -1,4 +1,4 @@
-export type Page = 'conversation' | 'activity' | 'devices' | 'projects' | 'memories' | 'access' | 'help'
+export type Page = 'conversation' | 'activity' | 'devices' | 'projects' | 'memories' | 'skills' | 'access' | 'help'
 export type ProjectMode = 'read_only' | 'read_write'
 export type TicketKind = 'read_summary' | 'edit_file' | 'model_text'
 export type TicketStatus =
@@ -142,6 +142,80 @@ export interface ModelObservation {
   operation: 'invoke_text'
   grant_current: boolean
   session_id?: string
+}
+
+export interface SkillCandidate {
+  id: string
+  kind: 'skill' | 'memory' | 'route' | string
+  scope: string
+  status: 'pending' | 'accepted' | 'rejected' | 'later' | string
+  content: string
+  source_refs: string
+  version: number
+}
+
+export interface ReplaySample {
+  path: string
+  line_count: number
+  lines: string[]
+  digest: string
+}
+
+export type ReplayStatus = 'awaiting_execution' | 'verified' | 'sample_mismatch' | 'failed' | 'reconciling' | (string & {})
+export interface SkillReplay {
+  schema: 'loom.skill-replay.v1' | string
+  candidate_id: string
+  source_ticket_id: string
+  source_artifact_id: string
+  replay_ticket_id: string
+  replay_artifact_id: string | null
+  expected_sha256: string
+  expected_sample: { path?: string; line_count?: number; lines?: string[] }
+  sample: ReplaySample
+  status: ReplayStatus
+  verified_at?: string | null
+  reason?: string | null
+  grant_revocation_denied_at?: string | null
+  current_project_valid: boolean
+  authority_created: false
+  runtime: 'bounded_exact_deterministic_read_summary_only' | string
+  grant_id: string
+}
+
+export interface SkillProof {
+  id: string
+  candidate_id: string
+  scope: string
+  kind: 'skill' | string
+  source_ticket_id: string
+  source_artifact_id: string
+  replay_ticket_id: string
+  replay_artifact_id: string
+  grant_id: string
+  definition_json: string
+  proof_json: string
+}
+
+export interface SkillProofJson {
+  schema: 'loom.skill.v1'
+  bounded_operation: 'read_summary'
+  replay_verified: boolean
+  source_ticket_id: string
+  source_artifact_id: string
+  replay_ticket_id: string
+  replay_artifact_id: string
+  sha256: string
+  sample: ReplaySample
+  grant_id: string
+  standing_grant: boolean
+  activation: boolean
+}
+
+export interface SkillWorkspaceData {
+  candidates: SkillCandidate[]
+  skill_replays: SkillReplay[]
+  skills: SkillProof[]
+  policy?: string
 }
 
 export interface ApprovalRequest {

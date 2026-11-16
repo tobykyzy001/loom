@@ -1,9 +1,9 @@
 import { reactive, toRefs } from 'vue'
 import { ApiError, LoomClient } from '../api/client'
 import { auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
-import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, Ticket } from '../api/types'
+import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, Ticket } from '../api/types'
 import { PAGE_KEY, TICKET_KEY, TOKEN_KEY, cachedExpanded, localRead, localWrite } from '../lib/storage'
-
+import { SkillActions, type SkillWorkspaceReference } from '../lib/skillActions'
 export interface WorkspaceState {
   page: Page
   expanded: boolean
@@ -18,21 +18,23 @@ export interface WorkspaceState {
   audit: AuditEntry[]
   artifacts: Record<string, ArtifactContent>
   preferences: Preferences
+  skillData: SkillWorkspaceData | null
   connected: boolean | null
   busy: Record<string, boolean>
   errors: Record<string, string>
 }
 
-const pages: Page[] = ['conversation', 'activity', 'devices', 'projects', 'memories', 'access', 'help']
+const pages: Page[] = ['conversation', 'activity', 'devices', 'projects', 'memories', 'skills', 'access', 'help']
 const savedPage = localRead(PAGE_KEY) as Page
 const state = reactive<WorkspaceState>({
   page: pages.includes(savedPage) ? savedPage : 'conversation',
   expanded: cachedExpanded(),
   selectedTicketId: localRead(TICKET_KEY),
-  ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], grants: [], audit: [], artifacts: {},
+  ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], grants: [], audit: [], artifacts: {}, skillData: null,
   preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, busy: {}, errors: {},
 })
 const client = new LoomClient({ token: () => localRead(TOKEN_KEY) ?? '' })
+const skillActions = new SkillActions(client)
 let detailVersion = 0
 let refreshInFlight: Promise<void> | null = null
 let poll: ReturnType<typeof setInterval> | undefined
@@ -285,6 +287,30 @@ export async function loadResources() {
     state.nodes = nodesFrom(nodes); state.memories = memoriesFrom(memories); state.grants = grantsFrom(grants)
   })
   return result !== undefined
+}
+
+export async function loadSkillEvidence(reference = skillActions): Promise<boolean> {
+  const result = await run('skills', () => reference.read())
+  if (result === undefined) return false
+  state.skillData = result.data
+  state.tickets = result.tickets
+  return true
+}
+
+export async function startSkillReplay(candidate: SkillCandidate, sourceTicketId: string, reference: SkillWorkspaceReference = skillActions): Promise<boolean> {
+  const result = await run('skill-write', () => reference.replay(candidate, sourceTicketId))
+  if (result === undefined) return false
+  state.skillData = result.data
+  state.tickets = result.tickets
+  return true
+}
+
+export async function reviewSkill(candidate: SkillCandidate, decision: 'accept' | 'reject' | 'undo', reference: SkillWorkspaceReference = skillActions): Promise<boolean> {
+  const result = await run('skill-write', () => reference.review(candidate, decision))
+  if (result === undefined) return false
+  state.skillData = result.data
+  state.tickets = result.tickets
+  return true
 }
 
 export function useWorkspace() { return { state, ...toRefs(state) } }

@@ -11,6 +11,7 @@ import { sha256 } from '../../packages/node-client/src/util.js'
 // One real HTTP center, one temporary project, and the real deterministic JS
 // worker. No direct database mutation, HTTP connector, model or DSH profile.
 const checks=[]
+const withBrowser=process.argv.includes('--browser')
 const record=(name,evidence)=>checks.push({name,status:'PASS',...evidence})
 const reject=async(body,predicate)=>{await assert.rejects(body,(error)=> typeof predicate==='function' ? predicate(error) : predicate.test(error.message));return predicate.name||predicate.toString()}
 let server,node
@@ -80,20 +81,36 @@ try {
   await reject(replay('candidate_unknown',{source_ticket_id:source.id}),(error)=>error.status===404)
   record('foreign/unbound source, random candidate and root/artifact override produce no work',await assertNoAuthority(1,'source_scope_and_shallow_body_enforced'))
 
+  if(withBrowser) {
+    const { verifySkillsBrowser } = await import('../browser/skills-proof.mjs')
+    const evidence=await verifySkillsBrowser({server,admin,node,root,candidateId,source:original,runWorker:settle})
+    assert.equal(evidence.actual_ui_replay_confirmed,true)
+    assert.equal(evidence.explicit_accept_persisted,true)
+    assert.equal(evidence.source_replay_sha_match,true)
+    assert.equal(evidence.no_standing_permission,true)
+    assert.equal(evidence.narrow_no_overflow,true)
+    record('actual Edge replays only real chosen source, waits worker, accepts saved proof',{...evidence,real_worker_invocation:true})
+  }
+
   let issued=await replay(candidateId,{source_ticket_id:source.id})
-  assert.equal(issued.status,'awaiting_execution',JSON.stringify(issued))
+  assert.equal(issued.status,withBrowser?'verified':'awaiting_execution',JSON.stringify(issued))
   assert.equal(issued.source_ticket_id,source.id)
   assert.notEqual(issued.replay_ticket_id,source.id)
-  assert.equal(issued.replay_artifact_id,null)
+  if(withBrowser) { assert.ok(issued.replay_artifact_id) } else { assert.equal(issued.replay_artifact_id,null) }
   assert.equal(issued.runtime,'bounded_exact_deterministic_read_summary_only')
   assert.equal(issued.authority_created,false)
   assert.equal(await countTickets(),2)
   assert.equal((await replay(candidateId,{source_ticket_id:source.id})).replay_ticket_id,issued.replay_ticket_id)
   assert.equal(await countTickets(),2,'Repeated request cannot create another normal ticket')
-  await reject(accept(candidateId),(error)=>error.status===400)
+  if(!withBrowser) await reject(accept(candidateId),(error)=>error.status===400)
   let waiting=await admin.get(`/api/v1/tickets/${issued.replay_ticket_id}`)
-  assert.deepEqual(waiting.artifacts,[])
-  assert.equal(waiting.reports.length,0)
+  if(withBrowser) {
+    assert.equal(waiting.artifacts.length,1)
+    assert.equal(waiting.reports[0].state,'succeeded')
+  } else {
+    assert.deepEqual(waiting.artifacts,[])
+    assert.equal(waiting.reports.length,0)
+  }
   assert.equal(waiting.kind,'read_summary')
   assert.equal(waiting.grant_id,grantId)
   assert.equal(waiting.project_id,projectId)
@@ -102,7 +119,7 @@ try {
   assert.notEqual(waiting.assignments[0].id,original.assignments[0].id)
   assert.notEqual(waiting.assignments[0].lease_id,original.assignments[0].lease_id)
   const replayExecution=await settle()
-  assert.equal(replayExecution.status,'succeeded',JSON.stringify(replayExecution))
+  assert.equal(replayExecution.status,withBrowser?'idle':'succeeded',JSON.stringify(replayExecution))
   const proof=await replayState(candidateId)
   assert.equal(proof.status,'verified',JSON.stringify(proof))
   assert.notEqual(proof.replay_artifact_id,sourceArtifact.id)
@@ -124,8 +141,10 @@ try {
   assert.equal(await countTickets(),2)
   record('fresh ordinary runner output matches actual original bytes AND SHA before any Skill acceptance',{replay_ticket_id:issued.replay_ticket_id,source_sha256:sourceSha,replay_sha256:freshSha,fresh_artifact:proof.replay_artifact_id,ordinary_ticket_total:2,sample:proof.sample,project_unchanged:true})
 
-  const accepted=await accept(candidateId)
-  assert.equal(accepted.status,'accepted')
+  const accepted = withBrowser
+    ? await reject(accept(candidateId), error => error.status === 400 && /already|repeat|pending/i.test(error.message))
+    : await accept(candidateId)
+  if(!withBrowser) assert.equal(accepted.status,'accepted')
   const saved=await skills()
   assert.equal(saved.skills.length,1)
   assert.equal(saved.skill_replays.length,1)
@@ -133,6 +152,7 @@ try {
   assert.equal(savedSkill.candidate_id,candidateId)
   assert.equal(savedSkill.replay_ticket_id,issued.replay_ticket_id)
   assert.equal(savedSkill.replay_artifact_id,proof.replay_artifact_id)
+  assert.equal(saved.candidates.find(entry=>entry.id===candidateId)?.status,'accepted')
   const skillProof=JSON.parse(savedSkill.proof_json)
   assert.equal(skillProof.sha256,sourceSha)
   assert.equal(skillProof.standing_grant,false)
@@ -144,7 +164,7 @@ try {
   assert.equal((await replay(candidateId,{source_ticket_id:source.id})).replay_ticket_id,issued.replay_ticket_id)
   assert.equal(await countTickets(),2)
   assert.equal((await skills()).skills.length,1)
-  record('explicit accept stores one proof-only Skill, no Memory, no new Grant, idempotent repeat',{skill_id:savedSkill.id,candidate_status:accepted.status,skill_count:1,memory_count:0,grant_count:1,ticket_total:2,standing_permission:false})
+  record('explicit accept stores one proof-only Skill, no Memory, no new Grant, idempotent repeat',{skill_id:savedSkill.id,candidate_status:'accepted',duplicate_accept_rejected:withBrowser,skill_count:1,memory_count:0,grant_count:1,ticket_total:2,standing_permission:false})
 
   const mismatchedCandidate=await candidate('Second candidate catches changed deterministic bytes')
   const mismatchStart=await replay(mismatchedCandidate,{source_ticket_id:source.id})

@@ -274,7 +274,11 @@ schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail�
 
 Review时客户端`replay_verified:true`不构成证据。完整原source/新replay Assignment、node/worker/attempt/lease和ticket终态、stop意图以及candidate实际附着的source_refs都要一致。First acceptance前必须原Grant尚未撤销、当前Binding及匹配root/worker仍有效；已撤 Grant/Binding的过去replay可以提供历史说明，但**不能因此创建本新的技能审核记录**。已保存skills只是该条作业的proof索引，不是长期执行凭据。`undo`撤销该审核记录，不执行Grant回滚、不重复Task、不抹掉原Artifact或审计，而Memory accept保持独立工作路径。`verified_at`是第一次实际proof形成时间，不因GET刷新。
 
-[tests/skills/README.md](tests/skills/README.md) 的`node tests/skills/read-replay.mjs`真实运行了候选/回放/接收与改变输入不匹配、撤权与重启恢复。当前仍无通用技能runtime、记忆跳跃获授权、分布式技能分发或稳定Skills UI，不能把其视为M5全部完成。
+[tests/skills/README.md](tests/skills/README.md) 的`node tests/skills/read-replay.mjs`真实运行了候选/回放/接收与改变输入不匹配、撤权与重启恢复。示例页面 `apps/web/src/views/SkillsView.vue` 增加独立Skill证据审阅，不把skill并入Memory或发起通用执行。用户可读取实际source_ticket绑定的原始Task引用，核对Replay Structure与其新Ticket、source/replay Artifact UUID与SHA；只有用户确认后才发送**唯一**`source_ticket_id`开始普通只读Ticket。仅查看证据/刷新不会自行执行或偷偷建立Grant。
+
+前端会以**受限的按需详情读取**补足列表所没有的Task Artifact/Report；不把列表/summary状态的`status=succeeded`误当真实Artifact证明。等待worker、字节不一致或未知证据不能被背景屏幕标记为verified/accepted。用户随后**另行**确认accept/reject/undo，不会由页面加载自动存档，也不能用`Replay Button`立新的Skill激活。Grant撤销必须阻止首次保存，过去proof仍是只读历史，不可变成可执行、授权或模型入口。有向的与原任务/回放Ticket的实体关系可以回任务详情，不把Skill建议和输出Artifact混成另一层权限。普通worker仍通过原Grant执行，不来自浏览器。
+
+`--browser`实际验证明示的replay请求与后续human审批，还包括真实worker与Source/Output SHA；390px没有溢出的关键UUID信息，不等于移动真机或多平台验收。当前仍无通用技能runtime、记忆跳跃获授权、分布式技能分发或持久的Skill执行引擎，不能把其视为M5全部完成。
 
 ## 4. 会话可见性与审计架构
 
