@@ -19,6 +19,8 @@ Updated: 2026-11-17.
 13. `aacdf34` — bounded, versioned document-DAG protocol validation (not a claim of an executed industry DAG).
 14. `2126038` — real bounded two-stage document execution, immutable parent input, v4 run/stage projection and restart validation.
 15. `0f3ec88` — actual parent/child Agent delegation with source/current-Lease proof, center-refused forged references, immutable child lineage and filtered collaboration evidence.
+16. `5320707` — explicit bounded hardware probe with real local Apple M5 Max/Metal 4 observations, missing/unknown boundaries, no model claim.
+17. `59aaee5` — real public-SDK text invocation with independent invoke_text permission, precise provider/model, source-bound response and replay/recovery proof.
 
 Local commits are not pushed unless separately reported.
 
