@@ -137,6 +137,28 @@ export interface Bootstrap {
   node?: Partial<LoomNode> | null
 }
 
+export interface ResourceFact {
+  resource: string
+  value?: string | number | boolean | null
+  confidence?: 'available' | 'missing' | 'unknown' | 'incompatible' | 'denied' | 'offline' | 'busy' | 'error' | 'stale' | string
+  source?: 'user_declared' | 'host_reported' | 'controller_probed' | 'unverified' | string
+  observed_at?: string | null
+  freshness?: 'fresh' | 'stale' | 'unknown' | string
+}
+
+export interface NodeInventory {
+  schema?: 'loom.inventory.v1' | string
+  identity?: { node_id?: string; installation_id?: string }
+  freshness?: 'fresh' | 'stale' | 'unknown' | string
+  presence?: 'installed' | 'never_installed' | 'revoked' | string
+  reachability?: 'online' | 'busy' | 'degraded' | 'offline' | 'stale' | 'revoked' | 'not_installed' | 'unknown' | string
+  health?: 'available' | 'busy' | 'degraded' | 'offline' | 'missing' | 'revoked' | 'error' | string
+  facts?: ResourceFact[]
+  issues?: Array<{ resource?: string; code?: string; confidence?: ResourceFact['confidence'] }>
+  project_roots?: Record<string, string>
+  permission_boundary?: string
+}
+
 export interface LoomNode {
   id: string
   node_id?: string
@@ -151,6 +173,7 @@ export interface LoomNode {
   revoked_at?: string | null
   trusted?: boolean
   platform?: string
+  inventory?: NodeInventory
 }
 
 export interface Grant {

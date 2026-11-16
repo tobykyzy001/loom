@@ -21,7 +21,7 @@ function setEnrollment(value: unknown) {
   copied.value = false
 }
 function factValue(node: LoomNode, resource: string): string {
-  const facts = (node as unknown as { inventory?: { facts?: Array<{ resource?: string; value?: string | number | boolean | null; confidence?: string; source?: string }> } }).inventory?.facts ?? []
+  const facts = node.inventory?.facts ?? []
   const fact = facts.find(entry => entry.resource === resource)
   if (!fact) return '尚未探测'
   if (fact.value === null || fact.value === undefined) return fact.confidence === 'unknown' ? '未知（未验证）' : '无已记录事实'
@@ -30,7 +30,7 @@ function factValue(node: LoomNode, resource: string): string {
     : `${fact.value} · ${fact.source === 'controller_probed' ? '控制器探测' : '主机上报'}`
 }
 function factStatus(node: LoomNode, resource: string): string {
-  const inventory = (node as unknown as { inventory?: { facts?: Array<{ resource?: string; confidence?: string }>; issues?: Array<{ resource?: string; code?: string }> } }).inventory
+  const inventory = node.inventory
   const confidence = inventory?.facts?.find(fact => fact.resource === resource)?.confidence ?? 'unknown'
   const warnings = inventory?.issues?.filter(issue => issue.resource?.startsWith(resource) || issue.resource === 'workers').map(issue => issue.code) ?? []
   return [...new Set([confidence === 'unknown' ? '未知' : confidence, ...warnings])].join(' / ')

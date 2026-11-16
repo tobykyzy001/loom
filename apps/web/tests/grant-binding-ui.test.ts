@@ -50,6 +50,25 @@ describe('static usability contracts (SSR, not a browser test)', () => {
   })
 })
 
+describe('typed resource facts view', () => {
+  it('shows actual bounded hardware observations and keeps unknown model support honest', async () => {
+    const DeviceView = (await import('../src/views/DevicesView.vue')).default
+    const html = await render(DeviceView, { nodes: [{ id: 'node-a', installation_id: 'install-a', status: 'online', last_heartbeat: new Date().toISOString(), inventory: {
+      schema: 'loom.inventory.v1', freshness: 'fresh', facts: [
+        { resource: 'hardware.os', value: 'macos', confidence: 'available', source: 'host_reported' },
+        { resource: 'hardware.memory_bytes', value: 17179869184, confidence: 'available', source: 'host_reported' },
+        { resource: 'model.adapter', confidence: 'unknown', value: null },
+      ],
+      project_roots: { 'project-a': '/srv/exact-project' },
+    } }] })
+    expect(html).toContain('macos')
+    expect(html).toContain('16.0 GiB')
+    expect(html).toContain('未知（未验证）')
+    expect(html).toContain('主机上报')
+    expect(html).not.toContain('16 GiB ·')
+  })
+})
+
 describe('static expert inspection anchors', () => {
   it('shows how read_write is communicated on the create form, not only in the confirmation', () => {
     expect(sources.AccessView).toContain("'read_write'")

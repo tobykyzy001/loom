@@ -198,6 +198,14 @@ Host Agent
 | MemoryCandidate | 等待用户确认的偏好或经验草案；接受后才成为对应作用域的 Memory |
 | SkillCandidate | 从重复会话提炼的工作流草案，含适用条件、输入、步骤、验证和产物，不自动取得执行权 |
 
+### 3.1 当前实现的资源与执行证据补充
+
+当前开发基线使用 `InstallationResourceBinding` 表示“哪个 ProjectId 在某个 Node + Installation + Worker 的真实本地位置上如何映射”。Host 先声明候选位置，单用户管理员显式确认绑定，Grant 再引用绑定及 digest；**生命周期为发现候选 → 绑定确认 → Grant → Assignment/Lease**，不是发现即授权。Ticket/Grant digest 与绑定版本需要一致，不能指向另一个 installation 或另一个 root，且当前实现没有 fallback 到任意备用目录。节点本地 Executor 也应把中心签发 binding 与 operator 私有 config 的 Canonical Root 再次核验。
+
+`ResourceObservation` 对应正在引入的 `loom.inventory.v1`。它至少具有名义资源、可选值、来源（用户声明 / Host 自报 / Controller 实测 / 未验证）、观测时刻、新鲜度、available/missing/unknown/denied/offline/busy/error/stale 等状态、放置范围和适用约束。**观测事实不能颁发 Grant**，Unavailable、Unknown、Offline、Timeout 和 Unsupported 不等价，更不得当成同一种“存在”。PlacementDecision 只解释当前事实与既有 Grant、Binding、Worker、心跳的关系，最终执行仍走原权威任务协议。`models` 未探测时明确 unknown，不默认存在模型/GPU或图片能力。
+
+该补充是在前述长期架构上的实现策略，不替代其他 Domain 定义，也不宣称 M1 全套能力已验收。实际验证入口与缺口见 [BASELINE.md](BASELINE.md) 与 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
+
 ## 4. 会话可见性与审计架构
 
 ### 4.1 默认简洁，过程可展开
