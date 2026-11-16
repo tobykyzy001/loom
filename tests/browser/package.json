@@ -1,0 +1,10 @@
+{
+  "name": "loom-browser-e2e-private",
+  "private": true,
+  "type": "module",
+  "description": "Isolated local browser test driver; outside the application workspace and never served as application code.",
+  "scripts": { "e2e": "node run.mjs", "e2e:narrow": "node run.mjs --narrow-viewport --keep-evidence" },
+  "devDependencies": {
+    "playwright-core": "1.65.1"
+  }
+}

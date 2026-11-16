@@ -1,0 +1,372 @@
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { chromium } from 'playwright-core'
+import { prepareProject, startRustConcierge } from '../../scripts/fixtures/rust-server.mjs'
+import { LoomHttpClient } from '../../packages/node-client/src/http.js'
+import { LocalNodeRunner } from '../../packages/node-client/src/runner.js'
+import { sha256 } from '../../packages/node-client/src/util.js'
+
+// The supported path is only the local Loom app with Playwright's canonical
+// isolated browser context. Raw stock-executable spawning / global updater
+// hand wrangling is not used. No DSH browser, session or profile is attached.
+const here = dirname(fileURLToPath(import.meta.url))
+const repository = resolve(here, '../..')
+const dependency = JSON.parse(await readFile(join(here, 'node_modules/playwright-core/package.json'), 'utf8'))
+assert.equal(dependency.version, '1.65.1', 'Local exact Playwright must be installed with the documented command')
+const flags = new Set(process.argv.slice(2))
+const allowed = ['--headed', '--keep-evidence', '--vite', '--narrow-viewport']
+assert.ok([...flags].every((flag) => allowed.includes(flag)), `Usage: node tests/browser/run.mjs [${allowed.join('] [--')}]`)
+if (flags.has('--headed')) assert.ok(process.platform === 'darwin' || process.env.DISPLAY, 'Headed mode needs a desktop display')
+const executable = process.env.LOOM_BROWSER_EXECUTABLE || '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+assert.ok(await access(executable).then(() => true, () => false), `No installed standalone browser: ${executable}`)
+await realpath(executable)
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+function redact(value, secrets) {
+  let text = String(value)
+  for (const secret of secrets) if (secret) text = text.replaceAll(secret, '[redacted-test-secret]')
+  return text.slice(-20000)
+}
+async function checked(command, argv, timeoutMs = 120000) {
+  const child = spawn(command, argv, { cwd: repository, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } })
+  const output = []; let timedOut = false
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { output.push(String(chunk)); if (output.length > 20) output.shift() })
+  const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGTERM') } catch {} }, timeoutMs)
+  try {
+    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) })
+    if (timedOut || code !== 0) throw new Error(`${command} failed (code=${code}, timeout=${timedOut}): ${output.join('')}`)
+  } finally { clearTimeout(timer); await terminateOwnedProcess(child) }
+}
+async function terminateOwnedProcess(child) {
+  if (!child || child.exitCode !== null || child.signalCode) return
+  const exited = new Promise((resolve) => child.once('exit', resolve))
+  const signal = (name) => { try { if (process.platform === 'win32') child.kill(name); else process.kill(-child.pid, name) } catch (error) { if (error.code !== 'ESRCH') throw error } }
+  signal('SIGTERM')
+  if (!await Promise.race([exited.then(() => true), sleep(4000)])) {
+    signal('SIGKILL'); await Promise.race([exited, bounded(sleep(4000), 'hard child termination')])
+  }
+}
+async function bounded(promise, label, timeoutMs = 30000) {
+  let timer
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs) })]) }
+  finally { clearTimeout(timer) }
+}
+
+async function run() {
+  const root = await mkdtemp(join(tmpdir(), 'loom-browser-owned-'))
+  const evidence = await mkdtemp(join(tmpdir(), 'loom-browser-evidence-'))
+  const secrets = []
+  const result = { schema: 'loom.browser.desktop_e2e.v1', overall: 'NOT RUN', phase: 'environment',
+    browser: { executable: basename(executable), playwright_core: dependency.version, dsh_profile_used: false, personal_profile_used: false, new_owned_temp_profile: true },
+    dsh_electron_reuse: 'NOT RUN: DSH app wrapper rejects --remote-debugging-port=0 (bad option); no DSH app/profile/session/cookies loaded',
+    target: 'Standalone desktop Edge + native Rust + real production Vue + existing TypeScript LocalNodeRunner',
+    mobile_viewport: 'NOT RUN (use --narrow-viewport for viewport-only check)', live_llm: 'NOT RUN (no model called)', checks: [], commands: [], screenshots: [] }
+  let server, admin, node, browser, context, page, vite
+  let appOrigin, projectId, projectRoot, heartbeatCount = 0
+  let browserLog = '', processLog = '', finishing = false
+  const ownedGroups = new Map()
+  const verifyGroup = async (label, child) => {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null || child.signalCode) {
+        if (process.platform === 'win32') return
+        try { process.kill(-child.pid, 0); await sleep(100); continue }
+        catch (error) { if (error.code === 'ESRCH') return; throw error }
+      }
+      await sleep(100)
+    }
+    throw new Error(`Owned ${label} process group still running / zombie: ${child.pid}`)
+  }
+  const trackOwnedGroup = (child, label) => {
+    if (ownedGroups.has(label)) throw new Error(`Duplicate owned process group: ${label}`)
+    ownedGroups.set(label, child)
+  }
+  const phase = async (name, body) => { result.phase = name; await body(); result.checks.push({ name, status: 'PASS' }); console.log(`PASS ${name}`) }
+  async function screenshot(name) {
+    assert.ok(page && !page.isClosed())
+    assert.equal(await page.locator('#client-token, .enrollment-code').count(), 0, 'Token/code inputs must not be captured')
+    const body = await page.locator('body').innerText()
+    for (const secret of secrets) assert.ok(!body.includes(secret), 'Secret in DOM: screenshot prohibited')
+    const path = join(evidence, `${name}.png`)
+    await page.screenshot({ path, fullPage: true })
+    result.screenshots.push({ file: `${name}.png`, bytes: (await stat(path)).size, sha256: sha256File(await readFile(path)) })
+  }
+  function sha256File(bytes) { return sha256(bytes) }
+  async function cleanup(error) {
+    if (finishing) return
+    finishing = true
+    const cleaned = []
+    if (browser) {
+      await bounded(browser.close(), 'owned child browser close', 12000).catch((closeError) => { browserLog += `\n${redact(closeError, secrets)}` })
+    } else if (context) { await context.close().catch(() => {}) }
+    if (ownedGroups.has('browser')) await terminateOwnedProcess(ownedGroups.get('browser'))
+    if (browser || ownedGroups.has('browser')) cleaned.push('owned browser contexts/process-group closed')
+    if (vite) await terminateOwnedProcess(vite)
+    if (server) await bounded(server.stop(), 'Rust stop', 8000)
+    for (const [label, child] of ownedGroups) {
+      await verifyGroup(label, child)
+      cleaned.push(`verified owned ${label} process-group gone (PID captured from this run)`)
+    }
+    // Lease/poll loops are bounded function calls and no persistent Node child.
+    // All browser profile, node private key, localStorage and temporary fixture
+    // content go away; only the opted-in separate evidence tree may persist.
+    await rm(root, { recursive: true, force: true })
+    assert.equal(await access(root).then(() => true, () => false), false, 'Owned temporary fixture/browser profile must be deleted')
+    result.cleanup = { fixture_and_browser_profile_deleted: true, credentials_evidence_stored: false, actions: cleaned,
+      browser_session_closed_by_playwright: true, process_group_termination: 'explicitly owned children only; no profile/name matching', local_node_process_children: 0 }
+    result.overall = error ? 'FAIL' : 'PASS'
+    if (error) { result.error = redact(error.stack || error, secrets); result.phase = result.phase }
+    else result.phase = 'complete'
+    await writeFile(join(evidence, 'process.log'), redact(browserLog + '\n' + processLog, secrets), { mode: 0o600 })
+    await writeFile(join(evidence, 'result.json'), JSON.stringify(result, null, 2), { mode: 0o600 })
+    if (!flags.has('--keep-evidence') && !error) await rm(evidence, { recursive: true, force: true })
+    else console.log(`SAFE_EVIDENCE ${evidence}`)
+    console.log(JSON.stringify({ overall: result.overall, phase: result.phase, screenshots: result.screenshots.length, evidence: flags.has('--keep-evidence') || error ? evidence : undefined }))
+    process.exitCode = error ? 1 : 0
+  }
+  const abort = new AbortController()
+  const timeout = setTimeout(() => { result.phase ||= 'watchdog'; browserLog += '\nTotal driver watchdog triggered'; void cleanup(new Error('Total test watchdog after 175s')).finally(() => process.exit(1)) }, 175000)
+  const signal = () => { abort.abort(); void cleanup(new Error('Signal received')).finally(() => process.exit(130)) }
+  process.once('SIGINT', signal); process.once('SIGTERM', signal)
+  try {
+    await phase('production-build-and-installed-browser', async () => {
+      assert.equal((await stat(executable)).isFile(), true)
+      await checked('pnpm', ['--dir', 'apps/web', 'build'])
+      result.commands.push('pnpm --dir apps/web build')
+    })
+    await phase('temporary-concierge-node-binding-grant', async () => {
+      projectRoot = await prepareProject(root)
+      const serverRoot = join(root, 'rust'); await mkdir(serverRoot, { mode: 0o700 })
+      assert.ok(await access(join(repository, 'target/debug/loom')).then(() => true, () => false), 'Existing fixture must produce the current Rust executable')
+      const wrapper = join(root, 'serve.mjs')
+      const script = `import { spawn } from 'node:child_process';const child=spawn(${JSON.stringify(join(repository, 'target/debug/loom'))},[...process.argv.slice(2),'--web-dir',${JSON.stringify(join(repository, 'apps/web/dist'))}],{shell:false,stdio:'inherit'});for(const s of ['SIGTERM','SIGINT'])process.on(s,()=>child.kill(s));child.on('exit',(code,signal)=>{console.log('OWNED_LOOM_EXIT '+code+' '+signal);process.exit(code??(signal?0:1))});`
+      await writeFile(wrapper, script, { mode: 0o700 })
+      server = await startRustConcierge({ root: serverRoot, env: { ...process.env, LOOM_SERVER_CMD: `${process.execPath} ${wrapper}` } })
+      secrets.push(server.clientToken)
+      result.commands.push('Rust fixture helper: cargo build --locked -p loom-concierge --bin loom; <owned-dir>/serve.mjs --data-dir <temp> serve --listen 127.0.0.1:<ephemeral> --web-dir apps/web/dist')
+      admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 10000 })
+      assert.equal((await admin.get('/api/v1/health')).status, 'ok')
+      const project = await admin.post('/api/v1/projects', { name: 'Synthetic browser Project', root: projectRoot, mode: 'read_write' })
+      projectId = project.project.id
+      const enrollment = await admin.post('/api/v1/enrollment-codes', {})
+      secrets.push(enrollment.code)
+      node = await LocalNodeRunner.create({ baseUrl: server.baseUrl, stateDir: join(root, 'node-state'), artifactDir: join(root, 'node-artifacts'), enrollmentCode: enrollment.code,
+        projectRoots: { [projectId]: projectRoot }, registration: { workerId: 'default', harnessKind: 'deterministic-local-http', profileId: 'desktop-test-temporary' } })
+      heartbeatCount++
+      const binding = await admin.post('/api/v1/project-bindings', { project_id: projectId, node_id: node.nodeId, worker_id: 'default', root_scope: projectRoot })
+      const grant = await admin.post('/api/v1/grants', { project_id: projectId, node_id: node.nodeId, worker_id: 'default', operations: ['read', 'write'] })
+      assert.ok(binding.id && grant.grant.id)
+      await assert.rejects(() => LocalNodeRunner.create({ baseUrl: server.baseUrl, stateDir: join(root, 'duplicate-state'), artifactDir: join(root, 'duplicate-artifacts'), enrollmentCode: enrollment.code,
+        projectRoots: { [projectId]: projectRoot }, registration: { workerId: 'default', harnessKind: 'deterministic-local-http', profileId: 'rejected-reused-code' } }), /single-use|enrollment|denied/i)
+      result.fixture = { synthetic_project_root_in_temp: true, exact_binding: true, explicit_read_write_grant: true, single_use_code_reuse_rejected: true, worker_id: 'default', node_id: node.nodeId }
+      appOrigin = server.baseUrl
+    })
+    if (flags.has('--vite')) await phase('temporary-vite-only-when-requested', async () => {
+      appOrigin = await bounded((async () => {
+        vite = spawn(process.execPath, [join(repository, 'apps/web/node_modules/vite/bin/vite.js'), '--config', resolve(here, 'vite.config.mjs'), '--host', '127.0.0.1', '--port', '0', '--strictPort'], {
+          cwd: join(repository, 'apps/web'), env: { PATH: process.env.PATH, LOOM_TEST_CONCIERGE_URL: server.baseUrl }, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        ownedGroups.set('vite', vite)
+        let text = ''
+        return new Promise((resolveUrl, reject) => {
+          const timer = setTimeout(() => reject(new Error(`Vite no owned URL: ${text}`)), 18000)
+          const collect = (chunk) => {
+            text += chunk
+            const match = text.match(/http:\/\/127\.0\.0\.1:\d+\//)
+            if (match) { clearTimeout(timer); resolveUrl(new URL(match[0]).origin) }
+          }
+          vite.stdout.on('data', collect); vite.stderr.on('data', collect)
+          vite.once('error', reject); vite.once('exit', (code) => { clearTimeout(timer); reject(new Error(`Vite exited ${code}: ${text}`)) })
+        })
+      })(), 'Vite start', 23000)
+      result.commands.push('pnpm --dir apps/web exec vite --config tests/browser/vite.config.mjs --host 127.0.0.1 --port 0 --strictPort')
+    })
+    await phase('new-standalone-browser-and-native-production-DOM', async () => {
+      const profile = join(root, 'browser-profile')
+      await mkdir(profile, { mode: 0o700 })
+      context = await bounded(chromium.launchPersistentContext(profile, {
+        executablePath: executable, headless: !flags.has('--headed'), viewport: { width: 1440, height: 1000 },
+        args: ['--no-first-run', '--no-default-browser-check', '--no-default-search', '--disable-sync', '--disable-default-apps', '--disable-background-networking', '--disable-component-update', '--metrics-recording-only', '--no-service-autorun', '--no-proxy-server', '--disable-features=msImplicitSignin,msEdgeSignin,msHubApps'],
+        env: { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: join(root, 'xdg'), TMPDIR: root }, timeout: 25000 }), 'canonical temporary Edge browser', 30000)
+      browser = context.browser()
+      assert.ok(browser?.isConnected(), 'Real Chromium required, not static HTML')
+      result.browser = { ...result.browser, engine: 'chromium', version: browser.version(), environment_names: ['PATH', 'HOME', 'XDG_CONFIG_HOME', 'TMPDIR'], canonical_launcher: true }
+      const pages = context.pages()
+      assert.equal(pages.length, 1)
+      const child = pages[0].context().browser()?.process?.()
+      if (child) { ownedGroups.set('browser', child); result.browser.pid = child.pid }
+      const profileArg = child?.spawnargs.find((argument) => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length)
+      if (profileArg) assert.equal(await realpath(profileArg), await realpath(profile))
+      result.browser.exact_profile_argument_verified = Boolean(profileArg)
+      page = pages[0]
+      page.setDefaultTimeout(15000); page.setDefaultNavigationTimeout(25000)
+      const blockedRequests = []
+      result.browser.blocked_external_requests = blockedRequests
+      assert.equal(pages[0].url(), 'about:blank', 'No existing tab/session may be reused')
+      page.setDefaultTimeout(15000); page.setDefaultNavigationTimeout(25000)
+      const expectedOrigins = new Set([server.baseUrl, appOrigin])
+      await page.route('**/*', async (route) => {
+        const url = new URL(route.request().url())
+        if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !expectedOrigins.has(url.origin)) {
+          blockedRequests.push(`${url.protocol}//${url.hostname}:${url.port}`)
+          browserLog += `\nBlocked non-loopback/foreign browser request: ${url.protocol}//${url.hostname}:${url.port}`
+          return route.abort('blockedbyclient')
+        }
+        return route.continue()
+      })
+      await context.setOffline(false)
+      page.on('pageerror', (error) => { browserLog += `\nPage error: ${error.message}` })
+      page.on('console', (message) => { if (message.type() === 'error') browserLog += `\nConsole: ${message.text().slice(0, 1200)}` })
+      page.on('requestfailed', (request) => { browserLog += `\nRequest failed: ${request.url()} ${request.failure()?.errorText}` })
+      await page.goto(appOrigin)
+      await page.waitForSelector('.loom-app')
+      assert.equal(context.pages().length, 1)
+      result.browser.dom_mount = true
+      assert.deepEqual(blockedRequests, [], 'Any external browser request must FAIL the guarded test')
+      result.browser.window_count = 1
+      if (!flags.has('--vite')) {
+        const assetPath = await page.locator('script[type="module"]').getAttribute('src')
+        assert.ok(assetPath?.startsWith('/assets/'))
+      assert.ok(assetPath.length < 512, 'Build must emit a bounded local JS path')
+        const module = await page.evaluate(async (path) => { const response = await fetch(path); return { url: response.url, status: response.status, type: response.headers.get('content-type'), text: (await response.text()).slice(0, 100) } }, assetPath)
+        assert.equal(module.status, 200); assert.match(module.type, /javascript/); assert.ok(!module.text.trim().toLowerCase().startsWith('<!doctype html>'))
+        result.native_web_dir = { resource_path: assetPath, javascript_status: module.status, content_type: module.type, body_not_html_spa_index: true }
+      }
+    })
+    await phase('activeAuth-real-read-and-artifact-expanded', async () => {
+      await loginWithSyntheticToken()
+      assert.match(await page.locator('#project-select').innerText(), /Synthetic browser Project · 读写/)
+      assert.match(await page.locator('.identity-button').innerText(), /single-user/)
+      const readId = await createTask({ objective: 'Synthetic browser actual read', path: 'input.txt' })
+      await tick('succeeded'); await reloadSuccess()
+      await page.locator('.artifact-card').click()
+      const summary = JSON.parse(await page.locator('.artifact-content').innerText())
+      assert.deepEqual(summary.lines, ['Real isolated project input.', 'No LLM, DSH host or network model was called.'])
+      const geometry = await desktopTicketIsUsable()
+      result.desktop_geometry = geometry
+      if (!(geometry.detailWidth > geometry.workspaceWidth * 0.45 && !geometry.helpfulUnrelatedViewVisible)) {
+        await screenshot('diagnostic-read-actually-visible-views')
+      }
+      assert.ok(geometry.detailWidth > geometry.workspaceWidth * 0.45, `Desktop Ticket column collapsed in actual browser: ${JSON.stringify(geometry)}`)
+      assert.equal(geometry.helpfulUnrelatedViewVisible, false, `Task view contains unrelated Help layout: ${JSON.stringify(geometry)}`)
+      await page.locator('.report-section summary').click()
+      assert.equal(await page.locator('.report-section details').evaluate((element) => element.open), true)
+      assert.match(await page.locator('.report-section').innerText(), /effect_id|target_sha256/)
+      await page.locator('.report-section summary').click()
+      await screenshot('01-desktop-read-artifact')
+      const detail = await admin.get(`/api/v1/tickets/${readId}`)
+      assert.equal(detail.artifacts.length, 1); assert.equal(detail.effects.length, 1)
+      result.checks.push({ name: 'DOM read source lines verified from actual artifact; no fixed golden HTML', status: 'PASS', detail: { ticket_id: readId, content_lines: summary.lines } })
+    })
+    await phase('actual-Grant-and-Node-visible', async () => {
+      await page.locator('.main-nav').getByRole('button', { name: '权限', exact: true }).click()
+      const grant = await page.locator('.grant-item').innerText()
+      assert.match(grant, /Synthetic browser Project/); assert.match(grant, /读取/); assert.match(grant, /写入/)
+      assert.ok(grant.includes(node.nodeId)); assert.equal(await page.locator('.grant-item .status-badge').innerText(), '有效')
+      await page.locator('.main-nav').getByRole('button', { name: '设备', exact: true }).click()
+      assert.ok((await page.locator('.node-heading h3').innerText()).includes(node.nodeId)); assert.match(await page.locator('.node-heading').innerText(), /在线/)
+      await screenshot('02-desktop-node-and-permission-scope')
+    })
+    await phase('actual-Node-write-artifact-effect-and-lease-expanded', async () => {
+      await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
+      const writeText = `Synthetic Node file write ${randomUUID()}\nNo model was called.\n`
+      const writeId = await createTask({ objective: 'Synthetic browser actual file write', kind: 'edit_file', path: 'nested/browser-result.txt', content: writeText })
+      await tick('succeeded'); await reloadSuccess()
+      await page.locator('.artifact-card').click()
+      const artifact = JSON.parse(await page.locator('.artifact-content').innerText())
+      assert.equal(artifact.path, 'nested/browser-result.txt'); assert.equal(artifact.kind, 'edit_file'); assert.equal(artifact.operation, 'replaced_project_file')
+      assert.equal(artifact.target_hash, sha256(writeText))
+      assert.match(await page.locator('.effect-list').innerText(), /副作用对账/); assert.match(await page.locator('.effect-list').innerText(), /已确认/)
+      const bytes = await readFile(join(projectRoot, 'nested/browser-result.txt'))
+      assert.equal(bytes.toString('utf8'), writeText); assert.equal(sha256(bytes), artifact.target_hash)
+      const detail = await admin.get(`/api/v1/tickets/${writeId}`)
+      assert.equal(detail.effects[0].status, 'confirmed')
+      const evidence = JSON.parse(detail.effects[0].evidence)
+      assert.equal(evidence.target_sha256, artifact.target_hash); assert.equal(detail.effects[0].id, evidence.effect_id)
+      await page.locator('.report-section summary').click()
+      assert.equal(await page.locator('.report-section details').evaluate((element) => element.open), true)
+      assert.match(await page.locator('.report-section').innerText(), /target_sha256|effect_id/)
+      await page.locator('details.technical-details summary').click()
+      assert.match(await page.locator('details.technical-details').innerText(), /lease_epoch|grant_version/)
+      await page.locator('details.technical-details summary').click(); await page.locator('.report-section summary').click()
+      await page.locator('.page-view.help-view').waitFor({ state: 'hidden' })
+      const writeLayout = await desktopTicketIsUsable()
+      assert.ok(writeLayout.detailWidth > writeLayout.workspaceWidth * 0.45, `Write Ticket collapsed after opening actual Artifact: ${JSON.stringify(writeLayout)}`)
+      await screenshot('03-desktop-write-artifact-confirmed-effect')
+      result.actual_write = { byte_length: bytes.length, content_sha256: artifact.target_hash, effect_state: detail.effects[0].status, effect_id: evidence.effect_id, ticket_id: writeId }
+    })
+    await phase('real-cancel-intent-before-Node-acknowledgement', async () => {
+      const cancelId = await createTask({ objective: 'Synthetic browser stop intent', kind: 'edit_file', path: 'must-not-write.txt', content: 'No effect allowed.' })
+      await page.getByRole('button', { name: '取消任务', exact: true }).click(); await page.getByRole('button', { name: '确认取消任务', exact: true }).click()
+      await page.waitForSelector('.neutral-note')
+      assert.match(await page.locator('.neutral-note').innerText(), /取消意图已记录。等待执行节点响应，不会强迫任务显示为已取消。/)
+      assert.equal((await admin.get(`/api/v1/tickets/${cancelId}`)).status, 'cancel_requested')
+      await screenshot('04-desktop-cancel-intent-before-node-ack')
+      await tick('cancel_acknowledged'); await page.reload()
+      await page.waitForFunction(() => document.querySelector('.next-action-card.neutral-action')?.textContent.includes('任务已取消'))
+      assert.equal(await page.locator('.artifact-card').count(), 0)
+      const cancelled = await admin.get(`/api/v1/tickets/${cancelId}`)
+      assert.equal(cancelled.status, 'cancelled'); assert.ok([1, true].includes(cancelled.reports.at(-1).cancel_acknowledged))
+      assert.equal(await stat(join(projectRoot, 'must-not-write.txt')).then(() => false, (error) => { assert.equal(error.code, 'ENOENT'); return true }), true)
+      result.cancel = { ticket_id: cancelId, visible_cancel_intent: true, final_cancelled: true, file_effect_absent: true }
+    })
+    if (flags.has('--narrow-viewport')) await phase('fallback-narrow-viewport-only', async () => {
+      await page.getByRole('button', { name: '新的任务', exact: true }).click(); await page.setViewportSize({ width: 390, height: 844 })
+      await page.waitForSelector('.mobile-tabs')
+      await page.getByRole('navigation', { name: '移动端工作空间' }).getByRole('button', { name: '更多', exact: true }).click()
+      await page.getByRole('navigation', { name: '更多工作空间' }).getByRole('button', { name: '权限', exact: true }).click()
+      await page.waitForSelector('.grant-item')
+      const layout = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }))
+      assert.ok(layout.document <= layout.viewport + 1, `Narrow viewport horizontal overflow: ${JSON.stringify(layout)}`)
+      await screenshot('05-narrow-simulated-viewport-permissions')
+      result.mobile_viewport = `PASS 390x844 Chromium viewport only (${layout.document}px scroll width); NOT phone, lockscreen, network-switch or accessibility`
+    })
+    result.heartbeat = { calls: heartbeatCount, meaning: 'one initial + one bounded call before each of three explicit Node polls; no open-loop heartbeat' }
+    await bounded(node.client.dispatchOutbox(), 'final outbox drain')
+    result.exclusions = ['No real phone, lockscreen, network switching, accessibility audit', 'No Tauri/live paid LLM/multi-node delivery/host DSH Plugin claimed', 'No DSH/Desktop profile, live user browser session or credentials', 'No shared DSH GUI port or existing browser CDP endpoint attached']
+    await cleanup()
+  } catch (error) { await cleanup(error) }
+  finally { clearTimeout(timeout); process.removeListener('SIGINT', signal); process.removeListener('SIGTERM', signal) }
+
+  async function loginWithSyntheticToken() {
+    await page.getByRole('button', { name: '个人工作空间与连接设置', exact: true }).click()
+    await page.locator('#client-token').fill(server.clientToken)
+    await page.getByRole('button', { name: '保存并重新连接', exact: true }).click()
+    await page.waitForSelector('.connection-banner', { state: 'hidden' })
+    await page.locator('#task-objective').waitFor()
+  }
+  async function createTask({ objective, kind = 'read_summary', path, content }) {
+    if (await page.locator('.ticket-detail').count()) await page.getByRole('button', { name: '新的任务', exact: true }).click()
+    await page.locator('#task-objective').fill(objective)
+    if (kind === 'edit_file') await page.getByRole('button', { name: '写入文件', exact: true }).click()
+    await page.locator(kind === 'edit_file' ? '#relative-path' : '#read-relative-path').fill(path)
+    if (content !== undefined) await page.locator('#edit-content').fill(content)
+    await page.getByRole('button', { name: '开始任务', exact: true }).click()
+    await page.waitForFunction((expected) => document.querySelector('.ticket-detail h1')?.textContent === expected, objective)
+    return (await page.locator('.ticket-id').innerText()).split('/').pop().trim()
+  }
+  async function tick(expected) {
+    await bounded(node.client.heartbeat({ capabilities: node.capabilities, workers: [{ worker_id: 'default' }], inventory: { project_roots: { [projectId]: projectRoot } } }), 'Node heartbeat')
+    heartbeatCount++
+    assert.equal((await bounded(node.pollAndRun(), 'Node pull and run')).status, expected)
+    await bounded(node.client.dispatchOutbox(), 'deferred outbox delivery')
+    await bounded(node.client.dispatchOutbox(), 'terminal deferred outbox delivery')
+  }
+  async function desktopTicketIsUsable() {
+    const layout = await page.evaluate(() => {
+      const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect()
+      return { detailWidth: rect('.ticket-detail')?.width, workspaceWidth: rect('.workspace-content')?.width,
+        helpfulUnrelatedViewVisible: !!document.querySelector('.help-view')?.getBoundingClientRect().width,
+        visibleViews: [...document.querySelectorAll('.workspace-content > section, .workspace-content > .page-view')]
+          .map((element) => ({ tag: element.tagName, width: element.getBoundingClientRect().width, display: getComputedStyle(element).display }))
+          .filter((view) => view.width > 0) }
+    })
+    return layout
+  }
+  async function reloadSuccess() { await page.reload(); await page.waitForFunction(() => document.querySelector('.next-action-card.success-action')?.textContent.includes('收到成功报告')) }
+}
+await run()

@@ -12,6 +12,98 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    // Existing Axum Body reader keeps this production-route regression dependency-free.
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex},
+    };
+    use tower::ServiceExt;
+    #[test]
+    fn static_serving_only_accepts_bounded_public_directory() {
+        assert_eq!(
+            public_web_path("assets/index.js"),
+            Some(PathBuf::from("assets/index.js"))
+        );
+        for input in [
+            "../../foo.js",
+            ".env",
+            "assets/.secret.key",
+            "assets/a\\b.js",
+            "assets/thing.exe",
+        ] {
+            assert!(
+                public_web_path(input).is_none(),
+                "unexpected static path: {input}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn actual_assets_are_not_false_spa_fallback_and_symlinks_fail_closed() {
+        let store = tempfile::tempdir().unwrap();
+        let web = store.path().join("web");
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(web.join("index.html"), "<html>app shell</html>").unwrap();
+        let expected = "export const installed = true;";
+        std::fs::write(web.join("assets/app.js"), expected).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(Path::new("/etc"), web.join("assets/extra")).unwrap();
+        let database = crate::store::Store::open(store.path().join("db")).unwrap();
+        database
+            .set_setting(
+                "web_dir",
+                web.canonicalize().unwrap().to_string_lossy().as_ref(),
+            )
+            .unwrap();
+        let app = router(Arc::new(State {
+            store: Arc::new(Mutex::new(database)),
+            bootstrap_token: "only-synthetic-state".to_owned(),
+            bootstrap_token_written: false,
+        }));
+        for (url, want_body) in [
+            ("/assets/app.js", expected),
+            ("/login", "<html>app shell</html>"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(url)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "{url}");
+            let body = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&body), want_body, "{url}");
+        }
+        for url in [
+            "/assets/does-not-exist.js",
+            "/assets/extra/passwd",
+            "/api/not-a-route",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(url)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404, "{url}");
+        }
+    }
+}
+
 use std::{
     // Application state shares one durable authority.
     path::PathBuf,
@@ -291,24 +383,73 @@ pub fn router(state: Arc<State>) -> Router {
     ));
     Router::new().merge(crate::node_api::routes()).route("/api/v1/health",get(||async{Json(json!({"status":"ok","protocol":"loom.node.v1","api":"api.v1","version":env!("CARGO_PKG_VERSION")}))})).nest("/api/v1",business).fallback(fallback).layer(axum::extract::DefaultBodyLimit::disable()).layer(tower_http::limit::RequestBodyLimitLayer::new(16*1024*1024)).layer(TraceLayer::new_for_http()).with_state(state)
 }
+fn public_web_path(path: &str) -> Option<PathBuf> {
+    if path.is_empty() || path.len() > 4096 || !path.is_ascii() {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for part in path.split('/') {
+        if part.is_empty() || part.starts_with('.') || part == ".." || part.contains('\\') {
+            return None;
+        }
+        relative.push(part);
+    }
+    let allowed = [
+        "html", "js", "mjs", "css", "svg", "png", "jpg", "jpeg", "webp", "ico", "woff", "woff2",
+        "json", "map",
+    ];
+    relative
+        .extension()?
+        .to_str()
+        .filter(|extension| allowed.contains(&extension.to_lowercase().as_str()))?;
+    Some(relative)
+}
+async fn serve_web(request: axum::extract::Request, root: PathBuf) -> Response {
+    let path = request.uri().path();
+    let requested_asset = path.starts_with("/assets/");
+    let public_path = public_web_path(path.strip_prefix('/').unwrap_or_default());
+    let candidate = if requested_asset || public_path.is_some() {
+        public_path.map(|relative| root.join(relative))
+    } else {
+        Some(root.join("index.html"))
+    };
+    if let Some(candidate) = candidate {
+        if let Ok(real) = std::fs::canonicalize(&candidate) {
+            if real.starts_with(&root) {
+                if let Ok(meta) = std::fs::symlink_metadata(&real) {
+                    if meta.is_file() && meta.len() <= 2 * 1024 * 1024 {
+                        return ServeFile::new(real).oneshot(request).await.into_response();
+                    }
+                }
+            }
+        }
+        if requested_asset {
+            return ApiError::missing("Static asset not found").into_response();
+        }
+    }
+    ApiError::missing("Route not found").into_response()
+}
 async fn fallback(
     AppState(state): AppState<Arc<State>>,
     request: axum::extract::Request,
 ) -> Response {
     if let Some(web_dir) = state.lock().ok().and_then(|s| s.setting("web_dir")) {
-        let index = PathBuf::from(web_dir).join("index.html");
-        if !request.uri().path().starts_with("/api/") && index.is_file() {
-            return ServeFile::new(index).oneshot(request).await.into_response();
+        if !request.uri().path().starts_with("/api/") {
+            return serve_web(request, PathBuf::from(web_dir)).await;
         }
     }
     ApiError::missing("Route not found").into_response()
 }
 pub async fn serve(state: Arc<State>, listen: String, web_dir: Option<PathBuf>) -> Result<()> {
     if let Some(dir) = web_dir {
+        let public_root = std::fs::canonicalize(&dir)?;
+        if !public_root.is_dir() {
+            anyhow::bail!("Web root must be an existing directory");
+        }
         state
             .lock()
             .map_err(|_| anyhow::anyhow!("store"))?
-            .set_setting("web_dir", &dir.to_string_lossy())?;
+            .set_setting("web_dir", &public_root.to_string_lossy())?;
     }
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!(address=%listener.local_addr()?,"Loom coordinator ready");
@@ -1079,16 +1220,34 @@ async fn artifact_upload(
     };
     let mut lineage = Vec::new();
     let mut store = state.lock()?;
-    if metadata["parents"].is_object() || metadata["parents"].is_string() || metadata["parents"].is_number() || metadata["parents"].is_boolean() {
-        return Err(ApiError::bad("Artifact parents must be an empty list or an explicit bounded SourceRef"));
+    if metadata["parents"].is_object()
+        || metadata["parents"].is_string()
+        || metadata["parents"].is_number()
+        || metadata["parents"].is_boolean()
+    {
+        return Err(ApiError::bad(
+            "Artifact parents must be an empty list or an explicit bounded SourceRef",
+        ));
     }
     if (!metadata["artifact_ref"].is_null() && !metadata["artifact_ref"].is_object())
-        || (metadata["artifact_ref"].is_null() && metadata["parents"].as_array().is_some_and(|parents| !parents.is_empty()))
+        || (metadata["artifact_ref"].is_null()
+            && metadata["parents"]
+                .as_array()
+                .is_some_and(|parents| !parents.is_empty()))
     {
-        if store.get("artifacts", &artifact)?.is_some_and(|existing| existing["lineage"].as_array().is_some_and(|parents| !parents.is_empty())) {
-            return Err(ApiError::conflict("artifact_conflict", "Removing an established Artifact's immutable parent lineage is forbidden"));
+        if store.get("artifacts", &artifact)?.is_some_and(|existing| {
+            existing["lineage"]
+                .as_array()
+                .is_some_and(|parents| !parents.is_empty())
+        }) {
+            return Err(ApiError::conflict(
+                "artifact_conflict",
+                "Removing an established Artifact's immutable parent lineage is forbidden",
+            ));
         }
-        return Err(ApiError::bad("Each declared parent needs a valid artifact_ref and controller-verified lineage"));
+        return Err(ApiError::bad(
+            "Each declared parent needs a valid artifact_ref and controller-verified lineage",
+        ));
     }
     if let Some(reference) = metadata["artifact_ref"].as_object() {
         let source_id = reference

@@ -140,8 +140,10 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
         <ActivityPanel :class="{ 'mobile-inline-activity': ticketOpen }" :ticket="ticketOpen ? ticket : null" :audit="state.audit" :expanded="expanded" :preferences="state.preferences" :audit-error="state.errors.audit" @save="(value, sender) => void updatePreferences(value, sender, state.selectedTicketId ?? undefined)" />
       </template>
       <ActivityView v-else-if="state.page === 'activity'" :tickets="tickets" :projects="projects" :audit="state.audit" @select="selectTask" />
-      <DevicesView v-else-if="state.page === 'devices'" ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" @enroll="void enroll()" />
-      <p v-if="state.page === 'devices' && state.errors.enrollment" class="form-error" role="alert">{{ state.errors.enrollment }}</p>
+      <template v-else-if="state.page === 'devices'">
+        <DevicesView ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" @enroll="void enroll()" />
+        <p v-if="state.errors.enrollment" class="form-error" role="alert">{{ state.errors.enrollment }}</p>
+      </template>
       <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy.preferences" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />
       <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" />
       <AccessView v-else-if="state.page === 'access'" :grants="state.grants" :projects="projects" :nodes="nodes" :busy="state.busy['grant-write']" :error="state.errors['grant-write'] || (!state.busy.resources ? state.errors.resources : '')" @create="grantCreate" @revoke="revokeGrantWithConfirmation" />
