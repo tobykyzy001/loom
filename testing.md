@@ -54,6 +54,9 @@ deploy/
 - `node tests/harness/real-model-text.mjs --browser`：真正的SDK文本调用、原`invoke_text` Grant和受限Artifact观察入库；renovate撤销后再看只读历史。真实Edge中检查模型观察/撤回、同Ticket Artifact hash和二开响应，发现长内容溢出会失败；不是完整模型目录、真实LLM或移动真机认证。配限方见 [harness/MODEL_TEXT.md](harness/MODEL_TEXT.md)。无`--browser`时只核对原执行和API观察。
 - `node tests/skills/read-replay.mjs`：真实Worker原Grant/Lease下，将read_summary样本重新执行并逐字比较新/老Artifact SHA；refuse客户端自报replay_verified、错误source/root/Grant、撤销后首答。新Skill和偏好Memory分开，永不成为新的持续权限或通用代码运行器。验证入口为[skills/README.md](skills/README.md)；原数据迁移到schema7与早期 ticket/Artifact/audit继续不变。
 - `node scripts/document-pipeline.mjs`：受限原授权两阶段文件转换、`/run`、幂等和中心恢复；不是 M3 通用长图/大规模 Artifact 转运。
+- `node tests/harness/bundle-preflight.mjs`：实际插件manifest/export/path/locale/icon和默认关闭等31项**不安装、不激活**源检查；临时副本导入shape，不调用`apply`，不能代替真实宿主兼容性。缺真正依赖 claim明确NOT RUN。详见 [harness/BUNDLE_PREFLIGHT.md](harness/BUNDLE_PREFLIGHT.md)。
+- `node tests/harness/real-bundle-lifecycle.mjs`：唯一临时profile中的真plugin安装、worker禁用、metadata-only remove/add/重启、坏包不覆盖和**精确匹配原worker/Grant**的撤权保持。仅本地`file:`流程，不等于生产桌面安装、GUI registry更新或真实 LLM。见 [harness/BUNDLE_LIFECYCLE.md](harness/BUNDLE_LIFECYCLE.md)。
+- `node scripts/bare-package-smoke.mjs`：当前macOS arm64真实 Bare native binary 的12项打包检查，包括offline构建、实际执行、SHA/权限、不注册的help/version、非法root/配对和截断/symlink/hardlink/空binary拒绝。只有当前host，不是通用安装器。原生读写/取消/恢复另实跑 `node scripts/bare-integration.mjs`。见 [BARE_PACKAGE.md](docs/BARE_PACKAGE.md)。
 - `node tests/browser/run.mjs --narrow-viewport --keep-evidence`：实际安装的桌面Edge上完成原生Work Space的注册、Grant、读写/效应、取消及窄视口检查。它不是手机、锁屏或iOS/Android真机验证。
 
 此节只记录既有测试入口，不因命令存在自动认定成功，也不以此代替用户明确暂缓的1+3 Compose 拓扑。

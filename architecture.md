@@ -621,6 +621,8 @@ Rollout Plan 至少包含：目标 Node / Worker、包版本、期望状态、�
 
 ### 8.5 平台包矩阵与客户端更新
 
+**当前实现证据的边界**：现已有 DSH bundle 预检和临时 profile 的真实选择、安装/替换与撤销保持测试，以及 **本机 macOS arm64** 的 Bare binary 构建、复制 SHA、执行、默认不注册及拒绝路径 smoke；具体入口见 [docs/BARE_PACKAGE.md](docs/BARE_PACKAGE.md) 和 [tests/harness/BUNDLE_LIFECYCLE.md](tests/harness/BUNDLE_LIFECYCLE.md)。这些候选/manifest 都不是签名证明、跨平台安装/升级服务、实际第二物理节点或生产 Profile 的授权。未通过目标 OS/arch 上的对应命令和健康检查，不得将下文例子与支持列表等同。
+
 Package Manifest 按构建 Target 区分 Rust Host 二进制、Harness 插件、语言特定 Connector 和客户端资源，例如 `darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`windows-x64`。这些是部署例子，实际支持列表必须由对应平台的安装和健康检查产生。
 
 - Rust Host Agent 以签名、按 OS / arch 构建的包分发，不把 macOS 二进制或本机编译目录复制到 Windows / Linux。

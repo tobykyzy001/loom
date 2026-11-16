@@ -50,6 +50,8 @@
 - 已有最小 Host / Project / ResourceBinding / Grant Registry 与 `loom.inventory.v1` 的事实矩阵、来源/freshness 和 PlacementDecision；尚无通用 Model Registry、真实模型生命周期、跨 Host 大 Artifact 直传和完整设备能力发现的全平台验证；
 - 已有版本化 Assignment/Lease、内容哈希与分配的 Artifact 上传；当前已经在一台macOS上以两个独立Node、各自Grant/身份、真实loopback与接收者 Ed25519签名完成了小Artifact真实直接取源。Source当前Grant与目的Assignment/运行时取消状态都会再次核验、nonce一次使用且可恢复。它受1MiB/文本变换限制，物理第二机、跨机大Artifact 直传及完整双向对账仍未验证；
 - 已实现 Conversation/Activity/Collaboration 的默认折叠与 Ticket 展开。当前已在一个隔离 DSH Profile 内实测父 Agent 产生不可变来源，由其真实 `parentSession` 指向的独立 child Session 通过受控工具产生另一份文件、正确血缘和原父 Session 引用，且在协作视图可按需看到已核验来源。依据见 `tests/harness/DELEGATION.md`。这只是单 Host、固定 Stub 的两 Agent 小任务，不能代表跨 Harness、任意 Agent/DAG、完整隐私分离或普遍生产编程能力；
+- 分发目前有真实但有限的两条证据：`node tests/harness/bundle-preflight.mjs` 对当前 DSH bundle 源做 31 项**不安装**的预检；`node tests/harness/real-bundle-lifecycle.mjs` 在唯一临时 Profile 中用公开 CLI 安装、替换 metadata 版本并重启，worker 默认关闭，已撤销 Grant 在同 worker 角色下仍不能被升级复活。它们是本地 `file:` 流程，不是 GUI/remote registry、生产 profile、资格授予或任意代码更新认证。
+- 裸 Host 的 `node scripts/bare-package-smoke.mjs` 已在**当前 macOS arm64**实际离线构建并执行 binary，检查真实副本 SHA、权限、信息调用无注册，以及错误 root/enrollment、截断/symlink/hardlink/空 payload 拒绝；`scripts/bare-integration.mjs` 的真实读写、取消和重启继续通过。见 [docs/BARE_PACKAGE.md](docs/BARE_PACKAGE.md)。这不等于通用平台包、签名服务安装、远程部署或第二物理节点验收。
 - Rust/Tokio、SQLite、Vue 在当前 macOS 验证；尚无 Tauri 或真实移动设备验证。DSH 0.2.2-rc.3 在专用临时 Profile 已跑过真实安装、任务、取消和原 Session 重开（见 `e1da1f0`）；这不是当前用户 Profile、系统 Credential Store 或真实 Live LLM 的验收。
 
 ### 下一刀：M0 的最小垂直切片

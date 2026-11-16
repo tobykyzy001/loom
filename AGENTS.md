@@ -14,6 +14,7 @@
 | `vision.md` | Loom 为什么存在、给谁使用、交互与多端体验、哪些不是产品必答 | 修改产品方向、目标用户、体验原则或非目标时更新；里程碑进度不累积在这里 |
 | `architecture.md` | 系统组件、Local Node / 中心权威、协议、权限、恢复、记忆、接口与安装模型 | 改变组件职责、跨语言接口、注册、Grant / Lease、存储或部署时同步更新；不描述不存在的已实现 API |
 | `roadmap.md` | 当前实际状态、M0 起的实现顺序、每项范围与场景验收、尚未决定的问题 | 每次功能边界或完成状态变化时更新；不把愿景和架构全文搬入，只给出处与可验证证据 |
+| `docs/BARE_PACKAGE.md` | **当前架构**Bare Host 二进制打包候选的真实构建、复制/拒绝校验与独立原生流程证据 | 只记录本机实际生成与执行的有限验收入口，不把它扩张成安装器、跨平台或远程部署承诺 |
 | `testing.md` | 1 Concierge + 3 Node 的容器拓扑、单元 / 协议 / 宿主 / 回放 / Live LLM 分层、硬断言、Token 预算与 CI 触发 | 增加测试模式、Fixture、模型成本、验收口径或 CI 时更新；只有真实运行过才记录 PASS，未执行不可写成已验证 |
 
 ### 1.2 开始工作的阅读顺序
@@ -178,6 +179,10 @@ DSH：compatible installation / registration / cancellation / session reopen
 - `Live LLM` 保留真实自然语言 E2E，但不是所有 PR 的前提；Token 上限、Provider / 模型版本和成本均记录。缺少凭据或预算记为 `NOT RUN`，不能标为真实模型 PASS。
 - 硬断言以 Ticket / Grant / Assignment / Lease / Effect / Artifact 和真实外部效果为主；不能仅依据最终上下文“看起来合理”或 LLM Judge 给出通过。
 - 修改协议、路由、权限或宿主适配时至少增加一个对应负例。不能通过删除旧场景、替换更有利 Prompt、降低 Rubric 或用 Replay 冒充 Live 让测试变绿。
+
+### 分发与本机可执行产物
+
+`node tests/harness/bundle-preflight.mjs` 只在源/临时副本中检查当前 DSH bundle，不代替真实安装。`node tests/harness/real-bundle-lifecycle.mjs` 只在唯一隔离 Profile 中运行公开 CLI 的安装/替换/禁 worker 和撤权保持测试，不调用当前 desktop 的 Plugin Manager。当前 Bare 分发 smoke 是 `node scripts/bare-package-smoke.mjs`，原生正向流程仍为 `node scripts/bare-integration.mjs`；具体实证和平台限制见 [docs/BARE_PACKAGE.md](docs/BARE_PACKAGE.md)。这些都是 local/test-only 命令，不是默认安装、SSH 操作、Prod Credential Store 或 daemon 激活授权。不要提交运行时生成的包、身份私钥、project input 或真实 Profile 数据，继续维护内容与来源负例，避免仅更新版本号就当成代码更新/权限刷新。
 
 ### 交付说明
 
