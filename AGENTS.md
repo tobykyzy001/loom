@@ -2,25 +2,46 @@
 
 本文件给后续修改 Loom 仓库的 Agent。它是开发约束的简短索引，**不是架构事实的替代来源**。
 
-## 1. 当前状态和阅读顺序
+## 1. 当前状态和文档索引
 
-当前仓库只有设计文档；没有 Rust workspace、Vue 工程、DSH 插件、安装器、可执行构建或测试命令。不要把预期结构写成已经完成的功能，也不要只格式化 / 通过编译就声称任务闭环完成。
+当前仓库只有设计文档；没有 Rust workspace、Vue 工程、DSH 插件、安装器、Compose fixture、可执行构建或测试命令。不要把预期结构写成已经完成的功能，也不要只格式化 / 通过编译就声称任务闭环完成。
 
-开始实现前按顺序阅读：
+### 1.1 每份文件负责什么
 
-1. `vision.md`：产品目的、用户体验、多端与部署目标、非目标。
-2. `architecture.md`：领域边界、中心 / 节点协议、安全规则、平台与部署约束。
-3. `roadmap.md`：当前所在里程碑、范围、验收场景和未决问题。
+| 文件 | 负责回答 | 后续维护方式 |
+| --- | --- | --- |
+| `AGENTS.md`（本文件） | 给后续开发 Agent 的阅读入口、关键技术选择、不可忽略的安全边界和交付规则 | 简短指针和改动约束；更新仓库状态与实际工具入口。不替代下述事实来源，不复制全部协议 / 测试用例 |
+| `vision.md` | Loom 为什么存在、给谁使用、交互与多端体验、哪些不是产品必答 | 修改产品方向、目标用户、体验原则或非目标时更新；里程碑进度不累积在这里 |
+| `architecture.md` | 系统组件、Local Node / 中心权威、协议、权限、恢复、记忆、接口与安装模型 | 改变组件职责、跨语言接口、注册、Grant / Lease、存储或部署时同步更新；不描述不存在的已实现 API |
+| `roadmap.md` | 当前实际状态、M0 起的实现顺序、每项范围与场景验收、尚未决定的问题 | 每次功能边界或完成状态变化时更新；不把愿景和架构全文搬入，只给出处与可验证证据 |
+| `testing.md` | 1 Concierge + 3 Node 的容器拓扑、单元 / 协议 / 宿主 / 回放 / Live LLM 分层、硬断言、Token 预算与 CI 触发 | 增加测试模式、Fixture、模型成本、验收口径或 CI 时更新；只有真实运行过才记录 PASS，未执行不可写成已验证 |
 
-设计变化必须同步更新相应文档；不要将新增的长期架构概念只埋在聊天记录或代码注释里。`roadmap.md` 只写当前实际状态、下一步与验证证据，不把愿景、设计原则和未知实现统统累计进去。
+### 1.2 开始工作的阅读顺序
+
+1. 本文件，了解当前状态和不可绕过的约束。
+2. `vision.md`，确认正在实现的产品目的与平台角色。
+3. `architecture.md`，确认触及的领域对象和协议 / 权限边界。
+4. `roadmap.md`，确定本轮所属里程碑及不提前实现的范围。
+5. `testing.md`，在实现前确定最小确定性测试、宿主覆盖和选配 Live 验证。
+
+### 1.3 文档更新边界
+
+设计变化必须同步更新相应文档；不要将新增的长期架构概念只埋在聊天记录或代码注释里。不要用一份文件取代其他文件的全部职责。
+
+- 技术 / 接口决策变化：更新 `architecture.md`，必要时简短同步本文件。
+- 用户角色、平台承诺、非目标变化：更新 `vision.md`。
+- 当前开发状态、里程碑范围、完成证据：更新 `roadmap.md`。
+- 测试拓扑、确定性 / 真实模型分层、Token 和运行频率、证据要求：更新 `testing.md` 与 `roadmap.md` 的相关验收指针。
+- 新文档加入仓库：先定义其单一职责，再加入上表和必要的阅读入口。不把同一规范平铺复制到多个 Markdown。
+- 实际命令 / Manifest / CI 建立后：把实际验证入口写回本文件与 `testing.md`，删除过时的“当前只有文档”状态，不把模板命令当事实。
 
 ## 2. 已冻结的技术选择
 
 - **Rust**：Concierge、任务状态机、Registry、Policy、Lease、持久化应用层、无 DSH 时的 Bare Host Agent。
 - **Vue 3 + TypeScript**：共享 Web / PWA 界面，桌面与移动端复用相同任务脉络。
 - **Tauri**：桌面壳优先；移动端先 PWA，经实际需要与设备验证后再使用 Tauri Mobile 或薄原生壳。
-- **DSH Loom Plugin（TypeScript / JavaScript）**：DSH 所在主机首选的完整 Local Node，主动注册到 Rust Concierge；不提供仅名称接入的假 Adapter。
-- **其他 Harness / 模型服务**：保留原技术栈，通过版本化 API、MCP、CLI 或必要 Runtime Plugin 接入。
+- **DSH Loom Plugin（TypeScript / JavaScript）**：首个目标的原生 Local Node，主动注册到 Rust Concierge；不提供仅名称接入的假 Adapter。这是首版实现优先级，不是节点协议只能支持 DSH。
+- **其他 Harness / 模型服务**：按宿主的扩展形式实现原生 Local Node 或通过 API / MCP / CLI 接入，例如后续可能的 Kimi Code Loom Plugin；各自保留原技术栈和独立分发包，不将 DSH 专有特性强加给所有宿主。
 - 核心与跨语言插件共享**版本化消息协议**，不共享 Rust struct、TypeScript 对象、私有 FFI ABI 或中心数据库。
 - 首个开发基线为 macOS 单机闭环；Linux / Windows Host 需要真实验证。iOS / Android 首版是 Client，不是默认可靠的长期 Worker。
 - 常用的框架、crate、SQLite 驱动、工具链与最终仓库目录没有在文档中确定；开始编码前先做最小选型，不把这些约束误读成必须使用某一个库。
@@ -134,7 +155,9 @@ DSH 插件是预期的实现组成部分，但当前仓库尚未存在插件代�
 
 ### 验证
 
-当前只有文档，没有测试命令。工具链建立后，应先读 Manifest / CI 并运行对应的最小检查和端到端测试，**不要把下面示例当已生效命令**：
+完整测试策略、1 Concierge + 3 Node 的 Docker 拓扑、硬断言、回放与 Token 预算见 `testing.md`。当前只有文档与设计，尚无 Compose fixture、构建工具链、CI 或 Live LLM 结果。
+
+工具链建立后，应先读 Manifest / CI 并运行对应的最小检查和端到端测试，**不要把下面示例当已生效命令**：
 
 ```text
 Rust：format / lint / unit / protocol / persistence / restart / lease fencing
@@ -147,6 +170,11 @@ DSH：compatible installation / registration / cancellation / session reopen
 构建平台目标与实际可用平台能力不同。宣称“支持某平台 / Harness”前，至少验证安装、注册、真实任务、取消、失败恢复和权限负例；移动还必须验证锁屏、杀进程和断网恢复。
 
 安全测试至少包括：伪造节点、Token 撤销、旧 Lease、越权目录、Secret 泄漏、跨 Profile / Worker 隔离和错误消息重放。测试不能以用户真实私有项目或生产机器作为默认可写靶标。
+
+- 默认用确定性 Worker / Replay 覆盖权限、路由约束、幂等、恢复与故障；未经用户或测试配置明确启用，不调用真实计费模型。
+- `Live LLM` 保留真实自然语言 E2E，但不是所有 PR 的前提；Token 上限、Provider / 模型版本和成本均记录。缺少凭据或预算记为 `NOT RUN`，不能标为真实模型 PASS。
+- 硬断言以 Ticket / Grant / Assignment / Lease / Effect / Artifact 和真实外部效果为主；不能仅依据最终上下文“看起来合理”或 LLM Judge 给出通过。
+- 修改协议、路由、权限或宿主适配时至少增加一个对应负例。不能通过删除旧场景、替换更有利 Prompt、降低 Rubric 或用 Replay 冒充 Live 让测试变绿。
 
 ### 交付说明
 
