@@ -10,3 +10,6 @@
 *.local
 .env
 scripts/verify-baseline.mjs.result.json
+/plugins/*/node_modules/
+/dist/
+**/dist/
