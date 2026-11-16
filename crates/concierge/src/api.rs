@@ -354,6 +354,13 @@ fn client(state: &State, headers: &HeaderMap) -> ApiResult<()> {
     }
 }
 // Authentication happens once per signed request in the transport handler.
+pub(crate) fn node_authenticate_for_direct_offer(
+    state: &State,
+    headers: &HeaderMap,
+    body: &Value,
+) -> ApiResult<()> {
+    node(state, headers, body).map(|_| ())
+}
 fn node(state: &State, headers: &HeaderMap, body: &Value) -> ApiResult<(String, String)> {
     let node = required(body, "node_id", 128)?.to_owned();
     let installation = required(body, "installation_id", 128)?.to_owned();

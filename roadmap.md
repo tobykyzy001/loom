@@ -48,7 +48,7 @@
 - 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复；隔离 DSH Profile 的真实安装/Agent工具任务/取消/Session重启恢复也已验证；独立真实桌面浏览器8阶段与受限 Agent 文件 Tool Effect亦有证据，但这些仍不是完整 M0 业务与多端验收；
 - 受限文档流水线已真实跑通（`read_summary` → 四种允许的文本变换之一 → `edit_file`），包含两张精确Grant 的下发、真实Artifact 接收转换、Node作用域校验、不可变谱系、重复执行保护和中心恢复。这里仍然只是当前受限场景，不能当作后面模型生命周期、任意 DAG、跨机部署、通用 Harness 或 M6 已完成；
 - 已有最小 Host / Project / ResourceBinding / Grant Registry 与 `loom.inventory.v1` 的事实矩阵、来源/freshness 和 PlacementDecision；尚无通用 Model Registry、真实模型生命周期、跨 Host 大 Artifact 直传和完整设备能力发现的全平台验证；
-- 已有版本化 Assignment/Lease、内容哈希与分配的 Artifact 上传，但没有跨机 Host 直连大文件传输或完整双向对账；
+- 已有版本化 Assignment/Lease、内容哈希与分配的 Artifact 上传；当前已经在一台macOS上以两个独立Node、各自Grant/身份、真实loopback与接收者 Ed25519签名完成了小Artifact真实直接取源。Source当前Grant与目的Assignment/运行时取消状态都会再次核验、nonce一次使用且可恢复。它受1MiB/文本变换限制，物理第二机、跨机大Artifact 直传及完整双向对账仍未验证；
 - 已实现 Conversation/Activity/Collaboration 的默认折叠与 Ticket 展开。当前已在一个隔离 DSH Profile 内实测父 Agent 产生不可变来源，由其真实 `parentSession` 指向的独立 child Session 通过受控工具产生另一份文件、正确血缘和原父 Session 引用，且在协作视图可按需看到已核验来源。依据见 `tests/harness/DELEGATION.md`。这只是单 Host、固定 Stub 的两 Agent 小任务，不能代表跨 Harness、任意 Agent/DAG、完整隐私分离或普遍生产编程能力；
 - Rust/Tokio、SQLite、Vue 在当前 macOS 验证；尚无 Tauri 或真实移动设备验证。DSH 0.2.2-rc.3 在专用临时 Profile 已跑过真实安装、任务、取消和原 Session 重开（见 `e1da1f0`）；这不是当前用户 Profile、系统 Credential Store 或真实 Live LLM 的验收。
 

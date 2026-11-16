@@ -243,6 +243,19 @@ Host Agent
 
 真实运行与限制见 [tests/harness/MODEL_TEXT.md](tests/harness/MODEL_TEXT.md)。整装的Registry、placement、activation、下载安装、实际模型质量和图像/跨机推理仍需另外实现与验收。
 
+### 3.5 受限的 peer Artifact 直接取源
+
+已验证的基础 direct dataplane 不把所有 parent Artifact bytes 都让Concierge代拿。它复用现有原始 project、Grant和pipeline parent → child关系，只支持受限 `edit_file + trim` 且 `direct: true` 的 descendant。原Task的byte hash与不可变Artifact-query、现在的destination Grant / ProjectBinding / raw worker / installation / Lease 仍需满足；**直接 URL、Nonce或Id 本身不是权限**。
+
+- B用自己的Node凭据请求 `POST /api/v1/nodes/direct-offers`。中心实际选择当前 child对应的父来源、列明原Origin、Ticket、读/写Grant版本与可用ref，随后持久v5 `direct_offers` 为每个 current ticket attempt保留irrevocable offer id和nonce。它不能在回放时重置DirectOffer或把已有Grant的权限换成共享来源。
+- B为包括artifact/ref/recipient/installation/worker/ticket/assignment/lease/epoch/grants/binding/expiry可靠完整事实签名。A只允许明确数字 loopback 地址和自管辖的短临时HTTP server。A验证B的真实Ed25519 key和请求内nonce等事实，再调用普通 Node `/nodes/direct-offers/scope`让中心复核。这里**没有管理员token被转给任意Node或Provider**。重复/endpoint/hostname等不当调用一律不支持。
+- 中心同时复查当前 destination attempt/running/cancel状态与lease/offer expiry，即使此前已有合法签名。因此 `cancel_requested` 不再意味着可从未使用的一次性offer继续窃取或写入下个effect。原read Grant/Binding/运行中Artifact origin / hash / Task健康也不能只凭早期已保存DirectOffer一直有效。generation和commit允许的默认路径不换样。
+- A通过纯本机socket直接向B交付有界的原始bytes（目前为≤1MiB具体固定Asset），不是中心中转get_bytes，而本机绝对路径不作为全局Root。B必须再次检查真正的byte count/sha/origin及谱系，才能执行普通ControlledFileExecutor生成新Artifact。其parents loom://artifact/refs仍是不可变且有-verify的父连接，不能以UUID名字表明上代关系而已。
+- Nonce由A私有状态持久化并单次消费，重开未完成的中心保留原请求凭据。但这不是所有端到端副作用保证一次，传输中途的未知须由Host reconciliation另行处理；错误签名/revoked/deadline/cancel/offline/oversize/shape未通过禁止生成新的file effect。
+- v5 的新增direct_offers只是辅助关系，是[id,current attempt,artifact,recipient,nonce,key与definition]的保存，不是新任务权威，也不代替Ticket/Grant或Artifact。迁移采用IF NOT EXISTS；对legacy ticket/grant、原有Artifact bytes与审计链保持不覆盖。其它数据面和非本机部署继承须另行实测。
+
+实际一次 source→socket→checksum→B Grant→child file验证在[tests/direct/README.md](tests/direct/README.md)，含取消 expires/lifecycle错误与重启幂等测试。它**不是**第二物理机连接/TLS保证、远程安装包部署、任意大文件默认可下载或全面M2完成证明。
+
 ## 4. 会话可见性与审计架构
 
 ### 4.1 默认简洁，过程可展开

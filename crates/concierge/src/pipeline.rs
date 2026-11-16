@@ -45,6 +45,9 @@ struct Phase {
     worker_id: Option<String>,
     #[serde(default)]
     transform: Option<loom_protocol::TextTransform>,
+    /// A single explicitly authorized loopback source, never an arbitrary endpoint.
+    #[serde(default)]
+    direct: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +110,13 @@ impl Definition {
         }
         if self.edit.transform.is_none() || self.read.transform.is_some() {
             bail!("Only the edit stage may have a supported text transform");
+        }
+        if (self.read.direct || self.edit.direct)
+            && !(self.edit.direct
+                && self.edit.transform == Some(loom_protocol::TextTransform::Trim)
+                && !self.read.direct)
+        {
+            bail!("DirectArtifactOffer is restricted to the existing trim edit transform");
         }
         if self.read.grant_id == self.edit.grant_id {
             bail!("Each phase must have an independently selected existing Grant");
@@ -499,6 +509,32 @@ fn descend(store: &Store, definition: &Definition) -> Result<()> {
         .edit
         .transform
         .context("No bounded text transform")?;
+    if definition.edit.direct {
+        return with_transaction(store, |store| {
+            let ticket = maintenance::create_ticket(
+                store,
+                &definition.project_id,
+                "edit_file",
+                &format!("{}: direct trim handoff", name(definition)),
+                &definition.edit.relative_path,
+                None,
+                &definition.edit.grant_id,
+                Some(&node),
+                Some(&worker),
+                Some("edit_file"),
+                None,
+            )?;
+            let child_id = ticket["id"]
+                .as_str()
+                .context("Direct descendant needs a Ticket")?;
+            store.conn().execute("UPDATE document_pipeline_stages SET ticket_id=?1,updated_at=?2 WHERE pipeline_id=?3 AND stage_id=?4", params![child_id, crate::now(), &pipeline_id, &definition.edit.stage_id])?;
+            store.audit(Some(child_id), "controller", "pipeline.direct.issued", &json!({
+                "pipeline_id": pipeline_id, "parent_artifact_id": input["id"], "parent_sha256": input["sha256"],
+                "source_ticket_id": parent_ticket, "destination_ticket_id": child_id,
+            }))?;
+            Ok(())
+        });
+    }
     let text = std::str::from_utf8(&text).context("Input is not UTF-8 text")?;
     let content = loom_protocol::DocumentEdit::TextTransform { transform }.apply(text)?;
     if content.len() > MAX_SOURCE_BYTES {
@@ -715,6 +751,12 @@ pub fn input_for_assignment(store: &Store, ticket_id: &str) -> Result<Option<Val
         bail!("Descendant cannot start before a real successful producer");
     }
     let input = artifact_input_for_task(store, parent_ticket)?;
+    if definition.edit.direct {
+        return Ok(Some(
+            json!({"direct_offer": true, "artifact_ref": input["artifact_ref"],
+            "transform": "trim", "offer_scope": "recipient_current_lease_only"}),
+        ));
+    }
     Ok(Some(input))
 }
 

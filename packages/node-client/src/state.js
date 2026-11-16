@@ -70,7 +70,8 @@ export class NodeState extends EventEmitter {
     }
     let result
     try { result = await operation() } catch (error) {
-      result = { state: 'failed', summary: error.message, artifact: null, effect: null }
+      result = { state: 'failed', summary: error?.message || `Deterministic execution failed with ${typeof error}`, artifact: null, effect: null,
+        ...(error?.code ? { code: error.code } : {}) }
     }
     return this.complete(key, result)
   }

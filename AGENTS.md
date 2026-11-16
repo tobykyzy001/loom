@@ -135,7 +135,7 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 
 ## 6. Rust / Vue 实现原则
 
-当前 schema 为 v4；`cancel_requested` 和最终 cancel acknowledging/unknown effect 是不同事实。受限文档 `document_pipeline_runs/stages` 只是阶段/原Grant/Ticket投影，不取代其原始权威。实现新增对象要有明确的 Assignment/Lease/Grant 关联，不能把 nil/空 Project/Worker ID 当作有效资源权限。
+当前 schema 为 v5；`cancel_requested` 和最终 cancel acknowledging/unknown effect 是不同事实。受限文档 `document_pipeline_runs/stages` 与新增 `direct_offers` 仅保存阶段/原Grant/Ticket投影、直接交接的一次性nonce及来源信息，不成为替代权限、目录或产物权威。真实增量迁移前，都要保留已有Grant/Ticket/Artifact/审计记录。不得用导出的session_ref或url代替有效Assignment及Grant来源。新增对象仍要有明确的 Assignment/Lease/Grant 关联，不能把 nil/空 Project/Worker ID 当作有效资源权限。
 
 - Rust 将协议、领域逻辑、服务端和平台适配边界分层，避免 Center 与 Bare Agent 产生各自不同的 Ticket / Grant 定义。
 - Node Envelope 至少带协议版本、Node / Installation 身份、请求 / 幂等 ID、Ticket / Assignment / Lease 关联、时间与能力信息；具体字段以原型验证后固定。

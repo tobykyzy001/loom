@@ -2,12 +2,13 @@
 #![forbid(unsafe_code)]
 pub mod api;
 mod command; // CLI
+mod direct_offer;
 pub mod inventory;
 pub mod inventory_probe;
 mod maintenance;
 mod node_api;
 pub mod pipeline;
-mod store;
+pub(crate) mod store;
 
 use anyhow::{bail, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};

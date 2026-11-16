@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 4 {
+        if current > 5 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 4)"
+                "database schema is from a newer Loom release (found {current}, supported 5)"
             )
         }
         if current == 0 {
@@ -102,6 +102,14 @@ impl Store {
                 );
                 PRAGMA user_version=4;"
             )?;
+        }
+        if current < 5 {
+            self.connection.execute_batch("CREATE TABLE IF NOT EXISTS direct_offers(
+                id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),lease_epoch INTEGER NOT NULL,
+                artifact_id TEXT NOT NULL REFERENCES artifacts(id),origin_node_id TEXT NOT NULL,recipient_node_id TEXT NOT NULL,
+                nonce TEXT NOT NULL UNIQUE,recipient_public_key TEXT NOT NULL,definition_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,UNIQUE(ticket_id,lease_epoch)
+            ); PRAGMA user_version=5;")?;
         }
         Ok(())
     }
@@ -353,5 +361,75 @@ mod tests {
         assert!(Store::open(tmp.path())
             .unwrap()
             .authenticate_client("0123456789abcdef"));
+    }
+
+    #[test]
+    fn upgrades_existing_v3_records_without_replacing_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_id = uuid::Uuid::new_v4().to_string();
+        let body = br#"{"schema":"loom.testing.legacy"}"#;
+        let digest = hash(std::str::from_utf8(body).unwrap());
+        {
+            let store = Store::open(tmp.path()).unwrap();
+            store.conn().execute_batch("DROP TABLE document_pipeline_stages; DROP TABLE document_pipeline_runs; PRAGMA user_version=3;").unwrap();
+            store.conn().execute(
+                "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project-legacy','Legacy','grain-legacy','read_write',1,'2026-01-01T00:00:00Z','[]')", []).unwrap();
+            store.conn().execute(
+                "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,revoked_at,digest,created_at) VALUES('grant-legacy','project-legacy','node-old','worker-a','installation-old','[\"read\"]',1,NULL,'grant-digest','2026-01-01T00:00:00Z')", []).unwrap();
+            store.conn().execute(
+                "INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('tkt-legacy','project-legacy','Legacy objective','read_summary','docs/input.txt','original','succeeded','grant-legacy','grant-digest','node-old','installation-old','worker-a',1,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", []).unwrap();
+            store.conn().execute(
+                "INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES(?1,'tkt-legacy','asg-legacy','node-old','legacy.json','application/json',?2,?3,?4,?5,'[]','2026-01-01T00:00:00Z')",
+                params![artifact_id.clone(), body.len(), digest, format!("{artifact_id}.artifact"), format!("loom://artifact/{artifact_id}")],
+            ).unwrap();
+            std::fs::write(
+                tmp.path()
+                    .join("artifacts")
+                    .join(format!("{artifact_id}.artifact")),
+                body,
+            )
+            .unwrap();
+            store
+                .audit(
+                    None,
+                    "migration_test",
+                    "write-original-ticket",
+                    &json!({"artifact_id":artifact_id}),
+                )
+                .unwrap();
+            let version: i64 = store
+                .conn()
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 3);
+        }
+        let reopened = Store::open(tmp.path()).unwrap();
+        let version: i64 = reopened
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+        let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
+        assert_eq!(artifact["ticket_id"], "tkt-legacy");
+        assert_eq!(artifact["sha256"], digest);
+        assert_eq!(artifact["origin_node_id"], "node-old");
+        let ticket = reopened.get("tickets", "tkt-legacy").unwrap().unwrap();
+        assert_eq!(ticket["grant_id"], "grant-legacy");
+        assert_eq!(ticket["status"], "succeeded");
+        assert!(reopened.verify_audit().unwrap());
+        assert_eq!(
+            std::fs::read(
+                tmp.path()
+                    .join("artifacts")
+                    .join(format!("{artifact_id}.artifact"))
+            )
+            .unwrap(),
+            body
+        );
+        let count: i64 = reopened
+            .conn()
+            .query_row("SELECT COUNT(*) FROM direct_offers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
