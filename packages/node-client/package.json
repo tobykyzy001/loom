@@ -1,0 +1,18 @@
+{
+  "name": "@loom/node-client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic M0 Loom node HTTP client and isolated fixture executor; not a DSH adapter.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./http": "./src/http.js",
+    "./identity": "./src/identity.js",
+    "./state": "./src/state.js",
+    "./protocol": "./src/validation.js",
+    "./executor": "./src/executor.js",
+    "./runner": "./src/runner.js"
+  },
+  "engines": { "node": ">=22.0.0" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}

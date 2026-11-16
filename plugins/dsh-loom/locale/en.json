@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Loom local node",
+    "description": "An experimental Host-only Loom node scaffold with explicit registration, persistent outbound state, and separate file or DSH Agent execution modes. Both modes require explicit opt-in; the bundle is not installed by this repository, no token is bundled, and no paid model or live Host execution has been verified."
+  }
+}

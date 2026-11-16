@@ -1,0 +1,15 @@
+- insert:
+    - id: loom-local-node
+      name: '@loom/dsh-loom'
+      config:
+        enabled: false
+        allow_workers: false
+        executor: 'unsupported'
+        base_url: 'http://127.0.0.1:8765'
+        state_dir: ''
+        artifact_dir: ''
+        allow_dsh_agent_creation: false
+        agent_session_id: ''
+        max_active_workers: 1
+        heartbeat_ms: 15000
+        poll_seconds: 1

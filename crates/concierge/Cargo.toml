@@ -1,0 +1,33 @@
+[package]
+name = "loom-concierge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+loom-protocol = { path = "../protocol" }
+anyhow = "1"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+constant_time_eq = "0.4"
+ed25519-dalek = "2"
+http = "1"
+rand = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]

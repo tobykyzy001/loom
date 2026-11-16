@@ -991,7 +991,9 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "clap",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "loom-protocol",
  "reqwest",
  "serde",
@@ -999,6 +1001,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tower",
  "uuid",
 ]
 

@@ -1,0 +1,30 @@
+{
+  "schema": "loom.synthetic_assignment_candidate.v1",
+  "assignment": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "ticket_id": "00000000-0000-4000-8000-000000000002",
+    "node_id": "<lower-hex-sha256-ed25519-public-key>",
+    "installation_id": "<persistent-uuid>",
+    "worker_id": "local-fixture-worker",
+    "lease_id": "00000000-0000-4000-8000-000000000003",
+    "lease_epoch": 1,
+    "lease_expires_at": "<future-rfc3339>",
+    "attempt": 1,
+    "grant_version": 1,
+    "grant_digest": "<opaque-center-issued-digest>",
+    "grant": {
+      "id": "<grant-uuid>",
+      "version": 1,
+      "project_id": "<project-uuid>",
+      "project_root": "<isolated-test-absolute-path>",
+      "operations": ["read_summary", "edit_file"],
+      "digest": "<same-opaque-center-issued-digest>",
+      "revoked_at": null,
+      "expires_at": null
+    },
+    "project_id": "<project-uuid>",
+    "kind": "read_summary",
+    "relative_path": "input.txt"
+  },
+  "note": "Synthetic local compatibility candidate only. The Rust protocol implementation owns DTO stability; this file is not evidence of a Rust-Node integration PASS."
+}

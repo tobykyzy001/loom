@@ -1,0 +1,8 @@
+export { LoomHttpClient, LoomHttpError } from './http.js'
+export { LoomNodeClient } from './client.js'
+export { NodeIdentity } from './identity.js'
+export { NodeState } from './state.js'
+export { ControlledFileExecutor, safeProjectRoot, safeRelative, reconcileEffect, MAX_FILE_BYTES } from './executor.js'
+export { LocalNodeRunner } from './runner.js'
+export { CAPABILITIES, validateAssignment, envelope } from './validation.js'
+export { PROTOCOL, canonical, sha256, requireIsolatedRoot } from './util.js'

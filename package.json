@@ -1,0 +1,13 @@
+{
+  "name": "loom",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --dir apps/web dev",
+    "typecheck": "pnpm --dir apps/web typecheck",
+    "test": "pnpm --dir apps/web test",
+    "build": "pnpm --dir apps/web build"
+  },
+  "devDependencies": {},
+  "packageManager": "pnpm@12.21.0"
+}
