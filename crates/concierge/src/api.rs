@@ -627,7 +627,8 @@ fn explicit_permissions(body: &Value) -> ApiResult<Vec<&'static str>> {
             "write"|"edit_file"=>if !permissions.contains(&"write"){permissions.push("write")},
             "read_write"=>{if !permissions.contains(&"read"){permissions.push("read");}
                 if !permissions.contains(&"write"){permissions.push("write");}},
-            _=>return Err(ApiError::bad("Grant operations must be read_summary/read or edit_file/write/read_write explicitly.")),
+            "invoke_text"=>if !permissions.contains(&"invoke_text"){permissions.push("invoke_text")},
+            _=>return Err(ApiError::bad("Operations require explicit read/read_summary, write/edit_file, read_write or separately granted invoke_text.")),
         }
     }
     if permissions.is_empty() {
@@ -1745,6 +1746,10 @@ struct TicketRequest {
     node_id: Option<String>,
     worker_id: Option<String>,
     capability: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 #[allow(clippy::too_many_arguments)]
 async fn create_ticket(
@@ -1757,10 +1762,8 @@ async fn create_ticket(
         .get("projects", &body.project_id)?
         .ok_or_else(|| ApiError::bad("Authorized project reference required"))?;
     let kind = body.kind.as_deref().unwrap_or("read_summary");
-    if !matches!(kind, "read_summary" | "edit_file") {
-        return Err(ApiError::bad(
-            "This deterministic baseline has explicit read_summary and edit_file tasks",
-        ));
+    if !matches!(kind, "read_summary" | "edit_file" | "model_text") {
+        return Err(ApiError::bad("Supported task kinds are read_summary, edit_file and the separately authorized model_text"));
     }
     let path = safe_relative(
         body.relative_path
@@ -1768,9 +1771,46 @@ async fn create_ticket(
             .unwrap_or(if kind == "read_summary" {
                 "README.md"
             } else {
-                ""
+                "not-a-file-operation"
             }),
     )?;
+    let model_resource = if kind == "model_text" {
+        let provider = body.provider.as_deref().unwrap_or_default();
+        let model = body.model.as_deref().unwrap_or_default();
+        if provider.is_empty()
+            || model.is_empty()
+            || [provider, model].iter().any(|value| {
+                value.len() > 160
+                    || !value.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/')
+                    })
+            })
+        {
+            return Err(ApiError::bad(
+                "A text model request requires a bounded explicit provider and model",
+            ));
+        }
+        // This narrowly proven fixture is not a claim that arbitrary providers
+        // are installed. It must never select/bill a different remote model.
+        if body.content.is_some() {
+            return Err(ApiError::bad("Text-model input is the explicit goal and provider/model selection, not a hidden block payload"));
+        }
+        if (provider, model) != ("loom-stub", "loom-stub-v1") {
+            return Err(ApiError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "model_unavailable",
+                "Only the explicit inspected loom-stub/loom-stub-v1 text fixture is eligible",
+            ));
+        }
+        Some((provider, model))
+    } else {
+        if body.provider.is_some() || body.model.is_some() {
+            return Err(ApiError::bad(
+                "provider/model fields are only valid on a separately granted model_text task",
+            ));
+        }
+        None
+    };
     let goal = body.objective.or(body.goal).unwrap_or_default();
     if goal.is_empty() || goal.len() > 16000 {
         return Err(ApiError::bad("Explicit objective required"));
@@ -1779,10 +1819,10 @@ async fn create_ticket(
     let grant_id = if let Some(grant) = body.grant_id {
         grant
     } else {
-        let permission = if kind == "read_summary" {
-            "read"
-        } else {
-            "write"
+        let permission = match kind {
+            "read_summary" => "read",
+            "edit_file" => "write",
+            _ => "invoke_text",
         };
         let selections=store.query("SELECT id,operations,project_id,revoked_at FROM grants WHERE project_id=?1 AND revoked_at IS NULL ORDER BY created_at DESC",[&body.project_id])?;
         let selected = selections.into_iter().find(|g| {
@@ -1813,10 +1853,10 @@ async fn create_ticket(
         .map(|ops| ops.iter().filter_map(Value::as_str).collect::<Vec<_>>())
         .unwrap_or_default();
     if !ops.contains(
-        &(if kind == "read_summary" {
-            "read"
-        } else {
-            "write"
+        &(match kind {
+            "read_summary" => "read",
+            "edit_file" => "write",
+            _ => "invoke_text",
         }),
     ) {
         return Err(ApiError::denied(
@@ -1885,6 +1925,7 @@ async fn create_ticket(
         wanted.as_deref(),
         body.worker_id.as_deref(),
         body.capability.as_deref(),
+        model_resource,
     )?;
     Ok(Json(request))
 }
@@ -2141,7 +2182,7 @@ async fn cancel_pipeline(
 }
 async fn models(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let _ = state;
-    Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "m3_not_available", "Model registry, verified placements and Invoke are not delivered yet. No download or external inference has occurred."))
+    Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "m3_not_available", "Full model registry, verified placement lifecycle and general provider activation are not delivered yet. Only the separately verified, bounded model_text fixture exists; other models remain unknown without genuine observation."))
 }
 async fn candidates(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let store = state.lock()?;

@@ -40,7 +40,7 @@ test('delegate ToolResult source fields survive normalization and match real fil
   const stored = adapter.sequence.get('child').tool_records[0].result
   assert.equal(stored.source.artifact_id, ref.artifact_id)
   assert.equal(stored.source_session_id, parentSession)
-  const result = await adapter.boundedFileEffects({ id: 'child', node_id: 'b'.repeat(64), grant: { project_root: root } },
+  const result = await adapter.boundedFileEffects({ id: 'child', kind: 'edit_file', node_id: 'b'.repeat(64), grant: { project_root: root } },
     { projectRoot: root, provenance: { ref, parent_session: { session_id: parentSession } } }, adapter.sequence.get('child'))
   assert.equal(result.artifacts.length, 1); assert.equal(result.effects.length, 1)
   assert.deepEqual(result.artifacts[0].metadata.parents, [ref.artifact_id])
@@ -58,5 +58,5 @@ test('a claimed file effect with incomplete immutable evidence is unknown, not f
   }] })
   assert.equal(result.state, 'unknown')
   assert.deepEqual(result.artifacts, [])
-  assert.match(result.summary, /could not be fully validated/)
+  assert.match(result.summary, /outside the authorized operation kind/)
 })

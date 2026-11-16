@@ -2,16 +2,28 @@ import { validateAssignment } from '../src/validation.js'
 import { canonical, sha256 } from '../src/util.js'
 import { stableArtifactId as stableUUID } from './ids.js'
 import { verifiedDelegation } from './verified-delegation.js'
+import { exactTextRoute, inspectTextRoute, validTextGrant, modelRef } from './model-policy.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
   constructor(runner, adapter, config) {
     this.runner = runner; this.adapter = adapter; this.config = config; this.active = new Map()
     // Capabilities describe Agent work; they are not a silent filesystem allowance.
-    this.capabilities = ['dsh_agent_turn', 'read_summary', 'edit_file'] // Agent-presented operations; Grant remains separately enforced.
+    this.capabilities = ['dsh_agent_turn', 'read_summary', 'edit_file', ...(config.model_text_tasks ? ['model_text'] : [])] // Agent-presented operations; Grant remains separately enforced.
   }
   sessionRefs() { return [...this.adapter.sequence.entries()].map(([assignment_id, record]) => ({ assignment_id, ...this.adapter.sessionRef(record.agent.session) })) }
   async canExecute(assignment) {
+    if (assignment.kind === 'model_text') {
+      if (this.config.model_text_tasks !== true) return false
+      try {
+        validateAssignment(assignment, assignment.grant, this.runner.identity)
+        if (!validTextGrant(assignment) || Object.hasOwn(assignment, 'artifact_input')) return false
+        const route = exactTextRoute(this.config, assignment)
+        const observation = await inspectTextRoute(this.adapter.ctx, route)
+        this.active.set(assignment.id, { assignment, modelObservation: observation, textRoute: route })
+        return true
+      } catch { return false }
+    }
     // The explicit LocalNode input validator is not shared by an arbitrary
     // LLM tool/provider. Never silently discard that provenance guarantee.
     if (Object.hasOwn(assignment, 'artifact_input') && this.config.delegation_tools !== 'scoped_fixture') return false
@@ -38,10 +50,11 @@ export class DshDispatcher {
     try {
       await this.runner.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: true })
-      const { provenance } = this.active.get(assignment.id) || {}
+      const { provenance, modelObservation, textRoute } = this.active.get(assignment.id) || {}
       const operation = () => this.adapter.executeAssignment(assignment, {
-        provider: assignment.provider || this.config.provider,
-        model: assignment.model || this.config.model,
+        ...(assignment.kind === 'model_text' ? { modelObservation, textRoute } : {}),
+        provider: assignment.kind === 'model_text' ? textRoute?.provider : assignment.provider || this.config.provider,
+        model: assignment.kind === 'model_text' ? textRoute?.model : assignment.model || this.config.model,
         reasoningEffort: this.config.reasoning_effort,
         maxTokens: this.config.max_tokens,
         projectRoot: assignment.grant?.project_root,

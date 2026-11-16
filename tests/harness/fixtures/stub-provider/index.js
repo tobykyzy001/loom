@@ -18,11 +18,17 @@ class DeterministicAdapter extends LlmAdapter {
     this.pending = new Set()
   }
   providerInfo(provider) { return { id: provider, name: 'Loom isolated fixture (no live LLM)' } }
-  listModels(provider) {
-    return Promise.resolve([{ provider, id: 'loom-stub-v1', name: 'Loom deterministic stub', inputModalities: ['text'] }])
+  async listModels(provider) {
+    await this.record({ type: 'models-listed', provider })
+    return [{ provider, id: 'loom-stub-v1', name: 'Loom deterministic stub', inputModalities: ['text'] }]
   }
-  resolveModel(provider, model) {
-    return Promise.resolve({ provider, id: model, name: 'Loom deterministic stub', inputModalities: ['text'], context: { contextWindow: 131072 } })
+  async resolveModel(provider, model) {
+    await this.record({ type: 'model-resolved', provider, model })
+    return { provider, id: model, name: 'Loom deterministic stub', inputModalities: ['text'], context: { contextWindow: 131072 } }
+  }
+  async prepareCall(provider, model, signal) {
+    await this.record({ type: 'model-prepared', provider, model })
+    return super.prepareCall(provider, model, signal)
   }
   async record(value) {
     const file = this.config.control_path

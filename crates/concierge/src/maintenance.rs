@@ -104,6 +104,7 @@ pub fn create_ticket(
     preferred: Option<&str>,
     worker: Option<&str>,
     capability: Option<&str>,
+    model_resource: Option<(&str, &str)>,
 ) -> Result<Value> {
     let node_id = matching_physical_node(
         store,
@@ -112,6 +113,20 @@ pub fn create_ticket(
         &store.get("grants", grant_id)?.context("Grant not found")?,
         worker.unwrap_or("default"),
     )?;
+    let model_content = model_resource.map(|(provider, model)| {
+        json!({"schema":"loom.model-text.v1","objective":objective,"provider":provider,"model":model}).to_string()
+    });
+    let content = model_content.as_deref().or(content);
+    if (kind == "model_text") != model_resource.is_some() {
+        bail!(
+            "Each text-model Ticket must have its explicit resource and no other kind may carry it"
+        );
+    }
+    if let Some((provider, model)) = model_resource {
+        if (provider, model) != ("loom-stub", "loom-stub-v1") {
+            bail!("Only the explicitly observed text fixture is supported in this boundary");
+        }
+    }
     let now = crate::now();
     let ticket = id("tkt");
     let binding = grant_binding_for_placement(store, grant_id)?;
@@ -204,6 +219,22 @@ pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>
         assignment["node_id"] = json!(node_id);
         assignment["grant_status"] = json!(true);
         assignment["operation"] = json!({"kind":assignment["kind"],"path":assignment["relative_path"],"write":assignment["kind"]=="edit_file"});
+        if assignment["kind"] == "model_text" {
+            let input: Value = serde_json::from_str(
+                assignment["content"]
+                    .as_str()
+                    .context("A text-model Ticket must contain its bounded immutable request")?,
+            )?;
+            if input["schema"] != "loom.model-text.v1"
+                || input["objective"] != assignment["objective"]
+                || input["provider"].as_str() != Some("loom-stub")
+                || input["model"].as_str() != Some("loom-stub-v1")
+            {
+                bail!("Text-model request metadata changed or is not the authorized fixture");
+            }
+            assignment["provider"] = input["provider"].clone();
+            assignment["model"] = input["model"].clone();
+        }
         assignment["grant"] = json!(store
             .query(
                 "SELECT * FROM grants WHERE id=(SELECT grant_id FROM tickets WHERE id=?1)",

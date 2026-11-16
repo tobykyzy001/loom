@@ -9,6 +9,7 @@ import { canonical, id, sha256, requireIsolatedRoot } from './util.js'
 
 export function wireCapabilities(values) {
   return values.map((value) => {
+    if (value.kind === 'model_text') return { ticket_kind: 'model_text', permission: 'invoke_text' }
     if (value.kind === 'dsh_agent_turn') return { ticket_kind: 'dsh_agent_turn', permission: 'read' }
     if (value === 'read_summary' || value === 'dsh_agent_turn') return { ticket_kind: value, permission: 'read' }
     if (value === 'edit_file') return { ticket_kind: 'edit_file', permission: 'write' }

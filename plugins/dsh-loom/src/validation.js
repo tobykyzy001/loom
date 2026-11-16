@@ -27,9 +27,9 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
   if (typeof expected !== 'string' || typeof suppliedDigest !== 'string' || expected !== suppliedDigest) {
     throw new Error('No verifiable center-issued Grant digest')
   }
-  if (!operations.has(assignment.kind)) throw new Error('Unsupported assignment kind')
+  if (!operations.has(assignment.kind) && assignment.kind !== 'model_text') throw new Error('Unsupported assignment kind')
   const allowed = Array.isArray(grant.operations) ? grant.operations : (Array.isArray(grant.capabilities) ? grant.capabilities : [])
-  const permission = assignment.kind === 'edit_file' ? 'write' : 'read'
+  const permission = assignment.kind === 'edit_file' ? 'write' : assignment.kind === 'model_text' ? 'invoke_text' : 'read'
   if (!allowed.includes(assignment.kind) && !allowed.includes(permission)) throw new Error('Grant does not authorize assignment kind')
   if (assignment.project_id && grant.project_id && grant.project_id !== assignment.project_id) throw new Error('Grant project mismatch')
   if (grant.expires_at && Date.parse(grant.expires_at) <= now) throw new Error('Grant is expired')

@@ -152,6 +152,7 @@ export function profilePatch() {
     enrollment_code: !!js process.env.LOOM_FIXTURE_ENROLLMENT_CODE || ''
     allow_dsh_agent_creation: true
     bounded_fixture_effects: true
+    model_text_tasks: !!js process.env.LOOM_FIXTURE_MODEL_TEXT_TASKS === 'true'
     delegation_tools: !!js process.env.LOOM_FIXTURE_DELEGATION_TOOLS || 'unsupported'
     delegation_project_root: !!js process.env.LOOM_FIXTURE_PROJECT_ROOT
     agent_session_id: !!js process.env.LOOM_FIXTURE_AGENT_SESSION_ID || ''

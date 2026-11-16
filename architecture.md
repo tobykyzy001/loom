@@ -233,6 +233,16 @@ Host Agent
 
 未验证此能力的 DSH/Bare Host 必须继续拒绝该输入。真实第二主机、外部 Provider 模型质量、一般生产文件操作和通用 Harness 委派不包含在这项已验证的小场景内。
 
+### 3.4 当前的受限文本模型调用
+
+当前还有一个窄的、真实 DSH `ctx.llm` 调用证据。它只支持这里明确测试过的 `loom-stub/loom-stub-v1` 文本 fixture，不冒充通用 Model Registry 或本地模型安装/激活。任务使用 `kind=model_text` 和 **单独的 `invoke_text` Grant**，不能用普通文件读/写授权替代。请求将其目标与精确 provider/model 写入受限 `loom.model-text.v1` 内容，循环利用 Node Binding、Assignment 和 Lease下发，不把路径或模型名字默认为运行权限。
+
+模型选择由公开的 `ctx.llm.listProviders/listModels/resolveModelInfo/prepareCall` 验证，runtime带 `{provider,model}` 调用prepare并检查冻结 config、文本模态及实际适配器流。`prepareCall` 只准备同一代adapter，policy本身的探查不执行stream，真正的文本又由普通 Agent Session followup、stream/assistant-message 和 turn/end 证明。新的 Artifact有相应独立 `loom.model-ref.v1`（来源、provider/model、Grant、输出byte hash和会话观察），不因目录写入或父Artifact引用就自动获得scope。
+
+缺少这类确切选择、公开adapter、文本模态或权限时必须拒绝，不能改成实际未知模型的“存在/激活”。`model_text_tasks` 默认关闭，按Guest profile明确启用配置且仍需每次正确OperationGrant。普通文档授予的 read/write 在这里不提供调用，另一侧文本模型也不产生文件effect；scope之外的tool可能file效果保留unknown而非自动成功。
+
+真实运行与限制见 [tests/harness/MODEL_TEXT.md](tests/harness/MODEL_TEXT.md)。整装的Registry、placement、activation、下载安装、实际模型质量和图像/跨机推理仍需另外实现与验收。
+
 ## 4. 会话可见性与审计架构
 
 ### 4.1 默认简洁，过程可展开

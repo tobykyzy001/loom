@@ -3,6 +3,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { stableArtifactId } from './ids.js'
+import { modelRef } from './model-policy.js'
 
 /**
  * DSH 0.2.2-rc.3 public adapter. Sources verified in the installed ASAR:
@@ -110,6 +111,12 @@ export class DshAdapter {
   }
   async boundedFileEffects(assignment, config, record) {
     const toolRecords = record?.tool_records || []
+    const evidenceScope = assignment.kind === 'edit_file'
+    if (!evidenceScope) {
+      const outside = toolRecords.find((entry) => entry.possible_effect)
+      if (outside) return { state: 'unknown', summary: 'A tool reported a possible file effect outside the authorized operation kind; neither success nor automatic rollback is inferred.', effects: [], artifacts: [], evidence: [outside] }
+      return { effects: [], artifacts: [] }
+    }
     const uncertain = toolRecords.find((entry) => entry.is_error && entry.possible_effect && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))
     if (this.allowBoundedFixtureEffects && uncertain) return { state: 'unknown', summary: 'The ToolResult claims an effect, but its immutable evidence could not be fully validated. No success or automatic rollback is inferred.', session_ref: this.sessionRef(record.agent.session), effects: [], artifacts: [], evidence: [uncertain] }
     const failed = toolRecords.find((entry) => entry.is_error && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))
@@ -241,6 +248,18 @@ export class DshAdapter {
       if (fileEvidence.state === 'unknown') return { ...fileEvidence, artifacts: [] }
       if (fileEvidence.state === 'failed') return { ...fileEvidence, content: Buffer.from(JSON.stringify({ tool_rejection: true, session_ref: fileEvidence.session_ref, evidence: fileEvidence.evidence })), artifacts: [] }
       const text = snapshot.full_text.slice(0, 64_000)
+      if (assignment.kind === 'model_text') {
+        if (!config.modelObservation || !config.textRoute) throw new Error('model_text requires a confirmed public route observation')
+        const bytes = Buffer.from(JSON.stringify({ schema: 'loom.model-text-result.v1', source: 'dsh_llm_stream', text }, null, 2))
+        const routeRef = modelRef(assignment, config.textRoute, config.modelObservation, text.trim().length > 0,
+          { sha256: createHash('sha256').update(bytes).digest('hex') })
+        const artifactId = stableArtifactId(`${assignment.id}:model_text:${config.textRoute.provider}:${config.textRoute.model}`)
+        const metadata = { name: `loom-model_text-${assignment.id}.json`, media_type: 'application/json', origin_node_id: assignment.node_id,
+          model_ref: routeRef, parents: [], evidence: [{ source: 'dsh_public_llm', model_ref: routeRef, session: this.sessionRef(agent.session) }] }
+        return { state: 'succeeded', summary: 'Observed a text response from the explicitly selected public SDK model route.',
+          artifact: { artifact_id: artifactId, bytes, metadata }, session_ref: this.sessionRef(agent.session),
+          effects: [], artifacts: [], metadata }
+      }
       if (fileEvidence.artifacts?.length) {
         const metadata = fileEvidence.artifacts[0].metadata
         if (this.snapshotDir) await writeFile(join(this.snapshotDir, `${assignment.id}.html`), fileEvidence.artifacts[0].bytes, { mode: 0o600, flag: 'wx' })
