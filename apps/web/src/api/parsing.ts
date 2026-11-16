@@ -29,7 +29,11 @@ export function ticketFrom(value: unknown): Ticket {
   ticket.artifacts = (ticket.artifacts ?? []).map(artifact => ({ ...artifact, artifact_id: artifact.artifact_id ?? (artifact as ArtifactRef & { id?: string }).id, type: artifact.type ?? (artifact as ArtifactRef & { name?: string }).name }))
   ticket.messages = (ticket.messages ?? [])
     .filter(message => message.visible !== false && ('visibility' in message ? !['private', 'denied'].includes(String((message as Message & { visibility: string }).visibility)) : true))
-    .map(message => ({ ...message, segment: message.segment ?? ((message as Message & { kind?: string }).kind === 'collaboration' ? 'collaboration' : 'activity') }))
+    .map(message => ({
+      ...message,
+      sender_kind: message.sender_kind ?? message.sender,
+      segment: message.segment ?? (['collaboration', 'session_link'].includes((message as Message & { kind?: string }).kind || '') ? 'collaboration' : 'activity'),
+    }))
   return ticket
 }
 

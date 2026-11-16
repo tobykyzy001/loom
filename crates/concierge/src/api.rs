@@ -43,6 +43,64 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn messages_can_be_retrieved_by_a_bounded_ticket_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = crate::store::Store::open(directory.path()).unwrap();
+        db.set_setting(
+            "client_token_hash",
+            &crate::store::hash("test-client-token-123456789012345"),
+        )
+        .unwrap();
+        db.conn().execute("INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES('global',NULL,'worker','concierge','activity','global',NULL,'summary','2026-01-01T00:00:00Z','global')", []).unwrap();
+        db.conn().execute("INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES('delegated','tkt_child','worker','concierge','session_link','delegated','{\"artifact_id\":\"source\"}','summary','2026-01-01T00:00:01Z','delegated')", []).unwrap();
+        let app = router(Arc::new(State {
+            store: Arc::new(Mutex::new(db)),
+            bootstrap_token: "test-client-token-123456789012345".into(),
+            bootstrap_token_written: false,
+        }));
+        let response = app
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/messages?ticket_id=tkt_child")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        "Bearer test-client-token-123456789012345",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(value["messages"][0]["id"], "delegated");
+    }
+
+    #[test]
+    fn any_delegation_claim_without_a_real_parent_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = crate::store::Store::open(directory.path()).unwrap();
+        let forged = json!({
+            "ticket_id": "tkt_child", "kind": "session_link",
+            "session_ref": {"delegated_from": {
+                "type": "artifact_ref", "artifact_id": uuid::Uuid::new_v4(),
+                "ticket_id": "tkt_parent_fake", "origin_node_id": "a".repeat(64),
+                "sha256": "b".repeat(64), "location": "loom://artifact/not-the-producer",
+                "parents": [], "session": {"session_id":uuid::Uuid::new_v4()}
+            }}
+        });
+        assert!(validated_delegation_relation(&db, &forged).is_err());
+        let mut wrong_kind = forged;
+        wrong_kind["kind"] = json!("activity");
+        assert!(validated_delegation_relation(&db, &wrong_kind).is_err());
+    }
+
+    #[tokio::test]
     async fn actual_assets_are_not_false_spa_fallback_and_symlinks_fail_closed() {
         let store = tempfile::tempdir().unwrap();
         let web = store.path().join("web");
@@ -1114,14 +1172,83 @@ pub(crate) async fn event(
         .or_else(|| body["content"].as_str())
         .filter(|x| x.len() <= 8000 && !x.is_empty())
         .ok_or_else(|| ApiError::bad("A bounded visible event summary is required"))?;
-    valid_lease(&state.lock().unwrap(), &body, &node, true)?;
-    let session_reference = body
-        .get("session_ref")
-        .cloned()
-        .unwrap_or_else(|| json!({"assignment_id":assignment}));
     let store = state.lock()?;
+    // A Session link is an ordinary progress reference, not the special stale
+    // cancellation path; delegation provenance additionally depends on this
+    // exact current Assignment, its immutable source and the real parent reference.
+    valid_lease(&store, &body, &node, body["kind"] != "session_link")?;
+    let session_reference = if let Some(relation) = validated_delegation_relation(&store, &body)? {
+        json!({
+            "harness": "dsh", "session_id": body["session_ref"]["session_id"],
+            "protocol": "dsh-session-log", "host_api": body["session_ref"]["host_api"],
+            "observed_seq": body["session_ref"]["observed_seq"], "delegated_from": relation,
+        })
+    } else {
+        body.get("session_ref")
+            .cloned()
+            .unwrap_or_else(|| json!({"assignment_id":assignment}))
+    };
     store.conn().execute("INSERT OR IGNORE INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES(?1,?2,?3,'concierge',?4,?5,?6,'summary',?7,?8)",params![id("message"),ticket,body["sender"].as_str().unwrap_or("worker"),body["kind"].as_str().unwrap_or("activity"),content,session_reference.to_string(),now(),body["request_id"].as_str()])?;
     Ok(Json(json!({"accepted":true,"node_id":node})))
+}
+
+pub(crate) async fn source_input(
+    AppState(state): AppState<Arc<State>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let (node, _) = node(&state, &headers, &body)?;
+    let store = state.lock()?;
+    valid_lease(&store, &body, &node, false)?;
+    // The center reads its assigned immutable relation, never an arbitrary
+    // parent/session supplied by a worker or provider. No administrative token
+    // is handed to a Node or exposed in its task tool scope.
+    Ok(Json(crate::pipeline::delegated_source_proof(
+        &store, &body,
+    )?))
+}
+
+fn validated_delegation_relation(store: &store::Store, body: &Value) -> ApiResult<Option<Value>> {
+    let claimed = body["session_ref"]["delegated_from"].clone();
+    if claimed.is_null() {
+        return Ok(None);
+    }
+    if body["kind"] != "session_link"
+        || !claimed.is_object()
+        || claimed["session"]["session_id"].is_null()
+    {
+        return Err(ApiError::denied(
+            "delegation_evidence",
+            "Delegation claims require a real Session link and its parent Session",
+        ));
+    }
+    let mut checked_body = body.clone();
+    checked_body["source_ref"] = json!({
+        "type": claimed["type"], "artifact_id": claimed["artifact_id"], "ticket_id": claimed["ticket_id"],
+        "origin_node_id": claimed["origin_node_id"], "sha256": claimed["sha256"],
+        "location": claimed["location"], "parents": claimed["parents"],
+    });
+    let proof = crate::pipeline::delegated_source_proof(store, &checked_body).map_err(|error| {
+        ApiError::denied(
+            "delegation_evidence",
+            format!("Only the actual pipeline source and parent Session may be linked: {error}"),
+        )
+    })?;
+    let actual_parent = proof["parent_session_ref"]["session_id"].as_str();
+    if actual_parent != claimed["session"]["session_id"].as_str() {
+        return Err(ApiError::denied(
+            "delegation_evidence",
+            "The claimed parent Session does not match the producer's actual public Session",
+        ));
+    }
+    let reference = proof["artifact_input"]["artifact_ref"].clone();
+    Ok(Some(json!({
+        "type": reference["type"], "artifact_id": reference["artifact_id"], "ticket_id": reference["ticket_id"],
+        "origin_node_id": reference["origin_node_id"], "sha256": reference["sha256"],
+        "location": reference["location"], "parents": reference["parents"],
+        "session": proof["parent_session_ref"],
+        "source_verified": true, "validated_by": "current_assignment_and_pipeline_relation"
+    })))
 }
 
 fn valid_lease(
@@ -1916,10 +2043,25 @@ async fn delete_memory(
     }
     Ok(Json(json!({"deleted":true,"grants_changed":false})))
 }
-async fn messages(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        json!({"messages":state.lock()?.query("SELECT * FROM messages WHERE ticket_id IS NULL ORDER BY created_at LIMIT 1000",[])?}),
-    ))
+async fn messages(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Query(query): axum::extract::Query<PreferenceQuery>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    if let Some(ticket) = query.ticket_id {
+        if ticket.trim().is_empty() || ticket.len() > 160 || ticket.chars().any(|c| c.is_control())
+        {
+            return Err(ApiError::bad(
+                "A bounded exact Ticket ID is required for message filtering",
+            ));
+        }
+        return Ok(Json(json!({
+            "messages": store.query("SELECT * FROM messages WHERE ticket_id=?1 ORDER BY created_at,id LIMIT 1000", [ticket])?,
+        })));
+    }
+    Ok(Json(json!({
+        "messages": store.query("SELECT * FROM messages WHERE ticket_id IS NULL ORDER BY created_at LIMIT 1000", [])?,
+    })))
 }
 async fn message(
     AppState(state): AppState<Arc<State>>,
@@ -1982,7 +2124,6 @@ async fn run_pipeline(
     uuid::Uuid::parse_str(&id).map_err(|_| ApiError::bad("Pipeline ID must be UUID"))?;
     let store = state.lock()?;
     crate::pipeline::advance_all(&store)?;
-    let store = state.lock()?;
     Ok(Json(
         json!({"pipeline":crate::pipeline::detail(&store, &id)?}),
     ))

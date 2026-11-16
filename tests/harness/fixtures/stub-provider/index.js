@@ -40,6 +40,7 @@ class DeterministicAdapter extends LlmAdapter {
       }
     }
     await this.record({ type: 'request', id, session_id: options.sessionId || '', call_count: history.length, tool_calls: toolCalls })
+    // Declared scoped names, never user controls outside the approved fixture.
     if (this.serial > 40) throw new Error('Fixture model-call budget exceeded; refusing an unproductive repeated-tool loop')
     const text = history.map((entry) => entry.text || '').join('\n')
     const latestUser = history.filter((entry) => entry.role === 'user').at(-1)?.text || ''
@@ -66,6 +67,17 @@ class DeterministicAdapter extends LlmAdapter {
       options.signal?.removeEventListener('abort', aborted)
       throwIfAborted(options.signal)
       chunks = textResponse('Unexpected release without cancellation')
+    } else if (text.includes('LOOM_FIXTURE_DELEGATE') && !toolCalls.includes('loom_fixture_delegate_write')) {
+      // A specific delegated fixture takes priority over the generic ORBITAL
+      // inspect trigger, even though the parent instructed that observation.
+      const parameters = '{}'
+      chunks = [
+        { type: 'block-start', index: 0, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 0, id: `loom-delegate-${id}`, name: 'loom_fixture_delegate_write', argumentsDelta: parameters },
+        { type: 'block-end', index: 0, block: { type: 'tool-call', id: `loom-delegate-${id}`, name: 'loom_fixture_delegate_write', arguments: parameters } },
+        { type: 'tool-declaration-check', declared: (options.tools || []).some((tool) => tool.name === 'loom_fixture_delegate_write') },
+        { type: 'finish', reason: { kind: 'tool-calls' } },
+      ]
     } else if (/LOOM_FIXTURE_FILE_WRITE/i.test(text) && !toolCalls.includes('loom_fixture_write')) {
       const parameters = JSON.stringify({ path: 'demo.html', title: 'Loom verifier portal' })
       chunks = [
@@ -99,6 +111,11 @@ class DeterministicAdapter extends LlmAdapter {
         { type: 'usage', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } },
         { type: 'finish', reason: { kind: 'tool-calls' } },
       ]
+    } else if (text.includes('LOOM_FIXTURE_DELEGATE') && history.some((entry) => entry.role === 'tool' && entry.content)) {
+      const result = history.filter((entry) => entry.role === 'tool').at(-1)
+      chunks = result.role === 'tool' && result.content.some((block) => JSON.stringify(block).includes('Verified delegated Agent'))
+        ? textResponse('The child Agent observed the verified delegated HTML artifact result.')
+        : (() => { throw new Error('The delegated child used the wrong fixture tool; no file effect can be claimed from this branch') })()
     } else if (history.some((entry) => entry.role === 'tool' && entry.content)) {
       const result = history.filter((entry) => entry.role === 'tool').at(-1)
       chunks = textResponse(`Observed actual controlled tool result: ${JSON.stringify(result.content)}`)

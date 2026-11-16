@@ -79,7 +79,7 @@ try {
     const sourceTaskId = started.stages[0].ticket_id
     const child = await runOnce(editor, 'succeeded')
     assert.ok(child.assignmentId, 'Second actual Assignment was issued')
-    const advanced = await admin.get(`/api/v1/pipelines/${pipelineId}`)
+    const advanced = await admin.post(`/api/v1/pipelines/${pipelineId}/run`, {})
     const currentStages = advanced.pipeline.stages
     const childTicketId = currentStages.at(-1).ticket_id
     assert.ok(childTicketId, `The actual docEdit stage must have a real Ticket once its Assignment was issued: ${JSON.stringify(currentStages)}`)

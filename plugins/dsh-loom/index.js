@@ -8,7 +8,7 @@ import { DshAdapter } from './lib/dsh-adapter.js'
 import { DshDispatcher } from './lib/dsh-dispatcher.js'
 
 export const name = 'loom-local-node'
-export const inject = ['agents', 'sessionPersistence']
+export const inject = ['agents', 'sessionPersistence', 'tools']
 export const Config = z.object({
   enabled: z.boolean().default(false).description('Start outbound HTTP registration only; does not enable task execution.'),
   allow_workers: z.boolean().default(false).description('Explicit opt-in to perform any Loom-assigned work.'),
@@ -19,6 +19,8 @@ export const Config = z.object({
   enrollment_code: z.string().description('One-use enrollment code, obtained by an administrator; leave empty for fixed-token testing only.'),
   allow_dsh_agent_creation: z.boolean().default(false).description('Allow creation of an owned Agent; otherwise use existing agent_session_id and never dispose it.'),
   bounded_fixture_effects: z.boolean().default(false).description('Test-only: verify a registered synthetic fixture write, never general provider side effects. Disabled by default.'),
+  delegation_tools: z.union(['unsupported', 'scoped_fixture']).default('unsupported').description('Test-only child Agent with independently verified immutable source. Default refuses delegated ArtifactInput.'),
+  delegation_project_root: z.string().default('').description('Test-only exact ProjectBinding root; never authorizes another path by prefix or cwd.'),
   agent_session_id: z.string().default('').description('Optional existing DSH Session id; resume failures are reported, not faked.'),
   profile_id: z.string().default('isolated').description('Loom worker-scope label, not a source of host authorization.'),
   project_roots: z.any().default({}).description('Explicit host-declared projectId to absolute synthetic/project root mapping; no implicit authorization.'),
@@ -59,10 +61,19 @@ export async function apply(ctx, config) {
     } else if (config.executor === 'dsh') {
       // Optional dynamic service detection keeps an absent Agent surface an error, never simulated execution.
       if (!ctx.agents || typeof ctx.agents.get !== 'function') throw new Error('Unsupported DSH executor: verified ctx.agents service is not mounted')
+      let delegationAgentSetup
+      if (config.delegation_tools === 'scoped_fixture') {
+        const module = await import('@loom/dsh-fixture-stub-provider/delegation').catch((error) => {
+          throw new Error('Scoped delegation was requested without its declared Fixture tool package', { cause: error })
+        })
+        if (typeof module.registerScopedDelegationTool !== 'function') throw new Error('Fixture does not expose its explicit scoped delegation tool installer')
+        delegationAgentSetup = ({ ctx: agentCtx, scene }) => module.registerScopedDelegationTool(agentCtx, scene)
+      }
       const adapter = new DshAdapter(ctx, { allowCreation: config.allow_dsh_agent_creation,
         agentSessionId: config.agent_session_id, snapshotDir: config.artifact_dir,
         sessionMapPath: `${config.state_dir}/dsh-session-map.json`,
-        allowBoundedFixtureEffects: config.bounded_fixture_effects })
+        allowBoundedFixtureEffects: config.bounded_fixture_effects,
+        delegationAgentSetup })
       // Project roots are explicitly host declarations, never implicit execution Grants.
       loop = await runLocalDshPlugin(config, {
         createClient: undefined,

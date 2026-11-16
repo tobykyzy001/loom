@@ -264,6 +264,12 @@ code, .mono { font-family: var(--mono); }
 .collab-message > div { display: flex; justify-content: space-between; gap: 6px; font-size: 9px; color: #9b84a8; }
 .collab-message > div span { color: #b9a6c1; font-size: 8px; }
 .collab-message p { font-size: 10px; margin-top: 8px; color: #98809f; }
+.delegation-source { margin-top: 10px; padding: 10px; border: 1px solid #e8dfec; border-radius: 7px; background: #faf8fc; min-width: 0; }
+.delegation-source h4 { color: #7d678a; font-size: 10px; }
+.delegation-source dl { margin: 0; display: grid; gap: 6px; }
+.delegation-source dl > div { display: grid; grid-template-columns: 5.8em minmax(0, 1fr); gap: 7px; color: #95809e; font-size: 9px; }
+.delegation-source dd { margin: 0; overflow-wrap: anywhere; word-break: break-word; color: #6d587a; }
+.delegation-source .delegation-note { color: #95809e; line-height: 1.55; }
 .privacy-caption { font-size: 9px; display: flex; gap: 6px; color: #bca6c2; margin-top: 15px; }
 .audit-note { font-size: 10px; background: #fbf9fd; padding: 10px; color: #a38dab; display: flex; gap: 7px; border-radius: 6px; }
 .audit-event { position: relative; padding: 14px 0; border-bottom: 1px solid #ebe4ee; }

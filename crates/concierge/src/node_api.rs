@@ -16,6 +16,7 @@ pub(crate) fn routes() -> Router<Arc<api::State>> {
         .route("/api/v1/nodes/assignments/poll", post(api::poll))
         .route("/api/v1/nodes/acknowledge", post(api::acknowledge))
         .route("/api/v1/nodes/events", post(api::event))
+        .route("/api/v1/nodes/assignments/source", post(api::source_input))
         .route(
             "/api/v1/nodes/artifacts",
             post(api::artifact_upload_handler),

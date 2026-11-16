@@ -10,10 +10,11 @@ import { stableArtifactId } from './ids.js'
  * No private event types, Session.appendPluginRecord, synthetic transcript, or hidden protocol.
  */
 export class DshAdapter {
-  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false } = {}) {
+  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false, delegationAgentSetup } = {}) {
     if (!ctx || typeof ctx.on !== 'function') throw new Error('A real Host Context is required')
     this.ctx = ctx; this.allowCreation = allowCreation; this.agentSessionId = agentSessionId; this.snapshotDir = snapshotDir
     this.allowBoundedFixtureEffects = allowBoundedFixtureEffects
+    this.delegationAgentSetup = delegationAgentSetup
     this.sessionMapPath = sessionMapPath; this.sessionMap = null
     this.owned = new Map(); this.waiters = new Map(); this.latest = new Map(); this.sequence = new Map()
     this.sessionOwners = new Map()
@@ -30,20 +31,22 @@ export class DshAdapter {
       this.sequence.get(assignmentId).session_ref = {
         session_id: session.id, harness: 'dsh', host_api: '0.2.2-rc.3', protocol: 'dsh-session-log', observed_seq: event.seq,
       }
-      if (this.allowBoundedFixtureEffects && event.type === 'tool/call' && event.data?.name === 'loom_fixture_write') {
+      if (this.allowBoundedFixtureEffects && event.type === 'tool/call' && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(event.data?.name)) {
         this.sequence.get(assignmentId).calls ||= new Map()
         let args
         try {
           if (event.data.arguments.length > 4096) throw new Error('Fixture call exceeds 4 KiB')
           const parsed = JSON.parse(event.data.arguments)
-          args = { path: parsed.path, title: parsed.title, seq: event.seq }
+          if (event.data.name === 'loom_fixture_delegate_write' && Object.keys(parsed).length > 0) throw new Error('Scoped delegated tool accepts no caller-selected path')
+          args = { path: event.data.name === 'loom_fixture_delegate_write' ? 'docs/delegated.html' : parsed.path,
+            title: event.data.name === 'loom_fixture_delegate_write' ? 'Verified delegated Agent' : parsed.title, seq: event.seq }
         } catch { args = null }
         this.sequence.get(assignmentId).calls.set(event.data.callId, { name: event.data.name, args, seq: event.seq })
       }
       if (this.allowBoundedFixtureEffects && event.type === 'tool/result') {
         const tracked = this.sequence.get(assignmentId)
         const call = tracked.calls?.get(event.data.message?.toolCallId) || tracked.calls?.get(event.data.message?.source?.callId)
-        if (call?.name !== 'loom_fixture_write') return
+        if (!['loom_fixture_write', 'loom_fixture_delegate_write'].includes(call?.name)) return
         tracked.tool_records ||= []
         const text = (event.data.message?.content || []).filter((block) => block.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('\n')
         const record = { call, call_id: event.data.message?.toolCallId || event.data.message?.source?.callId,
@@ -57,7 +60,28 @@ export class DshAdapter {
               throw new Error('Fixture tool result shape/size is outside the bounded contract')
             }
             record.result = { created: true, path: value.path, sha256: value.sha256, size_bytes: value.size_bytes, title: value.title }
-          } catch (error) { record.invalid_error = error.message.slice(0, 512); record.is_error = true }
+            if (call.name === 'loom_fixture_delegate_write') {
+              const source = value.source
+              const fields = ['artifact_id', 'ticket_id', 'origin_node_id', 'sha256', 'location']
+              if (source?.type !== 'artifact_ref'
+                || !/^[a-f0-9]{64}$/.test(source.sha256)
+                || !/^[a-f0-9]{64}$/.test(source.origin_node_id)
+                || !/^[a-f0-9-]{36}$/.test(value.source_session_id || '')
+                || !Array.isArray(source.parents) || source.parents.length !== 0
+                || fields.some((key) => typeof source[key] !== 'string' || !source[key] || source[key].length > 160)) {
+                throw new Error('Delegate Source evidence is not a bounded immutable Artifact lineage')
+              }
+              // Preserve only the needed validated fields, never arbitrary
+              // provider claims or a lifecycle path as authority.
+              record.result.source = {
+                type: 'artifact_ref', artifact_id: source.artifact_id,
+                ticket_id: source.ticket_id, origin_node_id: source.origin_node_id,
+                sha256: source.sha256, location: source.location, parents: [],
+              }
+              record.result.source_session_id = value.source_session_id
+            }
+            if (value.created === true) record.possible_effect = true
+        } catch (error) { record.invalid_error = error.message.slice(0, 512); record.is_error = true }
         } else { record.invalid_error = 'Fixture tool response exceeds 4 KiB'; record.is_error = true }
         tracked.tool_records.push(record)
       }
@@ -86,10 +110,12 @@ export class DshAdapter {
   }
   async boundedFileEffects(assignment, config, record) {
     const toolRecords = record?.tool_records || []
-    const failed = toolRecords.find((entry) => entry.is_error && entry.call?.name === 'loom_fixture_write')
+    const uncertain = toolRecords.find((entry) => entry.is_error && entry.possible_effect && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))
+    if (this.allowBoundedFixtureEffects && uncertain) return { state: 'unknown', summary: 'The ToolResult claims an effect, but its immutable evidence could not be fully validated. No success or automatic rollback is inferred.', session_ref: this.sessionRef(record.agent.session), effects: [], artifacts: [], evidence: [uncertain] }
+    const failed = toolRecords.find((entry) => entry.is_error && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))
     if (this.allowBoundedFixtureEffects && failed) return { state: 'failed', summary: `DSH ToolResult rejected the authorized file operation: ${failed.text || failed.invalid_error || 'invalid bounded tool result'}`,
       session_ref: this.sessionRef(record.agent.session), effects: [], artifacts: [], evidence: [failed] }
-    if (!this.allowBoundedFixtureEffects || !toolRecords.some((entry) => entry.call?.name === 'loom_fixture_write')) return { effects: [], artifacts: [] }
+    if (!this.allowBoundedFixtureEffects || !toolRecords.some((entry) => ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))) return { effects: [], artifacts: [] }
     const effects = [], artifacts = []
     // The exact Grant root is checked; no profile/cwd prefix heuristic authorizes a path.
     const rootInput = config.projectRoot || assignment.grant?.project_root
@@ -97,27 +123,38 @@ export class DshAdapter {
     const projectRoot = await realpath(resolve(rootInput))
     if (assignment.grant?.project_root && await realpath(resolve(assignment.grant.project_root)) !== projectRoot) throw new Error('Effect root differs from the exact ProjectBinding root')
     for (const entry of toolRecords) {
-      if (entry.is_error || entry.call?.name !== 'loom_fixture_write' || !entry.call.args) continue
+      const delegated = entry.call?.name === 'loom_fixture_delegate_write'
+      if (entry.is_error || !['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name) || !entry.call.args) continue
       if (typeof entry.call.args.path !== 'string' || entry.call.args.path.length > 128
-        || typeof entry.call.args.title !== 'string' || entry.call.args.title.length > 256 || !entry.call_id || !entry.result_id) continue
+        || !entry.call_id || !entry.result_id) continue
       const parsed = entry.result
-      if (!parsed || parsed.path !== 'demo.html' || entry.call.args.path !== parsed.path || entry.call.args.title !== parsed.title) {
+      const path = delegated ? 'docs/delegated.html' : 'demo.html'
+      if (!parsed || parsed.path !== path || entry.call.args.path !== parsed.path || (delegated && config.provenance === undefined)) {
         throw new Error('Committed ToolCall and ToolResult do not name the same bounded fixture artifact')
       }
       const actualFile = await realpath(resolve(projectRoot, parsed.path)).catch((error) => { throw new Error('Committed file is missing or unreadable', { cause: error }) })
-      if (dirname(actualFile) !== projectRoot) throw new Error('The bounded file output escaped the exact Grant root')
+      const expectedParent = delegated ? await realpath(join(projectRoot, 'docs')) : projectRoot
+      if (dirname(actualFile) !== expectedParent) throw new Error('The bounded file output escaped the exact Grant root')
       const bytes = await readFile(actualFile)
       const sha256 = createHash('sha256').update(bytes).digest('hex')
       if (bytes.length !== parsed.size_bytes || sha256 !== parsed.sha256) throw new Error('Actual Artifact bytes differ from the committed public ToolResult')
-      const artifactId = stableArtifactId(`${assignment.id}:artifact:${entry.call_id}:${sha256}`)
-      const effectId = stableArtifactId(`${assignment.id}:effect:${entry.call_id}:${sha256}`)
-      const reference = { type: 'dsh-tool-result', name: 'loom_fixture_write', path: 'demo.html', title: parsed.title,
+      if (delegated) {
+        const mismatched = ['artifact_id', 'ticket_id', 'origin_node_id', 'sha256']
+          .filter((key) => parsed.source?.[key] !== config.provenance.ref[key])
+        if (parsed.source_session_id !== config.provenance.parent_session.session_id) mismatched.push('parent_session_id')
+        if (mismatched.length) throw new Error(`Delegate result mismatch in: ${mismatched.join(',')}`)
+      }
+      const reference = { type: 'dsh-tool-result', name: entry.call.name, path, title: parsed.title,
         call_id: entry.call_id, call_seq: entry.call.seq, result_id: entry.result_id, result_seq: entry.result_seq,
         session: entry.session, sha256, size_bytes: bytes.length, actual_file: parsed.path }
+      const artifactId = stableArtifactId(`${assignment.id}:artifact:${entry.call_id}:${sha256}`)
+      const effectId = stableArtifactId(`${assignment.id}:effect:${entry.call_id}:${sha256}`)
       artifacts.push({ artifact_id: artifactId, bytes,
         metadata: { artifact_id: artifactId, name: parsed.path, media_type: 'text/html', origin_node_id: assignment.node_id,
-          size_bytes: bytes.length, sha256, parents: [], evidence: [reference] } })
-      const inputDigest = createHash('sha256').update(JSON.stringify({ path: parsed.path, title: parsed.title })).digest('hex')
+          size_bytes: bytes.length, sha256, parents: delegated ? [config.provenance.ref.artifact_id] : [],
+          ...(delegated ? { artifact_ref: config.provenance.ref, delegated_from: { ...config.provenance.ref, session: config.provenance.parent_session } } : {}),
+          evidence: [reference] } })
+      const inputDigest = createHash('sha256').update(JSON.stringify({ path: parsed.path, title: parsed.title, ...(delegated ? { source: config.provenance.ref } : {}) })).digest('hex')
       effects.push({ effect_id: effectId, ticket_id: assignment.ticket_id, assignment_id: assignment.id, node_id: assignment.node_id,
         attempt: assignment.attempt, input_digest: inputDigest, status: 'confirmed', evidence: [reference], artifacts: [artifactId] })
     }
@@ -151,7 +188,7 @@ export class DshAdapter {
       await import('node:fs/promises').then(({ rename }) => rename(file, this.sessionMapPath))
     } finally { await import('node:fs/promises').then(({ rm }) => rm(file, { force: true })).catch(() => {}) }
   }
-  async attach(assignment, { provider, model, reasoningEffort, maxTokens, projectRoot, reportLink } = {}) {
+  async attach(assignment, { provider, model, reasoningEffort, maxTokens, projectRoot, reportLink, provenance } = {}) {
     if (!this.available) throw new Error('Unsupported executor: live ctx.agents surface is unavailable')
     const existing = this.sequence.get(assignment.id)
     if (existing) return existing
@@ -166,9 +203,14 @@ export class DshAdapter {
       handle = await this.ctx.agents.resume({ resumeSessionId: selectedSession, ...(provider || model ? { agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}) } } : {}) })
     } else {
       if (!this.allowCreation) throw new Error('DSH Agent creation is disabled; explicitly configure an existing session or opt in')
-      handle = await this.ctx.agents.create({ sessionId: selectedSession, meta: { ...(projectRoot ? { cwd: projectRoot } : {}) },
-        agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}),
-          ...(reasoningEffort ? { reasoningEffort } : {}), ...(maxTokens ? { maxTokens } : {}) } })
+      if (provenance && typeof this.delegationAgentSetup !== 'function') throw new Error('Source delegation requires a declared scoped tool installer; execution unavailable')
+      handle = await this.ctx.agents.create({ sessionId: selectedSession, meta: {
+        ...(projectRoot ? { cwd: projectRoot } : {}),
+        ...(provenance ? { parentSession: provenance.parent_session.session_id, origin: 'subagent' } : {}),
+      },
+      ...(provenance ? { setup: async (agentCtx) => { await this.delegationAgentSetup({ ctx: agentCtx, scene: provenance }) } } : {}),
+      agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}), ...(maxTokens ? { maxTokens } : {}) } })
     }
     const record = { agent: handle.agent, owned: Boolean(handle.owned), dispose: ownedDispose(handle),
       last_seq: handle.agent.session.seq, refReported: false }
@@ -187,13 +229,16 @@ export class DshAdapter {
     try {
       const objective = typeof assignment.objective === 'string' && assignment.objective
         ? assignment.objective : `Perform the authorized ${assignment.kind} operation.`
-      const content = [{ type: 'text', text: objective }]
+      const content = [{ type: 'text', text: objective + (config.provenance
+         ? `\nVerified source delegation: call only the scoped delegated HTML tool. LOOM_FIXTURE_DELEGATE parent_artifact=${config.provenance.ref.artifact_id} sha256=${config.provenance.ref.sha256}`
+         : '') }]
       agent.followup(Object.freeze({ id: randomUUID(), role: 'user', content: Object.freeze(content), source: Object.freeze({ kind: 'loom' }) }))
       await settled
       const snapshot = this.latest.get(assignment.id)
       if (!snapshot || !snapshot.full_text) throw new Error('DSH completed without an assistant message; no success can be inferred')
       const fileEvidence = await this.boundedFileEffects(assignment, config, this.sequence.get(assignment.id))
       if (assignment.kind === 'edit_file' && !fileEvidence.effects?.length && fileEvidence.state !== 'failed') throw new Error('A file-write assignment completed without a verified actual file Effect')
+      if (fileEvidence.state === 'unknown') return { ...fileEvidence, artifacts: [] }
       if (fileEvidence.state === 'failed') return { ...fileEvidence, content: Buffer.from(JSON.stringify({ tool_rejection: true, session_ref: fileEvidence.session_ref, evidence: fileEvidence.evidence })), artifacts: [] }
       const text = snapshot.full_text.slice(0, 64_000)
       if (fileEvidence.artifacts?.length) {

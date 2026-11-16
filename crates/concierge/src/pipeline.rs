@@ -331,6 +331,70 @@ fn definition_of(run: &Value) -> Result<Definition> {
     Ok(definition)
 }
 
+/// Only a currently assigned descendant may request this exact source. The
+/// center, not the child, selects the producer and its public ordinary SessionRef.
+pub fn delegated_source_proof(store: &Store, body: &Value) -> Result<Value> {
+    let ticket_id = body["ticket_id"].as_str().context("Ticket is required")?;
+    let source = input_for_assignment(store, ticket_id)?
+        .context("Only an actual authorized pipeline descendant has a source")?;
+    let expected = source["artifact_ref"].clone();
+    if body["source_ref"] != expected {
+        bail!("Source reference does not match the immutable parent assigned to this child");
+    }
+    let parent_ticket = expected["ticket_id"]
+        .as_str()
+        .context("Parent ticket missing")?;
+    let current = store
+        .get("tickets", ticket_id)?
+        .context("Current child Ticket is missing")?;
+    let parent = store
+        .get("tickets", parent_ticket)?
+        .context("Source producer Ticket is missing")?;
+    if current["kind"] != "edit_file"
+        || parent["kind"] != "read_summary"
+        || parent["status"] != "succeeded"
+        || parent["project_id"] != current["project_id"]
+    {
+        bail!("Source and descendant stage or project do not match");
+    }
+    let links = store.query(
+        "SELECT c.pipeline_id FROM document_pipeline_stages c JOIN document_pipeline_stages p ON p.pipeline_id=c.pipeline_id WHERE c.ticket_id=?1 AND p.ticket_id=?2",
+        params![ticket_id, parent_ticket],
+    )?;
+    if links.len() != 1 {
+        bail!("The stated producer is not a parent in the stated pipeline");
+    }
+    let event = store.query(
+        "SELECT session_ref FROM messages WHERE ticket_id=?1 AND kind='session_link' ORDER BY created_at DESC,id DESC LIMIT 1",
+        [parent_ticket],
+    )?.into_iter().next().context("The actual parent Agent SessionRef has not been published")?;
+    let session = serde_json::from_str::<Value>(
+        event["session_ref"]
+            .as_str()
+            .context("Parent session metadata is malformed")?,
+    )
+    .context("Parent session metadata is not valid JSON")?;
+    if !session.is_object()
+        || session["harness"] != "dsh"
+        || session["protocol"] != "dsh-session-log"
+        || Uuid::parse_str(
+            session["session_id"]
+                .as_str()
+                .context("Parent Session ID is missing")?,
+        )
+        .is_err()
+    {
+        bail!("Parent SessionRef must identify an actual supported DSH AgentSession");
+    }
+    Ok(json!({
+        "artifact_input": source,
+        "parent_session_ref": {
+            "harness": "dsh", "session_id": session["session_id"], "protocol": "dsh-session-log",
+            "host_api": session["host_api"], "observed_seq": session["observed_seq"], "ticket_id": parent_ticket,
+        }
+    }))
+}
+
 /// An existing Artifact's immutable ID gives the only legal known storage basename.
 fn artifact_bytes(store: &Store, artifact: &Value) -> Result<Vec<u8>> {
     let id = Uuid::parse_str(artifact["id"].as_str().context("Artifact ID missing")?)?.to_string();

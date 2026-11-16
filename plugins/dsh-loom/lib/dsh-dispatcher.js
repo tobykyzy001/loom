@@ -1,6 +1,7 @@
 import { validateAssignment } from '../src/validation.js'
 import { canonical, sha256 } from '../src/util.js'
 import { stableArtifactId as stableUUID } from './ids.js'
+import { verifiedDelegation } from './verified-delegation.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
@@ -13,26 +14,42 @@ export class DshDispatcher {
   async canExecute(assignment) {
     // The explicit LocalNode input validator is not shared by an arbitrary
     // LLM tool/provider. Never silently discard that provenance guarantee.
-    if (Object.hasOwn(assignment, 'artifact_input')) return false
+    if (Object.hasOwn(assignment, 'artifact_input') && this.config.delegation_tools !== 'scoped_fixture') return false
     if (!['read_summary', 'edit_file', 'dsh_agent_turn'].includes(assignment.kind)) return false
-    try { validateAssignment(assignment, assignment.grant, this.runner.identity); return true } catch { return false }
+    try {
+      validateAssignment(assignment, assignment.grant, this.runner.identity)
+      let provenance
+      if (Object.hasOwn(assignment, 'artifact_input')) {
+        provenance = await verifiedDelegation({ assignment, runner: this.runner, config: this.config })
+        this.active.set(assignment.id, { assignment, provenance })
+      }
+      return true
+    } catch (error) {
+      const code = typeof error.code === 'string' && /^[A-Za-z0-9_.-]{2,80}$/.test(error.code) ? error.code : 'source_verification_failed'
+      process.stderr.write(`[loom-local-node] source validation refused ${assignment.id}: ${code}\n`)
+      return false
+    }
   }
   async executeAssignment(assignment) {
-    if (this.active.has(assignment.id)) throw new Error('Assignment is already active')
-    this.active.set(assignment.id, assignment)
+    if (this.active.get(assignment.id)?.executing) throw new Error('Assignment is already active')
+    this.active.set(assignment.id, { ...(this.active.get(assignment.id) || {}), assignment, executing: true })
     this.runner.state.data.assignments[assignment.id] = assignment
     await this.runner.state.flush()
     try {
       await this.runner.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: true })
+      const { provenance } = this.active.get(assignment.id) || {}
       const operation = () => this.adapter.executeAssignment(assignment, {
         provider: assignment.provider || this.config.provider,
         model: assignment.model || this.config.model,
         reasoningEffort: this.config.reasoning_effort,
         maxTokens: this.config.max_tokens,
         projectRoot: assignment.grant?.project_root,
+        provenance,
         reportLink: (session_ref) => this.runner.client.event({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
-          leaseEpoch: assignment.lease_epoch, sessionRef: { ...session_ref, session_seq: session_ref.observed_seq }, kind: 'session_link', summary: 'Loom linked to the existing DSH Session log.' }),
+          leaseEpoch: assignment.lease_epoch, sessionRef: { ...session_ref,
+            ...(provenance ? { delegated_from: { ...provenance.ref, session: provenance.parent_session } } : {}),
+            session_seq: session_ref.observed_seq }, kind: 'session_link', summary: 'Loom linked to the existing DSH Session log.' }),
       })
       const digest = sha256(canonical({ assignment_id: assignment.id, kind: assignment.kind, objective: assignment.objective }))
       const result = await this.runner.state.once(assignment.id, digest, operation)

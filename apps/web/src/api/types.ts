@@ -74,7 +74,21 @@ export interface Report {
   created_at?: string
 }
 
+export interface DelegationEvidence {
+  type?: string
+  artifact_id: string
+  ticket_id: string
+  origin_node_id?: string
+  sha256?: string
+  location?: string
+  parents?: unknown[]
+  session?: { session_id: string; harness?: string }
+  source_verified: true
+  validated_by: 'current_assignment_and_pipeline_relation'
+}
 export interface Message {
+  kind?: string
+  session_ref?: string | { session_id?: string; delegated_from?: DelegationEvidence }
   id: string
   content: string
   sender?: string

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { AuditEntry, Ticket } from '../api/types'
 import type { Preferences } from '../api/types'
+import { delegationFor } from '../lib/delegation'
 import { formatTime, reportStatusTone, reportStatusLabel, safeJson } from '../lib/format'
 import AppIcon from './AppIcon.vue'
 import EmptyState from './EmptyState.vue'
@@ -14,9 +15,11 @@ const sender = ref(props.preferences.sender_filter ?? '')
 watch(() => props.ticket?.id, () => { localExpanded.value = props.expanded; sender.value = props.preferences.sender_filter ?? ''; tab.value = 'activity' })
 watch(() => props.expanded, value => { localExpanded.value = value })
 
-const collaborations = computed(() => props.ticket?.messages?.filter(m => m.segment === 'collaboration' || m.sender_kind === 'worker' || m.sender_kind === 'agent') ?? [])
-const visibleMessages = computed(() => collaborations.value.filter(m => !sender.value || m.sender === sender.value || m.sender_id === sender.value))
-const senders = computed(() => [...new Set(collaborations.value.map(m => m.sender ?? m.sender_id).filter((s): s is string => !!s))])
+const collaborations = computed(() => props.ticket?.messages?.map(message => ({ message, delegation: delegationFor(message) })).filter(item => item.message.segment === 'collaboration' || item.message.sender_kind === 'worker' || item.message.sender_kind === 'agent') ?? [])
+const visibleMessages = computed(() => collaborations.value.filter(item => !sender.value || item.message.sender === sender.value || item.message.sender_id === sender.value))
+const senders = computed(() => [...new Set(collaborations.value.map(item => item.message.sender ?? item.message.sender_id).filter((s): s is string => !!s))])
+  // The panel only projects authorized wire messages and center-validated relations.
+
 </script>
 
 <template>
@@ -50,7 +53,17 @@ const senders = computed(() => [...new Set(collaborations.value.map(m => m.sende
       <div v-else-if="tab === 'collaboration'" class="activity-content">
         <div class="display-settings"><span class="eyebrow">显示偏好 · 单任务</span><label class="switch-label"><input v-model="localExpanded" type="checkbox" @change="emit('save', localExpanded, sender)" /><span class="switch" />展开过程消息</label></div>
         <label v-if="senders.length" class="sender-filter"><AppIcon name="filter" :size="13" /><select v-model="sender" @change="emit('save', localExpanded, sender)"><option value="">全部发送者</option><option v-for="item in senders" :key="item" :value="item">{{ item }}</option></select></label>
-        <template v-if="localExpanded && visibleMessages.length"><article v-for="message in visibleMessages" :key="message.id" class="collab-message"><div><strong>{{ message.sender ?? message.sender_id ?? '执行者' }}</strong><span>{{ formatTime(message.created_at) }}</span></div><p>{{ message.content }}</p></article></template>
+        <template v-if="localExpanded && visibleMessages.length"><article v-for="{ message, delegation } in visibleMessages" :key="message.id" class="collab-message"><div><strong>{{ message.sender ?? message.sender_id ?? '执行者' }}</strong><span>{{ formatTime(message.created_at) }}</span></div><p>{{ message.content }}</p>
+          <section v-if="delegation" class="delegation-source" data-testid="delegation-source">
+            <h4>已核验的委派来源</h4>
+            <dl>
+              <div><dt>父任务</dt><dd class="mono">{{ delegation.ticket_id }}</dd></div>
+              <div><dt>父 Artifact</dt><dd class="mono">{{ delegation.artifact_id }}</dd></div>
+              <div><dt>父 Session</dt><dd class="mono">{{ delegation.parent_session_id }}</dd></div>
+              <div><dt>子 Session</dt><dd class="mono">{{ delegation.child_session_id || '仅有参考信息' }}</dd></div>
+            </dl>
+            <p class="delegation-note">当前 Assignment 与来源关系经中心核验；仅显示公开引用，不代表完整宿主原文或新增权限。</p>
+          </section></article></template>
         <EmptyState v-else icon="conversation" :title="localExpanded ? '没有可见的过程消息' : '过程已折叠'" :description="localExpanded ? '此任务尚无获授权的协作记录，或发送者筛选没有匹配记录。' : '只改变显示方式，不会删除任何审计或过程记录。'" />
         <p class="privacy-caption"><AppIcon name="lock" :size="13" />无法读取的 Host 原文会显示为缺口，不会由摘要伪造。</p>
       </div>

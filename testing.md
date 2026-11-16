@@ -46,6 +46,15 @@ deploy/
 
 此布局是建议而非已有文件。需要 macOS 宿主插件、移动设备或真实 OS 特性时，不通过容器伪造测试结果；使用独立 Host runner 或真实设备。
 
+## 2.1 当前实际高层验证入口
+
+- `node tests/harness/real-lifecycle.mjs`：隔离profile中真实安装、注册、Agent工具任务、取消与恢复；具体按脚本最后报告判断。
+- `node tests/harness/real-delegation.mjs`：同一隔离 DSH Host 的实际父/子 Session、current Assignment Source 验证、原父产物到新 scoped Tool/File/Artifact 与实际父子关系、错误来源拒绝、重开无重复效果。详见 [harness/DELEGATION.md](harness/DELEGATION.md)。默认生产`unsupported`，此例零网络 Stub，不代表自然语言模型质量、物理第二机或任意 Harness。
+- `node scripts/document-pipeline.mjs`：受限原授权两阶段文件转换、`/run`、幂等和中心恢复；不是 M3 通用长图/大规模 Artifact 转运。
+- `node tests/browser/run.mjs --narrow-viewport --keep-evidence`：实际安装的桌面Edge上完成原生Work Space的注册、Grant、读写/效应、取消及窄视口检查。它不是手机、锁屏或iOS/Android真机验证。
+
+此节只记录既有测试入口，不因命令存在自动认定成功，也不以此代替用户明确暂缓的1+3 Compose 拓扑。
+
 ## 3. 分层与模型成本
 
 | 层级 | 要证明什么 | 模型来源 | 运行触发 | 外部模型调用 |
