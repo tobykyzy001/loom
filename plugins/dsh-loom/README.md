@@ -37,6 +37,10 @@ Token equality is supported by NodeIdentity ({token,access_token,node_token}) pe
 - Worker concurrency limit is Host-local and defaults to 1; it does not claim cross-machine scheduling authority.
 - No UI is contributed because none is needed for the M0 outbound worker. Slot registration/event renderers were not fabricated.
 
+## Observed model adapter catalog
+
+With the existing explicitly enabled `model_text_tasks` fixture route only, the DSH dispatcher reports a bounded `inventory.model_catalog` through the existing node heartbeat. It uses one cached public SDK `ctx.llm` inspection per dispatcher initialization, preserves the ordinary enrolled Worker/project-root facts, and does not invoke the prepared `stream`. See [MODEL_INVENTORY.md](MODEL_INVENTORY.md) for exact fields and `node tests/model-inventory/real-dsh.mjs` for the real isolated DSH + Concierge proof. This is observed adapter metadata, not a general model registry, cross-provider discovery, inference/right-to-use model authority, or download/activation support. Default-disabled, malformed/foreign selector, missing API/model, bad modality/context or failed preparation never invent a ready model. The paid/live LLM, production Credential Store and current `desktop` profile remain untouched.
+
 ## Unit verification without profile effects
 
 ```sh

@@ -432,6 +432,7 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
             "/candidates/{id}/replay",
             get(skill_replay).post(skill_replay_start),
         )
+        .route("/model-inventory", get(model_inventory))
         .route("/models", get(models))
         .route("/models/{id}/place", post(models))
         .route("/pipelines", get(list_pipelines).post(create_pipeline))
@@ -1118,6 +1119,63 @@ async fn node_inventory(
             "Cannot encode resource inventory",
         )
     })?))
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelInventorySelector {
+    node_id: Option<String>,
+    installation_id: Option<String>,
+    worker_id: Option<String>,
+}
+fn model_encoding() -> ApiError {
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "model_inventory_encoding",
+        "Cannot encode model observations",
+    )
+}
+async fn model_inventory(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Query(selector): axum::extract::Query<ModelInventorySelector>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    let now = chrono::Utc::now();
+    match (selector.node_id, selector.installation_id) {
+        (Some(node_id), Some(installation_id)) => {
+            let view = crate::model_inventory::inventory(
+                &store,
+                &node_id,
+                &installation_id,
+                selector.worker_id.as_deref().unwrap_or("default"),
+                now,
+            )
+            .map_err(|_| model_encoding())?;
+            serde_json::to_value(view)
+                .map(Json)
+                .map_err(|_| model_encoding())
+        }
+        (None, None) => {
+            let mut response =
+                crate::model_inventory::all(&store, now).map_err(|_| model_encoding())?;
+            if let Some(worker) = selector.worker_id {
+                response.observations.retain(|view| {
+                    view.worker_id == worker
+                        || view.models.is_empty()
+                            && view
+                                .findings
+                                .iter()
+                                .any(|finding| finding.state == "worker_mismatch")
+                });
+                response.models.retain(|model| model.worker_id == worker);
+            }
+            serde_json::to_value(response)
+                .map(Json)
+                .map_err(|_| model_encoding())
+        }
+        _ => Err(ApiError::bad(
+            "Select node_id and installation_id together for one exact model observation",
+        )),
+    }
 }
 pub(crate) async fn heartbeat(
     AppState(state): AppState<Arc<State>>,

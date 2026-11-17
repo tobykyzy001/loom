@@ -3,11 +3,13 @@ import { ref } from 'vue'
 import type { LoomNode } from '../api/types'
 import { capabilityName, formatTime, heartbeatStale, nodeConnected } from '../lib/format'
 import AppIcon from '../components/AppIcon.vue'
+import ModelInventorySection from '../components/ModelInventorySection.vue'
 import EmptyState from '../components/EmptyState.vue'
+import type { ModelInventoryData } from '../api/types'
 
 type Nodes = LoomNode[]
-defineProps<{ nodes: Nodes; busy?: boolean; loading?: boolean }>()
-const emit = defineEmits<{ enroll: [] }>()
+defineProps<{ nodes: Nodes; busy?: boolean; loading?: boolean; inventory?: ModelInventoryData | null; inventoryLoading?: boolean; inventoryError?: string }>()
+const emit = defineEmits<{ enroll: []; 'refresh-inventory': [] }>()
 const copied = ref(false)
 const copyError = ref(false)
 const enrollment = ref<{ code?: string; expires_at?: string } | null>(null)
@@ -78,6 +80,13 @@ defineExpose({ setEnrollment })
         </article>
       </div>
     </div>
+    <ModelInventorySection :inventory="inventory" :loading="inventoryLoading" :error="inventoryError" @refresh="emit('refresh-inventory')" />
     <div class="callout"><AppIcon name="help" :size="19" /><div><strong>需要添加设备？</strong><p>使用你自己的 Concierge 地址和一次性代码，在 Local Node / DSH Loom Plugin 中主动配对。Loom 不会扫描局域网、修改 DSH Profile 或远程执行安装。</p></div></div>
   </section>
 </template>
+<style scoped>
+.node-body { min-width: 0; }
+.node-heading { min-width: 0; overflow-wrap: anywhere; }
+.node-heading h3 { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.node-body > .mono { overflow-wrap: anywhere; word-break: break-all; }
+</style>

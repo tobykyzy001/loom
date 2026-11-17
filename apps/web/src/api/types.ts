@@ -324,6 +324,70 @@ export interface AuditEntry {
   details?: Record<string, unknown>
 }
 
+export interface ModelFinding { state: string; provider?: string; model?: string; observed_at?: string }
+export interface CatalogModel {
+  id: string
+  node_id: string
+  installation_id: string
+  worker_id: string
+  provider: string
+  model: string
+  catalogued: true
+  prepared_call_observed: true
+  generation_observed: false
+  input_modalities: ['text']
+  context_window?: number
+  source: 'host_reported'
+  observed_at: string
+  resource_state: 'adapter_observed' | 'unavailable' | string
+  activated: false
+  allowed: false
+  executable: false
+  controller_matches: true
+  read_source: 'authenticated_node_heartbeat'
+  freshness: 'fresh' | 'stale'
+}
+export interface ModelCatalogObservation {
+  schema: 'loom.model-inventory.v1'
+  revision: number
+  models: CatalogModel[]
+  findings: ModelFinding[]
+  resource_facts?: Array<Record<string, unknown>>
+  policy: ModelInventoryPolicy
+  confidence: string
+  node_id: string
+  installation_id: string
+  worker_id: string
+  read_source: 'authenticated_node_heartbeat'
+  lookup_source: string
+  controller_matches: boolean
+  permission_granted: false
+}
+export interface ModelInventoryPolicy {
+  schema: string
+  views?: string
+  supported_operations?: string[]
+  install_support?: string
+  activation_support?: string
+  download_support?: string
+  install: false
+  download: false
+  activation: false
+  generation: false
+  remote_delivery?: false
+  billing_effects?: false
+  universal_provider_registry?: false
+  not_supported?: string[]
+}
+export interface ModelInventoryData {
+  schema: 'loom.model-inventory.v1'
+  revision: number
+  models: CatalogModel[]
+  observations: ModelCatalogObservation[]
+  policy: ModelInventoryPolicy
+  policy_code: 'observed_only_not_activation'
+}
+
 export type InstallTargetStatus = 'pending_approval' | 'approved' | 'healthy_observed' | 'health_failed' | 'rollback_approved' | 'rolled_back_observed' | 'unknown' | 'not_selected' | 'incompatible'
 export type InstallOutcome = 'healthy' | 'health_failed' | 'connection_lost'
 export interface InstallTarget {

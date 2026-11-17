@@ -10,7 +10,7 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "files": ["index.js", "cordis.patch.yml", "lib", "src", "locale/*.json", "README.md", "icon.svg"],
+  "files": ["index.js", "cordis.patch.yml", "lib", "src", "locale/*.json", "README.md", "MODEL_INVENTORY.md", "icon.svg"],
   "engines": { "node": ">=22.0.0" },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "dependencies": {

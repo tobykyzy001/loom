@@ -18,7 +18,7 @@ import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
-import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget } from './state/workspace'
+import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
 import { grantOperationsSummary } from './lib/permissions'
 import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate, InstallOutcome, InstallPlan, InstallTarget } from './api/types'
@@ -57,6 +57,7 @@ function cancelConfirm() { confirmation.value = null; pendingAction.value = null
 function changePage(page: Page) {
   showMore.value = false
   navigate(page)
+  if (page === 'devices') void loadModelInventory()
   if (['devices', 'access', 'memories'].includes(page)) void loadResources()
   if (page === 'projects') void refresh()
   if (page === 'skills') void loadSkillEvidence()
@@ -136,6 +137,7 @@ function onVisibility() { if (document.visibilityState === 'visible') void refre
 onMounted(() => {
   void refresh()
   if (state.page === 'skills') void loadSkillEvidence()
+  if (state.page === 'devices') void loadModelInventory()
   if (state.page === 'plans') void loadInstallPlans()
   startPolling()
   document.addEventListener('visibilitychange', onVisibility)
@@ -174,7 +176,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
       <InstallPlansView v-else-if="state.page === 'plans'" :plans="state.installPlans" :policy="state.installPlanPolicy" :loading="state.busy.plans" :busy="state.busy['plan-write']" :error="state.errors['plan-write']" :read-error="state.errors.plans" @create="createPlan" @approve="approveTarget" @rollback="rollbackTarget" @observe="observeTarget" @refresh="void loadInstallPlans()" />
       <ActivityView v-else-if="state.page === 'activity'" :tickets="tickets" :projects="projects" :audit="state.audit" @select="selectTask" />
       <template v-else-if="state.page === 'devices'">
-        <DevicesView ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" @enroll="void enroll()" />
+        <DevicesView ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" :inventory="state.modelInventory" :inventory-loading="state.busy.models" :inventory-error="state.errors.models" @enroll="void enroll()" @refresh-inventory="void loadModelInventory()" />
         <p v-if="state.errors.enrollment" class="form-error" role="alert">{{ state.errors.enrollment }}</p>
       </template>
       <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy.preferences" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />

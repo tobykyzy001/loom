@@ -33,9 +33,10 @@ export class CoordinatorLoop {
     }
   }
   async pollCycle() {
-    const facts = this.runner?.registrationFacts?.(this.capabilities) || {}
+    const facts = await (this.executor.registrationFacts?.(this.capabilities) || this.runner?.registrationFacts?.(this.capabilities)) || {}
     const { workers, inventory } = facts
-    const outgoing = { status: this.workerCount ? 'busy' : 'online', capabilities: wireCapabilities(this.capabilities || []), ...(workers ? { workers } : {}), ...(inventory ? { inventory } : {}), signal: this.signal }
+    const outgoing = { status: this.workerCount ? 'busy' : 'online',
+      capabilities: wireCapabilities(this.capabilities || []), ...(workers ? { workers } : {}), ...(inventory ? { inventory } : {}), signal: this.signal }
     // The authenticated outbound body is verified by the real Coordinator; no test-only transport log.
     await this.client.heartbeat(outgoing)
     const delivered = await this.client.dispatchOutbox({ signal: this.signal })
@@ -103,8 +104,21 @@ export async function runLocalDshPlugin(config, dependency) {
   const context = await (dependency.createClient || createClient)({ ...config, request_timeout_ms: config.request_timeout_ms ?? config.requestTimeoutMs })
   const local = dependency.localDispatcher(config, context.runner)
   const executor = dependency.executor || local
+  // Exactly one bounded lookup per new executor before its first authenticated heartbeat.
+  await timeoutWithin(executor.initializeModelCatalog?.(), 5000, executor)
   const loop = new CoordinatorLoop(config, executor, context.client)
   loop.capabilities = executor.capabilities || context.capabilities
   loop.start()
   return loop
+}
+async function timeoutWithin(promise, milliseconds, executor) {
+  if (!promise) return
+  let timer
+  try {
+    await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Model adapter observation timed out')), milliseconds)
+      timer.unref()
+    })])
+  } catch { executor.modelCatalogLookupExpired?.() }
+  finally { clearTimeout(timer) }
 }

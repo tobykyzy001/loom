@@ -7,6 +7,7 @@ mod install_plan;
 pub mod inventory;
 pub mod inventory_probe;
 mod maintenance;
+mod model_inventory;
 mod model_observation;
 mod node_api;
 pub mod pipeline;

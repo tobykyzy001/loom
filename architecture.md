@@ -241,7 +241,7 @@ Host Agent
 
 缺少这类确切选择、公开adapter、文本模态或权限时必须拒绝，不能改成实际未知模型的“存在/激活”。`model_text_tasks` 默认关闭，按Guest profile明确启用配置且仍需每次正确OperationGrant。普通文档授予的 read/write 在这里不提供调用，另一侧文本模型也不产生文件effect；scope之外的tool可能file效果保留unknown而非自动成功。
 
-真实运行与限制见 [tests/harness/MODEL_TEXT.md](tests/harness/MODEL_TEXT.md)。整装的Registry、placement、activation、下载安装、实际模型质量和图像/跨机推理仍需另外实现与验收。
+真实运行与限制见 [tests/harness/MODEL_TEXT.md](tests/harness/MODEL_TEXT.md)。整装的Registry、placement、activation、下载安装、实际模型质量和图像/跨机推理仍需另外实现与验收。下面的 catalog 投影只表达当前 SDK 元数据，不是本次实际Artifact/Grant的替代品。
 
 ### 3.5 受限的 peer Artifact 直接取源
 
@@ -265,6 +265,16 @@ schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail�
 早期只有文件索引没有现存完整受限ModelMetadata的旧Artifact保持不补造此零散历史；否则仅以严格现状/原始字段记录这个信息缺口，不凭文件名或Goal假装知道做过什么。普通文件任务没有模型观察。 `GET /models`仍在full registry/lifecycle未提供的范围返回501，维护这项窄观察与全局Model Registry不能混淆；Text Result也没有原生文件副作用。
 
 实际DSH SDK生文本、中心接收、原始Grant/Artifact及恢复后读取由`tests/harness/real-model-text.mjs`验证。模型报告本身是宿主报告，不是Conci erge独立验证任意商业LLM；Stub并不收费或触网。提供方功能、资源生命周期和质量评价仍分别NOT RUN。原任务详情只展示这个边界明确的观察，没有管理模型或浏览器读取Profile/凭据。
+
+### 3.6.1 最新认证心跳的 SDK catalog 只读投影
+
+`GET /api/v1/model-inventory` 在普通管理员认证后读取最新已持久 Node heartbeat 的 `inventory.model_catalog`，不是新通用 model Registry。输入是严格 `loom.model-inventory.v1 / revision:1`：实际上下文 Worker、公开 `ctx.llm.listProviders/listModels/resolveModelInfo/prepareCall` 的来源、`host_reported` 和真实 RFC3339 观察时间。身份绑定已认证 Node Envelope 的 Node/Installation 和注册 Worker，不能用 body 自称另一身份、安装或 shadow worker。可选精确筛选不能扩大授权；原始 model body 不需要 node/installation 字段。
+
+只接纳已有的 `loom-stub/loom-stub-v1` 文字 SDK fixture：`resource_state: adapter_observed`，`prepared_call_observed:true`，`generation_observed:false`，`input_modalities:['text']`，可选 context window ≤1048576，以及 `install/download/activation/generation` 全 false 的 policy。控制器检查strict字段与有界lowercase标签；不额外原样转发未知key、key/token/credential/endpoint、prompt或主机信源声明。它输出稳定Node/Installation/Worker/provider/model摘要ID，`source: host_reported`，`read_source: authenticated_node_heartbeat`，自己的 `catalogued:true, controller_matches:true`，但强制 `activated:allowed:executable:false`。Common `inventory.resources` 另经既有 `normalize_reported_facts` 处理，不能因为模型条目而覆盖controller直接硬件观测。
+
+空models和合法 `requested_disabled`、`unsupported_*`、`lookup_*` finding是真实的“当前没有符合条件对象”，不是异常或旧模型presence。缺失/非法data、错误policy、unknown worker与错误scope分别输出missing/invalid和固定finding，不能沿用旧模型为当前fresh。观察时间与GET时间分离；现有heartbeat90秒阈值使`models[].freshness=stale`、`resource_state=unavailable`。重开沿用当前**schema v8**的Node inventory，所以不需要新表或migration; GET也不会重新accessSDK、provider、stream或grant一个model_text任务。API policy是`read_catalog_only`，download/install/activation/general_provider_registry/image_generation/model_execution_grants不支持，`/models`保持完整lifecycle未实现。
+
+签署Node的真实HTTP、负例与上线/缺失/恢复由`node tests/model-inventory/controller.mjs`要求验证；真实隔离DSH SDK一次prepareCall和stream/request零次由`node tests/model-inventory/real-dsh.mjs`另行实测。文本adapter观测绝不是任意付费模型、模型质量、下载安装、本地图片、通用provider execution、跨机或全M1完成证明。设备页已以`apps/web/src/components/ModelInventorySection.vue`呈现相同的认证投影，包含精确 Node/Worker、source/text modality、上下文窗口（token声明，不是内存bytes）与观察时间；读取只在进入设备页与用户手动刷新发生，未提供下载或激活操作。`node tests/model-inventory/browser.mjs`用真实签名 Node heartbeat 验证实际Vue请求与只读状态，长标识在390px换行，不改变已有Ticket/Grant/Node计数。它不是手机、生产目录管理或生成/安装能力。
 
 ### 3.7 受限技能候选与具体重放证明
 

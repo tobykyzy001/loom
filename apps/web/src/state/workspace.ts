@@ -1,14 +1,16 @@
 import { reactive, toRefs } from 'vue'
 import { ApiError, LoomClient } from '../api/client'
 import { auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
-import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, InstallObservationRequest, InstallTarget, InstallPlan, InstallPlanData, InstallPlanPolicy, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, Ticket } from '../api/types'
+import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, InstallObservationRequest, InstallTarget, InstallPlan, InstallPlanData, InstallPlanPolicy, ModelInventoryData, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, Ticket } from '../api/types'
 import { PAGE_KEY, TICKET_KEY, TOKEN_KEY, cachedExpanded, localRead, localWrite } from '../lib/storage'
 import { SkillActions, type SkillWorkspaceReference } from '../lib/skillActions'
 import { InstallPlanActions, type InstallPlanRefresh } from '../lib/installPlan'
+import { modelReadError, parseModelInventory } from '../lib/modelInventory'
 export interface WorkspaceState {
   page: Page
   installPlans: InstallPlan[]
   installPlanPolicy: InstallPlanPolicy | null
+  modelInventory: ModelInventoryData | null
   expanded: boolean
   selectedTicketId: string | null
   ticket: Ticket | null
@@ -34,7 +36,7 @@ const state = reactive<WorkspaceState>({
   expanded: cachedExpanded(),
   selectedTicketId: localRead(TICKET_KEY),
   ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], grants: [], audit: [], artifacts: {}, skillData: null,
-  installPlans: [], installPlanPolicy: null,
+  installPlans: [], installPlanPolicy: null, modelInventory: null,
   preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, busy: {}, errors: {},
 })
 const client = new LoomClient({ token: () => localRead(TOKEN_KEY) ?? '' })
@@ -344,6 +346,20 @@ export async function observeInstallTarget(plan: InstallPlan, target: InstallTar
     return false
   }
   return applyPlans(await run('plan-write', () => installActions.observe(plan, target, request, policy)))
+}
+
+export async function loadModelInventory(): Promise<boolean> {
+  const result = await run('models', async () => {
+    try {
+      const response = parseModelInventory(await client.get<unknown>('/model-inventory'))
+      if (!response) throw new Error('模型目录的响应不符合已支持的只读观察协议，未加载目录。')
+      state.modelInventory = response
+      return true
+    } catch (error) {
+      throw new Error(modelReadError(error))
+    }
+  })
+  return result !== undefined
 }
 
 export function useWorkspace() { return { state, ...toRefs(state) } }

@@ -3,6 +3,7 @@ import { canonical, sha256 } from '../src/util.js'
 import { stableArtifactId as stableUUID } from './ids.js'
 import { verifiedDelegation } from './verified-delegation.js'
 import { exactTextRoute, inspectTextRoute, validTextGrant, modelRef } from './model-policy.js'
+import { inspectModelCatalog, mergeModelCatalogFacts, emptyModelCatalog } from './model-inventory.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
@@ -10,6 +11,35 @@ export class DshDispatcher {
     this.runner = runner; this.adapter = adapter; this.config = config; this.active = new Map()
     // Capabilities describe Agent work; they are not a silent filesystem allowance.
     this.capabilities = ['dsh_agent_turn', 'read_summary', 'edit_file', ...(config.model_text_tasks ? ['model_text'] : [])] // Agent-presented operations; Grant remains separately enforced.
+  }
+  async initializeModelCatalog() {
+    try {
+      const worker_id = this.runner.registrationFacts?.(this.capabilities).workers?.[0]?.worker_id
+      this.modelCatalog = emptyModelCatalog(worker_id, 'worker_identity_unavailable')
+      if (!worker_id) throw new Error('No enrolled Worker facts for model catalog')
+      const configured = { ...this.config, actual_worker_id: worker_id }
+      // Configure the timeout marker before awaiting inspect; late metadata cannot promote a published failure.
+      this.modelCatalog = emptyModelCatalog(worker_id, configured.model_text_tasks === true ? 'lookup_pending' : 'requested_disabled')
+      if (configured.model_text_tasks !== true) this.modelCatalog = await inspectModelCatalog(this.adapter.ctx, configured)
+      if (configured.model_text_tasks === true) {
+        const observation = await inspectModelCatalog(this.adapter.ctx, configured)
+        // A timeout already published a bounded failure; late SDK metadata cannot silently become fresh readiness.
+        if (this.modelCatalog?.findings?.[0]?.state === 'lookup_pending') this.modelCatalog = observation
+      }
+    } catch {
+      this.modelCatalog = emptyModelCatalog(this.modelCatalog?.worker_id, 'lookup_failed')
+    }
+    return this.modelCatalog
+  }
+  modelCatalogLookupExpired() {
+    if (this.modelCatalog?.findings?.[0]?.state === 'lookup_pending') {
+      this.modelCatalog = emptyModelCatalog(this.modelCatalog.worker_id, 'lookup_unavailable')
+    }
+  }
+  registrationFacts(capabilities) {
+    const base = this.runner.registrationFacts?.(capabilities)
+    if (!base || !this.modelCatalog || this.modelCatalog.worker_id !== base.workers?.[0]?.worker_id) return base
+    return mergeModelCatalogFacts(base, this.modelCatalog)
   }
   sessionRefs() { return [...this.adapter.sequence.entries()].map(([assignment_id, record]) => ({ assignment_id, ...this.adapter.sessionRef(record.agent.session) })) }
   async canExecute(assignment) {
