@@ -69,6 +69,18 @@ describe('typed resource facts view', () => {
   })
 })
 
+describe('credential recovery presentation', () => {
+  it('renders verification in progress and preserves masked credential input', async () => {
+    const ConnectionDialog = (await import('../src/components/ConnectionDialog.vue')).default
+    const html = await render(ConnectionDialog, { checking: true, error: '凭证验证失败' })
+    expect(html).toContain('正在验证连接…')
+    expect(html).toContain('type="password"')
+    expect(html).toContain('凭证验证失败')
+    expect(html).toContain('disabled')
+    expect(html).toContain('只有受保护读取通过后')
+   })
+})
+
 describe('static expert inspection anchors', () => {
   it('shows how read_write is communicated on the create form, not only in the confirmation', () => {
     expect(sources.AccessView).toContain("'read_write'")

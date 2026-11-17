@@ -16,7 +16,7 @@
 | `roadmap.md` | 当前实际状态、M0 起的实现顺序、每项范围与场景验收、尚未决定的问题 | 每次功能边界或完成状态变化时更新；不把愿景和架构全文搬入，只给出处与可验证证据 |
 | `docs/BARE_PACKAGE.md` | **当前架构**Bare Host 二进制打包候选的真实构建、复制/拒绝校验与独立原生流程证据 | 只记录本机实际生成与执行的有限验收入口，不把它扩张成安装器、跨平台或远程部署承诺 |
 | `testing.md` | 1 Concierge + 3 Node 的容器拓扑、单元 / 协议 / 宿主 / 回放 / Live LLM 分层、硬断言、Token 预算与 CI 触发 | 增加测试模式、Fixture、模型成本、验收口径或 CI 时更新；只有真实运行过才记录 PASS，未执行不可写成已验证 |
-| `tests/runner/README.md` | LocalNode 启动取消/注册凭据恢复、持久 admission、内容稳定回执、HTTP限流、读写取消与真实回放的验证入口与限制 | 只在这些围栏、输入快照和 receipt/耐久恢复契约改变时更新；区分 SyntheticCoordinator、本地文件、真实socket和真实DSH，不替代多机验收 |
+| `tests/runner/README.md` | LocalNode 启动取消/注册凭据恢复、持久 admission、内容稳定回执、HTTP限流、首达预取消、篡改/缺digest负例与真实回放的验证入口和限制 | 只在这些围栏、输入快照和 receipt/耐久恢复契约改变时更新；区分 SyntheticCoordinator、本地文件、真实socket和真实DSH，不替代多机验收 |
 | `tests/observations/README.md` | 受限 MemoryObservation 的来源/审阅证据、本地真实HTTP/浏览器入口和边界 | 只在来源/审阅契约、关联存储或验收变化时更新；不代替完整习惯学习架构 |
 
 ### 1.2 开始工作的阅读顺序

@@ -58,4 +58,65 @@ describe('LoomClient protocol and credential boundaries', () => {
     await errorClient.get(`/tickets/${encodeURIComponent('id/other')}/artifacts/${encodeURIComponent('artifact id')}`)
     expect(fetch.mock.calls[0][0]).toBe('/api/v1/tickets/id%2Fother/artifacts/artifact%20id')
   })
+
+  it('does not validate the replaced credential result or old 401 as current workspace data', async () => {
+    let epoch = 1
+    let release!: (value: Response) => void
+    const pending = new Promise<Response>(resolve => { release = resolve })
+    const fetch = vi.fn().mockImplementation(async () => pending)
+    const client = new LoomClient({ fetch, token: () => 'initial-credential', credentialEpoch: () => epoch })
+    const read = client.get('/tickets')
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+    epoch++
+    release(json({ tickets: [{ id: 'old-data' }] }))
+    const superseded = await catchApiError(read)
+    expect(superseded.code).toBe('credential_epoch_changed')
+    expect(superseded.status).toBe(0)
+
+    let failed!: (value: Response) => void
+    const unauthorizing = new Promise<Response>(resolve => { failed = resolve })
+    fetch.mockImplementation(async () => unauthorizing)
+    const unauthenticated = client.get('/projects')
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    epoch++
+    failed(json({ error: { code: 'unauthorized', message: 'stale token' } }, 401))
+    expect((await catchApiError(unauthenticated)).code).toBe('credential_epoch_changed')
+  })
+
+  it('also rejects a read when the underlying stored token changed without an explicit epoch', async () => {
+    let epoch = 3
+    let token = 'stored-before-rotation'
+    let finish!: (response: Response) => void
+    const changed = new Promise<Response>(resolve => { finish = resolve })
+    const client = new LoomClient({ token: () => token, credentialEpoch: () => epoch,
+      fetch: vi.fn().mockImplementation(async () => changed) })
+    const read = client.get('/projects')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    token = 'stored-by-another-tab'
+    finish(json({ projects: [] }))
+    await expect(read).rejects.toMatchObject({ code: 'credential_epoch_changed', status: 0 })
+  })
+
+  it('preserves epoch invalidation when the credential changes while decoding JSON', async () => {
+    let token = 'before-decode'
+    const response = json({ tickets: [{ id: 'older-owned-snapshot' }] })
+    response.json = async () => {
+      token = 'changed-during-json-decode'
+      return { tickets: [{ id: 'older-owned-snapshot' }] }
+    }
+    const client = new LoomClient({ token: () => token, credentialEpoch: () => 4, fetch: vi.fn().mockResolvedValue(response) })
+    await expect(client.get('/tickets')).rejects.toMatchObject({ code: 'credential_epoch_changed', status: 0 })
+  })
+
+  it('keeps a real accepted write receipt when credentials change, without inventing a rollback', async () => {
+    let epoch = 0
+    let release!: (value: Response) => void
+    const pending = new Promise<Response>(resolve => { release = resolve })
+    const result = new LoomClient({ fetch: vi.fn().mockImplementation(async () => pending), token: () => 'operator', credentialEpoch: () => epoch })
+      .post('/tickets/ticket-1/cancel', {})
+    await new Promise(resolve => setTimeout(resolve, 0))
+    epoch++
+    release(json({ status: 'cancel_requested', effect_outcome: 'still_unresolved' }))
+    await expect(result).resolves.toEqual({ status: 'cancel_requested', effect_outcome: 'still_unresolved' })
+  })
 })

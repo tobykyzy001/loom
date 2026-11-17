@@ -15,17 +15,20 @@ export function admissionFence(previous, assignment) {
 
 export function cancellationFence(previous, assignment, active = undefined) {
   if (previous === undefined) return 'missing_previous_assignment'
+  // A live immutable snapshot is checked before any independently altered durable frame.
+  // It must never be reconstructed from a diverged later cancellation payload.
+  if (active !== undefined) {
+    const { grant: _activeGrant, ...admittedActive } = active
+    const { grant: _previousGrant, ...admittedPrevious } = previous
+    if (!sameAuthorizedAssignment(admittedActive, admittedPrevious)) return 'active_assignment_mismatch'
+  }
   const stale = admissionFence(previous, assignment)
   if (stale) return stale
-  // Current Grant fields (especially revoked_at) are not the admitted work's immutable facts.
-  // Matching the previously admitted assignment and immutable work still permits a stop after revocation.
+  // Current Grant fields are not immutable work. A matching admitted frame can be
+  // stopped after revocation, but divergent task input still cannot produce a stop.
   const { cancel_requested: _previousCancel, grant: _previousGrant, ...admitted } = previous
   const { cancel_requested: _receivedCancel, grant: _receivedGrant, ...received } = assignment
   if (!sameAuthorizedAssignment(admitted, received)) return 'cancellation_assignment_mismatch'
-  if (active !== undefined) {
-    const { grant: _activeGrant, ...admittedActive } = active
-    if (!sameAuthorizedAssignment(admittedActive, received)) return 'active_assignment_mismatch'
-  }
   return null
 }
 
@@ -68,6 +71,24 @@ export function rejectionFingerprint(assignment) {
     assignment_id: assignment.id,
     lease_epoch: assignment.lease_epoch,
     grant_digest: assignment.grant_digest || assignment.grant?.grant_digest || assignment.grant?.digest,
+  }))
+}
+
+/** Context for local rejection dedup only. It is not a Grant or a terminal task receipt.
+ * Current grant status and Lease expiry views do not become immutable work by being included.
+ */
+export function rejectionInputDigest(assignment) {
+  return sha256(canonical({
+    assignment_id: assignment.id, ticket_id: assignment.ticket_id,
+    node_id: assignment.node_id, installation_id: assignment.installation_id,
+    worker_id: assignment.worker_id, project_id: assignment.project_id,
+    kind: assignment.kind, relative_path: assignment.relative_path, content: assignment.content,
+    objective: assignment.objective,
+    lease_epoch: assignment.lease_epoch,
+    grant_id: assignment.grant_id || assignment.grant?.id,
+    grant_version: assignment.grant_version ?? assignment.grant?.version,
+    grant_digest: assignment.grant_digest || assignment.grant?.grant_digest || assignment.grant?.digest,
+    project_root: assignment.grant?.project_root || assignment.grant?.root,
   }))
 }
 

@@ -90,7 +90,7 @@ Enrollment code 仅 child environment 传输；重启没有新 code，使用真�
 - Report/Artifact 的逻辑内容生成稳定的64-hex receipt identity，改变 bytes/state/evidence不得共用。实际 Rust Concierge 的 HTTP 200 已知提交却从客户端隐藏的响应，在等待真实的持久化重试退避 后，按原request body、digest与immutable bytes回放。事前和事后的中心API、owned SQLite request/receipt、Artifact/report/effect/audit数量及其关联都查看；执行器仍恰好一次，文件hash/inode/time不变，central audit chain 為 true。
 - 对真正的 pending file operation，stop 会匹配并触发该 entry，而不是只查找无关系的 runner Map。真实 gated write 随后产生所指文件、byte-backed confirmed Effect，但任务结果保持 unknown 和其无confirmed cancel acknowledgement，不冒充已取消或已成功回滚。这证明局部文件停止竞赛，不存在“generic file abort exactly-once”保证。
 - 真实 DSH 生命周期额外验证取消 acknowledgement：公开 Agent cancel 确实到达、真实 `turn/end` reason aborted、last report cancel_acknowledged=true，并在 owned centre SQLite 同一 Assignment 上看到非空 `acknowledged_at` 与 `last_report_at`。Host再次启动可以真正resume原Session。`cancel_requested` 与兼容 `cancellation` 均只在同一stop intent下设置，不编造Task完成。Live model继续 NOT RUN (zero-network Stub)。
-- 相关当前状态：Node client 22、vendored plugin 55、Vue 44 + typecheck/build；Rust workspace/严格clippy、真实scoped Credential inspect/revoke/unseeded missing、固定SDK model binding、Skill replay和原生Bare flow都分别验证。它们各自有边界，不能覆盖生产模型/provider注册激活、其他host凭证、TLS远程两机、移动锁屏/杀进程或不相关pipeline。1+3 Compose按用户明确方向继续推迟。
+- 相关当前状态：Node client 22、vendored plugin 55、Vue 54 + typecheck/build；Rust workspace/严格clippy、真实scoped Credential inspect/revoke/unseeded missing、固定SDK model binding、Skill replay和原生Bare flow都分别验证。它们各自有边界，不能覆盖生产模型/provider注册激活、其他host凭证、TLS远程两机、移动锁屏/杀进程或不相关pipeline。1+3 Compose按用户明确方向继续推迟。
 
 严格保存 failed candidates 的原始原因：当首版错误对当前poll整张view做canonical比较时，实际取消使用 lease窗口变化及当前状态投影，停止发生之前就会被拒绝。已依据真实Host纠错，而非把校验删掉或者生成假的"未知effect"报告。还存在两处易判错的量具：第一层计数 spy 外又包等待用的spy会重复点算，Artifact序列化 container hash 不等于目标文件hash；均已单独修正，不把相同工具调用解释为两次工具副作用。
 
@@ -101,6 +101,16 @@ Enrollment code 仅 child environment 传输；重启没有新 code，使用真�
 可选startup AbortSignal贯穿 `LocalNodeRunner.start/create`、Coordinator `createClient`及`runLocalDshPlugin`的显式生命周期参数。普通插件activate不带signal仍保持原有路径，Zodconfig不含AbortSignal，未宣称Cordis全部启动effect 能来自未知API自动停止。catalog等待使用既有5秒超时，在自有约5003ms观测中将超时的expiry状态和后续caller abort区分，取消不启动Coordinator。 underlying SDK pending operation 不称已被取消或回滚。
 
 完整场景入口[`tests/runner/startup-cancellation.mjs`](../runner/startup-cancellation.mjs)，覆盖各自owned NodeIdentity/NodeState、分阶段中断、空/错身份、注册过程取消、token已持久取消、工厂布点、固定deadline与同Node重连。不改变正在执行的tool effect、SDK会话、中心Schema/Grant/Lease。此前的真实DSH安装/工作/文件效果/cancel确认/resume和全部单元仍分别执行验证，而不是采用启动小探测代替整个生命周期。
+
+## 认证恢复与首达预取消闭合证据
+
+- **Web 401 恢复**不再以保存按钮或缓存列表验证认证。读取启动时以epoch和token值建立上下文；旧成功响应或401不能覆盖新的工作区，合法写操作已收到的中心回执也不被伪装成未发生。401与offline不同，已加载信息明确显示为早前快照；未认证状态下不发新Ticket/Grant等写操作，错误候选不替换存储token，只有当前工作空间的protected reads 通过才保存、关闭设置并重载。嵌套的审计/偏好遇到401或epoch变化也上抛，不伪造成空的、已验证新session 的数据。源见 [`apps/web/src/state/workspace.ts`](../../apps/web/src/state/workspace.ts)；普通暂时不可读偏好/审计仍可保留具体警告。
+- 实际standalone Edge+真Rust完成读写、真实文件效果、中央cancel后，替换owned SQLite `client_token_hash`使旧token真的401。验证关闭失败设置、未认证新作业不落库、candidate不保存、正确candidate的protected reads 通过后恢复同一个已取消票及真实ackreport，零新Artifact/Effect。入口为`tests/browser/run.mjs`，并使用真实生产Vue；另有 `--narrow-viewport` 验证，但只是桌面390x844仿真，不是真手机。
+- **首达预取消**：遇到过`missing_previous_assignment`后，先按实际Assignment、Grant、Worker/Node/kind/root验明至特定文件工作范围，再原子写Assignment与local completion (`execution_started:false`)，不把`once()` 的running占位冒充实际执行。范围不等于任意model/provider/credential停止支持；普通执行的lease与Grant有效性不放宽，非法Lease/expiry及其他 node依旧拒绝。
+- 两Runner实达Completion 后统一按`assignment_id/epoch/grant_version`形成摘要，完整fence先于never-started 重放，因此篡改Grant或path不能搭已存取消便车。首达输入缺`grant_version`时补位由**已核验的Grant.version**提供（若selfasse tion字段已有且不符本Grant已在更早阶段拒绝），后续普通work比较可保持同一snapshot。源ADT延续现worker映射、projectRoots、realpath/home/root限制，无一处允许user selftest token创造新Grant schema。真正 Report 另需outbox交付，不能只看到这里返回 cancel_acknowledged状态就宣称中心已经取消成功。
+- `cancel-before-admission.mjs`两Runner以真实Rust发起两次局部合法stop，实际valid worker/Grant/root范围与丢失version的正规Admission 均可重开、中心cancel_report已到达，同时executor调用0、Artifact为空和目标文件仍是ENOENT。反例另有篡改Grant/path、错node、digest和非法expiry，terminal dedup需要原因和input context 完全相符。缺digest有序Legacy preserves并附current_context_unverified，既不伪装已验证新scope，也不盲发连接ack。
+- `prestart-replay.mjs` 明确是 Synthetic HTTP Coordinator（**非DSH Host**），先实际受理Report 再把响应隐匿给客户端。等待原有outbox的`next_attempt_at`到期，新Runner读回同一completion并收到实际`duplicate:true`。此外真实Rust对相同取消完成的二次上报，也由outbox/requestId与**实际response.duplicate**确认，中心仍只有原Report和零Artifact，不重新执行文件效果，不是请求前就假称已回放。真实DSH生命周期、bundle preflight、 scoped credential与固定SDK model等各自在当前owned fixture中通过；仍不证明跨主机或exactly-once。
+- **活跃Frame不能因新首达取消捷径被绕过**：同一个active snapshot与先前admitted frame按相同Grant view比较，再对它的work和Grant授权摘要验签。Grant可见的撤销后仍能停止原已认领作业，但durable被其他内容或active frame改写照样拒绝，不会中止错误的Controller controller。实际文件效果late后不确定结算保持unknown，非把cancelled标签用于冲洗发生的效果。入口为`cancel-active-fence.mjs`及`coordinator-admission.mjs`。
 
 ## HTTP流式读取与可挂断输入专项
 

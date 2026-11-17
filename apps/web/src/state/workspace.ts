@@ -26,6 +26,7 @@ export interface WorkspaceState {
   preferences: Preferences
   skillData: SkillWorkspaceData | null
   connected: boolean | null
+  credentialState: 'unknown' | 'checking' | 'valid' | 'required'
   busy: Record<string, boolean>
   errors: Record<string, string>
 }
@@ -38,28 +39,58 @@ const state = reactive<WorkspaceState>({
   selectedTicketId: localRead(TICKET_KEY),
   ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], candidateMemories: null, grants: [], audit: [], artifacts: {}, skillData: null,
   installPlans: [], installPlanPolicy: null, modelInventory: null,
-  preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, busy: {}, errors: {},
+  preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, credentialState: 'unknown', busy: {}, errors: {},
 })
-const client = new LoomClient({ token: () => localRead(TOKEN_KEY) ?? '' })
+let credentialEpoch = 0
+let credentialCandidate: string | null = null
+let authentication: Promise<boolean> | null = null
+const client = new LoomClient({
+  token: () => credentialCandidate ?? localRead(TOKEN_KEY) ?? '',
+  credentialEpoch: () => credentialEpoch,
+})
 const skillActions = new SkillActions(client)
 const installActions = new InstallPlanActions(client)
 let detailVersion = 0
 let refreshInFlight: Promise<void> | null = null
+function rethrowCredentialFailure(error: unknown): void {
+  if (error instanceof ApiError && (error.status === 401 || error.code === 'credential_epoch_changed')) throw error
+}
 let poll: ReturnType<typeof setInterval> | undefined
+
+const writesNeedingCredentials = new Set(['project', 'composer', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'preferences', 'enrollment'])
 
 async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefined> {
   if (state.busy[key]) return undefined
+  if (writesNeedingCredentials.has(key) && state.credentialState !== 'valid') {
+    state.errors[key] = '请先完成连接认证，再发起这个操作。旧任务未被取消，新的执行也未被创建。'
+    return undefined
+  }
+  const epoch = credentialEpoch
   state.busy[key] = true
   state.errors[key] = ''
   try {
     const result = await action()
-    if (result !== false) state.connected = true
+    if (epoch !== credentialEpoch) return result
+    if (result !== false && state.credentialState !== 'required') {
+      if (key === 'workspace') state.errors.workspace = ''
+      state.connected = true
+      if (!authentication || key === 'workspace') state.credentialState = 'valid'
+    }
     return result
   } catch (error) {
+    if (epoch !== credentialEpoch || (error instanceof ApiError && error.code === 'credential_epoch_changed')) return undefined
     state.errors[key] = error instanceof Error ? error.message : '操作未完成，请稍后重试。'
     if (error instanceof ApiError) {
-      if (error.status === 0) state.connected = false
-      // HTTP 401 is expired credentials, not a reachable/online worker status.
+      if (error.status === 0) {
+        state.connected = false
+        state.credentialState = 'unknown'
+      }
+      if (error.status === 401) {
+        // Protected data is not verified merely because it is cached locally.
+        state.credentialState = 'required'
+        state.connected = null
+        state.errors[key] = '客户端凭据已失效。请更新连接设置；已加载的任务仅是先前快照，不能当作最新状态。'
+      }
     }
     return undefined
   } finally { state.busy[key] = false }
@@ -83,8 +114,9 @@ async function readPreferences(ticketId?: string) {
   state.expanded = cachedExpanded(ticketId)
   state.preferences = { expanded: state.expanded, sender_filter: null }
   state.errors.preferences = ''
-  try { await fetchPreferences(ticketId) } catch {
-    // A cached display preference may be used, but never masks Ticket status.
+  try { await fetchPreferences(ticketId) } catch (error) {
+    rethrowCredentialFailure(error)
+    // Other display-only degradations do not rewrite Ticket state or hide an auth failure.
     state.errors.preferences = '显示偏好暂不可用，正在使用本地显示设置。'
   }
 }
@@ -114,7 +146,10 @@ export async function selectTicket(id: string, page: Page = 'conversation') {
       const value = await client.get<unknown>(`/audit?ticket_id=${encodeURIComponent(id)}`)
       state.audit = auditFrom(value)
       state.errors.audit = ''
-    } catch { state.audit = []; state.errors.audit = '此任务的审计暂不可用，不能据此认定没有审计记录。' }
+    } catch (error) {
+      rethrowCredentialFailure(error)
+      state.audit = []; state.errors.audit = '此任务的审计暂不可用，不能据此认定没有审计记录。'
+    }
   })
 }
 
@@ -142,7 +177,10 @@ export async function refreshWorkspace() {
         const value = await client.get<unknown>(`/audit?ticket_id=${encodeURIComponent(id)}`)
         state.audit = auditFrom(value)
         state.errors.audit = ''
-      } catch { state.audit = []; state.errors.audit = '此任务的审计暂不可用，不能据此认定没有审计记录。' }
+      } catch (error) {
+        rethrowCredentialFailure(error)
+        state.audit = []; state.errors.audit = '此任务的审计暂不可用，不能据此认定没有审计记录。'
+      }
     } else {
       detailVersion++
       localWrite(TICKET_KEY, null)
@@ -159,12 +197,41 @@ export function refresh() {
   return refreshInFlight
 }
 
+/** Validate a candidate using actual protected reads before committing it to local storage.
+ * After the previous read settles, the candidate must pass actual protected reads before saving.
+ * Verified write receipts remain controller facts even if credentials change while refreshing them.
+ */
+function credentialIsValid(): boolean { return state.credentialState === 'valid' }
+
+export function reconnect(token: string): Promise<boolean> {
+  if (authentication) return authentication
+  authentication = (async () => {
+    const candidate = token.trim()
+    credentialEpoch++
+    credentialCandidate = candidate
+    state.credentialState = 'checking'
+    state.connected = null
+    if (refreshInFlight) await refreshInFlight
+    try {
+      await refresh()
+      if (!credentialIsValid()) return false
+      localWrite(TOKEN_KEY, candidate || null)
+      state.errors.workspace = ''
+      return true
+    } finally {
+      credentialCandidate = null
+      credentialEpoch++
+    }
+  })().finally(() => { authentication = null })
+  return authentication
+}
+
 export function startPolling() {
   stopPolling()
   poll = setInterval(() => {
     const id = state.selectedTicketId
     const status = state.ticket?.status
-    if (document.visibilityState === 'visible' && state.page === 'conversation' && id && status && ['pending', 'running', 'waiting_approval', 'cancel_requested', 'reconciling'].includes(status)) {
+    if (state.credentialState !== 'required' && document.visibilityState === 'visible' && state.page === 'conversation' && id && status && ['pending', 'running', 'waiting_approval', 'cancel_requested', 'reconciling'].includes(status)) {
       void run('background', async () => {
         await loadTicket(id)
         const index = state.tickets.findIndex(ticket => ticket.id === id)

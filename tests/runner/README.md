@@ -58,6 +58,24 @@ node tests/runner/startup-cancellation.mjs
 
 此专项还覆盖预检/identity/state 的真实中点等待，以及 timeout和后续caller stop的区分。多次计时误导（漏传signal/fetch、raw public key缺 SPKI包装、5秒未ref定时器退出）均作为量具问题修正，不以撤销断言或删除负例试出PASS；只由自然退出与每个实际的中央响应/保存形态认证证据。
 
+## 首次预取消与完成回放
+
+```sh
+node tests/runner/cancel-before-admission.mjs
+node tests/runner/prestart-replay.mjs
+```
+
+- 真实Rust中心的 `cancel-before-admission` 直接验证：对合法、还没来过Node的预取消Assignment，先通过具体Grant /node/worker/project root /kind/stop intent核验，然后形成**原assignment与取消完成一起保存**的事实。现在 `execution_started:false`、取消ack和digest在state中可重开恢复，不把先存running误当成实际执行。
+- 目前只覆盖受控的 `read_summary`、`edit_file`、`model_descriptor` 文件类工作，root/realpath及worker身份不豁免。dsh不再调用一个假想的`assertApprovedRoot()`；它实际比配`registration.project_roots`。`model_text`、`credential_ref`等仍有各自的placement、binding和scope要求，不在这笔首次预取消支持声明里，也不冒用'未启动SDK调用'创造更强的取消能力。
+- 普通执行的过期lease与撤销Grant仍严格拒绝；stop-only分支仅延缓这项允许性判断到取消时，**不延长lease或给未启动Grant新执行权**。无效 expiry格式仍需拒绝。非过去的授权或另一个node/digest/worker的错误不能从取消通道成为允许事项。
+- 如果已经有completion或当前promise 数据，则不能冠以新的 never-started；活跃worker 进入真实executor.cancel与Report。Controller 中 active/diverged snapshot 的匹配只在相同授权视角下进行，Grant撤销是停止原先被受理作业的分开投影，不是对新执行的复活。正常执行效果和unknown effect继续保留实际来源。
+- `prestart-replay`另以 owned SyntheticCoordinator + LocalFileDispatcher/CoordinatorLoop（**并非DSH Host**）验证，真实center提交首份cancel report后，**再丢弃客户端的响应**，让持久outbox及确实到期后的交付得以复现。同一个取消完成、稳定request/receipt ID在重开后重新交付，中心确实报告 `duplicate:true`，未重新执行file effect，没有自动生成假Artifact。
+- 本地rejections按每个assignment/epoch/grant fingerprint保持源幂等性，并在route内部记录work input/context digest。scope/reason/input不匹配时，不允许旧quarantine遮蔽本次真正非法的node、Grant或expiry。terminal去重必须**reason与input_digest全匹配**；旧缺digest的记录不能被用来证明新的scope完全成立，只保留历史并返回`current_context_unverified`，不重发新ack。不扩大Grant，不写中心Schema或伪造Ticket状态。
+- 协调器已有pending与adapter.active均为可追踪的在途语境，但不是一个任意Grant赦免。停止前仍需同durable immutable frame；普通任务允许先有preflight.active，之后再做durable admission，不能误用停止分支的history-loss守卫拦住它。已有model binding cancellation恢复为一个producer/cancel/report，与真SDK寄宿验证同时保留。
+- **live vs durable**  Check：先读取active，不因durable缺失而让实际上已运行状态获得never-started完成。`durable缺失 + active存在` 必须保留missing-previous隔离。`cancel-active-fence.mjs`与`coordinator-admission.mjs`都在原blocked work里删除durable/recovery，保证零伪造完成，原controller/effect继续按真实历史，不允许仅凭pending Promise 缺失就把已有work说成没执行。
+- 合法的never-started回放始终先过完整 `cancellationFence` 和原始work比较，main与vendored都按 `assignment_id/lease_epoch/grant_version`形成和应用恢复摘要。具有相同ID/epoch但修改Grant、内容或path的取消不能越过这条围栏。
+- 这些场景不称未知作业取消成立，也不声称已运行操作总能被撤回、SDK callback一定被取消、异常 effects 为零或全局 exactly-once。真实 DSH、Rust/Credential 等由各自独立harness验证。
+
 ## 实际 Rust 中心的丢失响应回放
 
 ```sh

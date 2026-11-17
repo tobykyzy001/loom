@@ -7,7 +7,7 @@ export const CAPABILITIES = Object.freeze([
 ])
 const operations = new Set(['read_summary', 'edit_file', 'model_descriptor'])
 /** Local fence validates the exact issued project/operation; it does not invent a grant from capability alone. */
-export function validateAssignment(assignment, grant, identity, { now = Date.now() } = {}) {
+export function validateAssignment(assignment, grant, identity, { now = Date.now(), forCancellation = false } = {}) {
   assertObject(assignment, 'assignment')
   for (const key of ['id', 'ticket_id', 'node_id', 'lease_id']) assertIdentifier(assignment[key], `assignment.${key}`)
   for (const key of ['lease_epoch', 'attempt']) {
@@ -17,13 +17,13 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
   if (identity.installation_id && assignment.installation_id && assignment.installation_id !== identity.installation_id) {
     throw new Error('Assignment installation does not match this installation')
   }
-  if (!Number.isFinite(Date.parse(assignment.lease_expires_at)) || Date.parse(assignment.lease_expires_at) <= now) {
+  if (!Number.isFinite(Date.parse(assignment.lease_expires_at)) || (!forCancellation && Date.parse(assignment.lease_expires_at) <= now)) {
     throw new Error('Assignment lease expired or has invalid expiry')
   }
   assertObject(grant, 'grant')
   assertIdentifier(grant.id, 'grant.id')
   if (!Number.isSafeInteger(grant.version) || grant.version <= 0) throw new Error('Grant version is invalid')
-  if (grant.revoked_at) throw new Error('Grant is revoked')
+  if (!forCancellation && grant.revoked_at) throw new Error('Grant is revoked')
   if (assignment.grant_version !== undefined && assignment.grant_version !== grant.version) throw new Error('Assignment does not match Grant version')
   const gid = grant.grant_id || grant.id
   const expected = assignment.grant_digest || grant.grant_digest || grant.digest
@@ -31,6 +31,7 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
   if (typeof expected !== 'string' || typeof suppliedDigest !== 'string' || expected !== suppliedDigest) {
     throw new Error('No verifiable center-issued Grant digest')
   }
+  if (forCancellation && !operations.has(assignment.kind)) throw new Error('Pre-start cancellation is currently limited to authorized file work')
   if (!operations.has(assignment.kind)) throw new Error('Unsupported assignment kind')
   if (assignment.kind === 'model_descriptor' && assignment.relative_path !== 'model.json') {
     throw new Error('model_descriptor requires an explicit model.json read target')
@@ -43,8 +44,8 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
   if (grant.node_id && grant.node_id !== 'auto' && grant.node_id !== assignment.node_id) throw new Error('Grant belongs to another node')
   if (grant.installation_id && grant.installation_id !== '*' && grant.installation_id !== identity.installation_id) throw new Error('Grant belongs to a different installation')
   if (grant.worker_id && grant.worker_id !== assignment.worker_id) throw new Error('Grant worker scope mismatch')
-  if (grant.revoked_at) throw new Error('Grant is revoked')
-  if (grant.expires_at && Date.parse(grant.expires_at) <= now) throw new Error('Grant is expired')
+  if (!forCancellation && grant.revoked_at) throw new Error('Grant is revoked')
+  if (!forCancellation && grant.expires_at && Date.parse(grant.expires_at) <= now) throw new Error('Grant is expired')
   return { ...assignment, grant_id: gid, ... (!assignment.grant_digest ? { grant_digest: expected } : {}) }
 }
 export function envelope(identity, requestId) {

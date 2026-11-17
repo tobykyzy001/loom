@@ -105,11 +105,11 @@ async function prove(name, Runner, Identity, State) {
     assert.deepEqual(rejectionState.completions[original.id], originalCompletion)
 
     const unknownId = 'unknown-local-assignment'
-    pose(reopened, { ...original, id: unknownId, cancel_requested: true })
+    pose(reopened, { ...original, id: unknownId, node_id: 'f'.repeat(64), cancel_requested: true })
     reopened.report = noReport
     const unknown = await reopened.pollAndRun()
     assert.equal(unknown.status, 'fenced')
-    assert.equal(unknown.rejection.reason, 'missing_previous_assignment')
+    assert.equal(unknown.rejection.reason, 'Assignment belongs to a different node')
     assert.equal(unknown.rejection.assignment_id, unknownId)
     assert.equal(Object.hasOwn(reopened.state.data.assignments, unknownId), false, 'No {...undefined} durable assignment')
     assert.equal(Object.hasOwn(reopened.state.data.completions, unknownId), false)
@@ -185,6 +185,7 @@ async function prove(name, Runner, Identity, State) {
       const execution = activeRunner.pollAndRun().finally(() => { executing = false })
       await entered
       const activeSnapshot = durable(activeRunner.state.data.assignments[activeAssignment.id])
+      const originalInputBytes = await readFile(join(activeProject.root, 'input.txt'), 'utf8')
       assert.equal(executing, true, 'The first real execution is still pending')
       const activeController = activeRunner.active.get(activeAssignment.id)
       assert.ok(activeController instanceof AbortController)
@@ -253,7 +254,19 @@ async function prove(name, Runner, Identity, State) {
       const racedSnapshot = await disk(activeStateDir)
       assert.equal(racedSnapshot.assignments[activeAssignment.id].content, 'late altered durable frame')
       assert.equal(racedSnapshot.completions[activeAssignment.id].digest, heldDisk.completions[activeAssignment.id].digest)
-      await activeRunner.state.mutate(data => { data.assignments[activeAssignment.id] = activeSnapshot })
+      await activeRunner.state.mutate(data => { delete data.assignments[activeAssignment.id]; delete data.completions[activeAssignment.id] })
+      activePose({ ...activeAssignment, cancel_requested: true })
+      const liveButMissingDurable = await activeRunner.pollAndRun()
+      assert.equal(liveButMissingDurable.status, 'fenced')
+      assert.equal(liveButMissingDurable.rejection.reason, 'missing_previous_assignment')
+      assert.equal(activeRunner.state.data.completions[activeAssignment.id], undefined, 'Active memory cannot gain an invented never-started completion')
+      assert.equal(activeController.signal.aborted, false)
+      assert.equal(executing, true)
+      assert.equal(await readFile(join(activeProject.root, 'input.txt'), 'utf8'), originalInputBytes)
+      await activeRunner.state.mutate(data => {
+        data.assignments[activeAssignment.id] = activeSnapshot
+        data.completions[activeAssignment.id] = heldDisk.completions[activeAssignment.id]
+      })
       activeRunner.report = activeReports
       activePose({ ...activeAssignment, cancel_requested: true,
         grant: { ...activeAssignment.grant, revoked_at: new Date().toISOString() } })

@@ -21,7 +21,7 @@ import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
-import { useWorkspace, refresh, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory } from './state/workspace'
+import { useWorkspace, refresh, reconnect, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
 import { grantOperationsSummary } from './lib/permissions'
 import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate, InstallOutcome, InstallPlan, InstallTarget } from './api/types'
@@ -40,7 +40,11 @@ const confirmationError = computed(() => state.errors['ticket-write'] || state.e
 const greeting = computed(() => new Date().getHours() < 12 ? '早上好' : new Date().getHours() < 18 ? '下午好' : '晚上好')
 const principalName = computed(() => bootstrap.value?.principal?.display_name ?? bootstrap.value?.principal?.name ?? bootstrap.value?.identity?.name ?? bootstrap.value?.identity?.principal ?? '个人工作空间')
 const protocolName = computed(() => bootstrap.value?.client_api ?? bootstrap.value?.api ?? bootstrap.value?.protocol_version ?? bootstrap.value?.version ?? '协议版本未知')
-const nodeStatus = computed(() => !state.connected ? '未连接' : !nodes.value.length ? '未注册节点' : nodes.value.some(n => nodeConnected(n.status) && !heartbeatStale(n.last_heartbeat ?? n.last_seen_at)) ? '节点在线' : '节点离线')
+const nodeStatus = computed(() => {
+  if (state.credentialState === 'required') return '需要认证'
+  if (state.connected === null) return '尚未验证连接'
+  return !state.connected ? '未连接' : !nodes.value.length ? '未注册节点' : nodes.value.some(n => nodeConnected(n.status) && !heartbeatStale(n.last_heartbeat ?? n.last_seen_at)) ? '节点在线' : '节点离线'
+})
 const navItems: { page: Page; label: string; icon: IconName }[] = [
   { page: 'conversation', label: '对话', icon: 'conversation' }, { page: 'activity', label: '活动', icon: 'activity' },
   { page: 'devices', label: '设备', icon: 'devices' }, { page: 'projects', label: '项目', icon: 'projects' },
@@ -147,7 +151,9 @@ async function saveTicket(value: NewTicket) { await createTicket(value) }
 async function saveProject(value: { name: string; root: string; mode: ProjectMode; confirm: boolean }) {
   if (await createProject({ name: value.name, root: value.root, mode: value.mode })) showProjects.value = false
 }
-function onConnectionSaved() { showConnection.value = false; void refresh() }
+async function onConnectionSaved(token: string) {
+  if (await reconnect(token)) showConnection.value = false
+}
 function onVisibility() { if (document.visibilityState === 'visible') void refresh() }
 onMounted(() => {
   void refresh()
@@ -171,7 +177,8 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
       <button class="sidebar-avatar" aria-label="个人工作空间与连接设置" @click="showConnection = true">{{ principalName.slice(0, 1).toUpperCase() }}</button>
     </aside>
     <header class="workspace-header"><div class="workspace-heading"><h1>你的工作空间<span class="workspace-star">✧</span></h1><span class="workspace-subtitle">ALL YOUR WORK, ONE PLACE</span></div><div class="workspace-status"><span class="connection-pill" :class="{ offline: nodeStatus !== '节点在线' }"><span class="status-dot" :class="nodeStatus === '节点在线' ? 'active' : 'neutral'" />{{ nodeStatus }}</span><span class="protocol-muted">{{ protocolName }}</span><button class="identity-button" @click="showConnection = true"><span class="header-avatar">{{ principalName.slice(0, 1) }}</span><span>{{ principalName }}</span><AppIcon name="settings" :size="15" /></button></div></header>
-    <div v-if="state.errors.workspace" class="connection-banner" role="alert"><AppIcon name="warning" :size="17" /><span>{{ state.errors.workspace }}</span><button class="text-link" @click="void refresh()">重试</button><button class="button secondary small-button" @click="showConnection = true">连接设置</button></div>
+    <div v-if="state.credentialState === 'required'" class="connection-banner auth-warning" role="alert"><AppIcon name="lock" :size="17" /><span><strong>需要更新客户端凭据。</strong>这里显示的任务和列表只是上次读取的数据，未验证为最新；不能凭此创建、授权、审批或重新执行。更新连接不会结束原处正在运行的Worker。</span><button class="button secondary small-button" @click="showConnection = true">更新凭据</button></div>
+    <div v-else-if="state.errors.workspace" class="connection-banner" role="alert"><AppIcon name="warning" :size="17" /><span>{{ state.errors.workspace }}</span><button class="text-link" @click="void refresh()">重试</button><button class="button secondary small-button" @click="showConnection = true">连接设置</button></div>
     <main id="workspace-content" class="workspace-content" :class="{ 'has-selected-ticket': ticketOpen }" tabindex="-1">
       <div v-if="state.busy.workspace && !state.bootstrap" class="workspace-loading" role="status"><span class="logo-loader">l.</span><span class="spinner dark" /><p>正在连接你的工作空间…</p></div>
       <template v-else-if="state.page === 'conversation'">
@@ -205,7 +212,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
     <nav class="mobile-tabs" aria-label="移动端工作空间"><button v-for="item in navItems.slice(0, 4)" :key="item.page" :class="{ active: state.page === item.page }" :aria-current="state.page === item.page ? 'page' : undefined" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="20" /><span>{{ item.label }}</span></button><button :class="{ active: showMore || ['memories', 'skills', 'plans', 'access', 'help'].includes(state.page) }" :aria-expanded="showMore" @click="showMore = !showMore"><AppIcon name="menu" :size="20" /><span>更多</span></button></nav>
     <nav v-if="showMore" class="mobile-more" aria-label="更多工作空间"><button v-for="item in navItems.slice(4)" :key="item.page" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="18" />{{ item.label }}</button><button @click="changePage('help')"><AppIcon name="help" :size="18" />帮助</button><button @click="showMore = false; showConnection = true"><AppIcon name="settings" :size="18" />连接设置</button></nav>
     <ProjectDialog v-if="showProjects" :busy="state.busy.project" :error="state.errors.project" @close="showProjects = false" @submit="saveProject" />
-    <ConnectionDialog v-if="showConnection" @saved="onConnectionSaved" />
+    <ConnectionDialog v-if="showConnection" :checking="state.credentialState === 'checking'" :error="state.errors.workspace" @saved="token => void onConnectionSaved(token)" @close="showConnection = false" />
     <ConfirmDialog :confirmation="confirmation" :busy="confirmationBusy" :error="confirmationError" @confirm="void confirm()" @cancel="cancelConfirm" />
     <ProjectBindingDialog v-if="bindingProject" :project="bindingProject" :nodes="nodes" :busy="state.busy['binding-write']" :error="confirmation ? '' : state.errors['binding-write']" @close="bindingProject = null" @submit="bindProject" />
   </div>

@@ -88,7 +88,7 @@ try {
   assert.equal(coordinator.acks.length, ackBeforeLoop + 1, 'A reopened CoordinatorLoop reuses the terminal local receipt')
   await reopenedLoop.handle({ ...advancedStale, cancel_requested: true })
   assert.equal(cancelCalls, 0, 'A stale cancellation cannot abort another locally recorded assignment')
-  const unknownCancel = { ...original, id: stableArtifactId('not-a-local-assignment'), cancel_requested: true }
+  const unknownCancel = { ...original, id: stableArtifactId('not-a-local-assignment'), node_id: 'f'.repeat(64), cancel_requested: true }
   await reopenedLoop.handle(unknownCancel)
   assert.equal(cancelCalls, 0)
   assert.ok(phaseRoot.state.data.assignments[unknownCancel.id] === undefined, 'Unknown cancellation must not manufacture an Assignment history')
@@ -121,6 +121,23 @@ try {
     if (body.cancelRequested || body.cancel_requested) stopAcknowledged.resolve(body)
     return result
   }
+  const stopActiveAssignment = stopDispatcher.active.get(stopAssignment.id).assignment
+  const retainedHeldState = durable(runner.state.data)
+  await runner.state.mutate(data => {
+    delete data.assignments[stopAssignment.id]
+    delete data.completions[stopAssignment.id]
+  })
+  await stopLoop.handle({ ...stopAssignment, cancel_requested: true })
+  const liveRejection = Object.values(runner.state.data.rejections).find(item => item.ticket_id === stopTicket.id)
+  assert.equal(liveRejection?.reason, 'missing_previous_assignment')
+  assert.deepEqual(stopDispatcher.active.get(stopAssignment.id).assignment, stopActiveAssignment)
+  assert.equal(runner.state.data.completions[stopAssignment.id], undefined, 'Active Coordinator work must not gain a fabricated never-started completion')
+  assert.equal(stopDispatcher.active.get(stopAssignment.id).controller.signal.aborted, false)
+  assert.equal(coordinator.reports.has(stopAssignment.id), false, 'A missing durable history cannot fabricate a stopped Agent report')
+  await runner.state.mutate(data => {
+    data.assignments[stopAssignment.id] = retainedHeldState.assignments[stopAssignment.id]
+    data.completions[stopAssignment.id] = retainedHeldState.completions[stopAssignment.id]
+  })
   const stopIntent = await admin.post(`/api/v1/tickets/${stopTicket.id}/cancel`, {})
   const stopTask = stopLoop.startAssignment(stopIntent)
   const stopAck = await stopAcknowledged.promise

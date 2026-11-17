@@ -1,4 +1,5 @@
-import { resolve } from 'node:path'
+import { isAbsolute, resolve, sep } from 'node:path'
+import { realpath } from 'node:fs/promises'
 import { LoomHttpClient } from './http.js'
 import { LoomNodeClient } from './client.js'
 import { NodeIdentity } from './identity.js'
@@ -6,7 +7,7 @@ import { NodeState } from './state.js'
 import { CAPABILITIES, envelope, validateAssignment } from './validation.js'
 import { ControlledFileExecutor } from './executor.js'
 import { canonical, sha256, requireIsolatedRoot } from './util.js'
-import { admissionFence, cancellationFence, optionalNodeAckError, rejectionFingerprint, sameAuthorizedAssignment } from './admission.js'
+import { admissionFence, cancellationFence, optionalNodeAckError, rejectionFingerprint, rejectionInputDigest, sameAuthorizedAssignment } from './admission.js'
 
 export function wireCapabilities(values) {
   return values.map((value) => {
@@ -72,10 +73,21 @@ export class LocalNodeRunner {
     const assignment = await this.client.poll({ lastAssignmentId: this.lastAssignmentId })
     if (!assignment) return { status: 'idle' }
     if (assignment.cancel_requested && assignment.id) {
-      const previous = this.state.data.assignments[assignment.id]
+      let previous = this.state.data.assignments[assignment.id]
       const activeAssignment = this.activeAssignments.get(assignment.id)
+      if (previous === undefined && !activeAssignment) {
+        try { previous = await this.admitCancellation(assignment) }
+        catch (error) { return this.rejectAssignment(assignment, error.message) }
+      }
       const stale = cancellationFence(previous, assignment, activeAssignment)
       if (stale) return this.rejectAssignment(assignment, stale)
+      const knownTermination = this.state.data.completions[assignment.id]
+      if (!activeAssignment && knownTermination?.execution_started === false && knownTermination.state === 'cancelled') {
+        const digest = sha256(canonical({ assignment_id: assignment.id, lease_epoch: assignment.lease_epoch, grant_version: assignment.grant_version }))
+        if (knownTermination.digest !== digest) return this.rejectAssignment(assignment, 'cancellation_delivery_fingerprint_mismatch')
+        return { status: 'cancel_acknowledged', assignmentId: assignment.id,
+          ...(await this.report(previous, knownTermination)) }
+      }
       // Preserve the complete previously admitted frame and its validated identity.
       // Cancellation annotations must not overwrite the original facts.
       const authorizedCancel = await this.state.mutate((data) => {
@@ -157,6 +169,45 @@ export class LocalNodeRunner {
       this.activeAssignments.delete(assignment.id)
     }
   }
+  /** A first stop notification requires its actual Assignment and authorization, never a fabricated prior admission. */
+  async admitCancellation(assignment) {
+    if (![true, 1].includes(assignment.cancel_requested)) throw new Error('Missing node cancellation intent')
+    const grant = assignment.grant || this.options.grants?.[assignment.grant_digest]
+    const verified = validateAssignment(assignment, grant, this.identity, { forCancellation: true })
+    const candidate = { ...assignment, ...verified, grant_version: assignment.grant_version ?? grant.version }
+    if (['read_summary', 'edit_file', 'model_descriptor'].includes(assignment.kind)) {
+      const mapping = this.options.registration?.project_roots?.[assignment.project_id]
+      if (!mapping) throw new Error('No configured project root for this stop operation')
+      if (resolve(mapping) !== resolve(grant?.project_root || '')) throw new Error('Grant root does not match the configured project root')
+      const [approved, configured] = await Promise.all([realpath(grant.project_root), realpath(mapping)])
+      if (!isAbsolute(approved) || !isAbsolute(configured) || approved !== configured || approved === resolve(process.env.HOME || '__none__') || approved === sep) {
+        throw new Error('Project root differs from the exact registered Worker root')
+      }
+    }
+    await this.state.mutate((data) => {
+      const previous = data.assignments[assignment.id]
+      if (data.completions[assignment.id]) {
+        const error = new Error('A pre-start cancellation cannot replace an existing execution outcome')
+        error.fenced = true
+        throw error
+      }
+      const stale = admissionFence(previous, candidate)
+      if (stale || (previous && !sameAuthorizedAssignment(previous, candidate))) {
+        const error = new Error(stale || 'cancellation_admission_mismatch')
+        error.fenced = true
+        throw error
+      }
+      data.assignments[assignment.id] = previous || candidate
+      data.completions[assignment.id] = {
+        assignment_id: candidate.id,
+        digest: sha256(canonical({ assignment_id: candidate.id, lease_epoch: candidate.lease_epoch, grant_version: candidate.grant_version })),
+        state: 'cancelled', execution_started: false, cancel_acknowledged: true,
+        summary: 'An authorized Assignment was stopped before starting an executor or Agent; no Artifact or external effect was created by this cancellation.',
+        artifacts: [], effects: [],
+      }
+    })
+    return this.state.data.assignments[assignment.id]
+  }
   async report(assignment, result) {
     const effects = Array.isArray(result.effects) ? [...result.effects] : []
     const uploads = new Map()
@@ -183,17 +234,26 @@ export class LocalNodeRunner {
   }
   async rejectAssignment(assignment, reason, localStatus = 'fenced') {
     const fingerprint = rejectionFingerprint(assignment)
+    const input_digest = rejectionInputDigest(assignment)
     const existing = this.state.data.rejections?.[fingerprint]
-    if (['accepted', 'quarantined'].includes(existing?.acknowledgement?.outcome)) {
+    const normalizedReason = String(reason).slice(0, 500)
+    if (['accepted', 'quarantined'].includes(existing?.acknowledgement?.outcome)
+      && existing.reason === normalizedReason
+      && existing.input_digest === input_digest) {
       return { status: localStatus, assignmentId: assignment.id, rejection: existing }
+    }
+    if (['accepted', 'quarantined'].includes(existing?.acknowledgement?.outcome)
+      && existing.reason === normalizedReason && existing.input_digest === undefined) {
+      return { status: localStatus, assignmentId: assignment.id,
+        rejection: { ...existing, current_context_unverified: true } }
     }
     const now = new Date().toISOString()
     const rejection = {
-      schema: 'loom.local-rejection.v1', fingerprint,
+      schema: 'loom.local-rejection.v1', fingerprint, input_digest,
       assignment_id: assignment.id, ticket_id: typeof assignment.ticket_id === 'string' ? assignment.ticket_id : null,
       lease_epoch: assignment.lease_epoch,
       grant_digest: assignment.grant_digest || assignment.grant?.grant_digest || assignment.grant?.digest || null,
-      local_status: localStatus, reason: String(reason).slice(0, 500),
+      local_status: localStatus, reason: normalizedReason,
       created_at: existing?.created_at || now, updated_at: now,
       acknowledgement: { outcome: 'pending' },
     }

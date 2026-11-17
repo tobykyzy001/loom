@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 import { LocalNodeRunner, wireCapabilities } from '../src/runner.js'
-import { sleep } from '../src/util.js'
+import { sleep, sha256, canonical } from '../src/util.js'
 import { admissionFence, cancellationFence, sameAuthorizedAssignment } from '../src/admission.js'
 
 /** Bounded outbound-only coordinator plugin runner. Idempotent local completions and backoff survive restart. */
@@ -65,8 +65,19 @@ export class CoordinatorLoop {
       }
     }
     const existing = this.pending.get(assignment.id) || (assignment.cancel_requested ? null : this.pending.get(`${assignment.id}:cancellation`))
-    const durable = this.runner?.state?.data?.assignments?.[assignment.id]
+    let durable = this.runner?.state?.data?.assignments?.[assignment.id]
     const activeAssignment = this.runner?.activeAssignments?.get(assignment.id) || this.executor.active?.get(assignment.id)?.assignment
+    if (assignment.cancel_requested && !durable && !existing && !activeAssignment) {
+      try { durable = await this.runner.admitCancellation(assignment) }
+      catch (error) {
+        await this.runner.rejectAssignment(assignment, error.message)
+        return
+      }
+    }
+    if (assignment.cancel_requested && (existing || activeAssignment) && !durable) {
+      await this.runner.rejectAssignment(assignment, 'missing_previous_assignment')
+      return
+    }
     const stale = assignment.cancel_requested
       ? cancellationFence(durable, assignment, activeAssignment)
       : admissionFence(durable, assignment)
@@ -75,10 +86,23 @@ export class CoordinatorLoop {
         await this.runner.rejectAssignment(assignment, stale || 'unknown_local_assignment')
         return
       }
-      const stopped = await this.executor.cancel?.(assignment.id)
+      const prestart = this.runner?.state?.data?.completions?.[assignment.id]
+      const beforeExecution = prestart?.state === 'cancelled' && prestart?.execution_started === false
+      const expectedDigest = sha256(canonical({ assignment_id: assignment.id, lease_epoch: assignment.lease_epoch, grant_version: assignment.grant_version }))
+      if (beforeExecution && prestart.digest !== expectedDigest) {
+        await this.runner.rejectAssignment(assignment, 'cancellation_delivery_fingerprint_mismatch')
+        return
+      }
+      const stopped = (beforeExecution && !existing) || await this.executor.cancel?.(assignment.id)
       await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: stopped === true, cancelRequested: true,
         reason: 'Cancellation requested; outcome awaits observed effect/report' })
+      if (beforeExecution && !existing) {
+        // Replay the durable pre-start completion, even after an ack interruption or restart.
+        await this.executor.report(assignment, prestart)
+        await this.client.dispatchOutbox()
+        return
+      }
       if (existing) {
         await existing
         // The original in-flight Assignment is the unique Report producer; this stop branch only dispatches its evidence.

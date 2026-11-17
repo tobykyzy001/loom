@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 import { prepareProject, startRustConcierge } from '../../scripts/fixtures/rust-server.mjs'
@@ -314,6 +315,84 @@ async function run() {
       assert.equal(await stat(join(projectRoot, 'must-not-write.txt')).then(() => false, (error) => { assert.equal(error.code, 'ENOENT'); return true }), true)
       result.cancel = { ticket_id: cancelId, visible_cancel_intent: true, final_cancelled: true, file_effect_absent: true }
     })
+    await phase('authentication-expiry-and-verified-workspace-recovery', async () => {
+      const retainedId = (await page.locator('.ticket-id').innerText()).split('/').pop().trim()
+      const replacement = 'browser-replacement-client-credential'
+      const rejected = 'browser-rejected-client-credential'
+      secrets.push(replacement, rejected)
+      const dbFile = join(server.dataDir, 'loom.sqlite3')
+      const credentialRecord = (token) => {
+        const db = new DatabaseSync(dbFile)
+        try {
+          const update = db.prepare('UPDATE settings SET value = ?1 WHERE key = ?2').run(sha256(token), 'client_token_hash')
+          assert.equal(update.changes, 1)
+          assert.equal(db.prepare('SELECT value FROM settings WHERE key = ?1').get('client_token_hash').value, sha256(token))
+        } finally { db.close() }
+      }
+      const ticketCount = () => {
+        const db = new DatabaseSync(dbFile, { readOnly: true })
+        try { return Number(db.prepare('SELECT COUNT(*) AS count FROM tickets').get().count) } finally { db.close() }
+      }
+      const before = ticketCount()
+      credentialRecord(replacement)
+      admin.clientToken = replacement
+      await page.getByRole('button', { name: '新的任务', exact: true }).click()
+      await page.getByRole('button', { name: '个人工作空间与连接设置', exact: true }).click()
+      await page.getByRole('button', { name: '保存并重新连接', exact: true }).click()
+      await page.locator('#connection-dialog .form-error').waitFor()
+      await page.locator('.auth-warning').waitFor()
+      await page.getByRole('button', { name: '关闭连接设置', exact: true }).click()
+      await page.locator('#connection-dialog').waitFor({ state: 'hidden' })
+      assert.match(await page.locator('.auth-warning').innerText(), /只是上次读取的数据/)
+      assert.equal(await page.locator('.connection-pill').innerText(), '需要认证')
+        await page.locator('#task-objective').fill('Credentials expired: this must not create a new task')
+      await page.getByRole('button', { name: '开始任务', exact: true }).click()
+      await page.locator('.composer .form-error').waitFor()
+      assert.match(await page.locator('.composer .form-error').innerText(), /请先完成连接认证/)
+      assert.equal(ticketCount(), before, 'The expired UI credential must not dispatch a new Ticket behind the stale list')
+
+      await page.getByRole('button', { name: '个人工作空间与连接设置', exact: true }).click()
+      await page.locator('#client-token').fill(rejected)
+      await page.getByRole('button', { name: '保存并重新连接', exact: true }).click()
+      await page.locator('#connection-dialog .form-error').waitFor()
+      assert.match(await page.locator('#connection-dialog .form-error').innerText(), /凭据已失效/)
+      assert.equal(await page.locator('#connection-dialog').count(), 1, 'A failed credential attempt must not claim a closed, restored connection')
+      assert.equal(await page.evaluate(() => localStorage.getItem('loom.client-token')), server.clientToken,
+        'Replacing a candidate must not overwrite the stored token before protected reads pass')
+      credentialRecord(server.clientToken)
+      admin.clientToken = server.clientToken
+      await page.locator('#client-token').fill(server.clientToken)
+      await page.getByRole('button', { name: '保存并验证连接', exact: true }).click()
+      await page.locator('#connection-dialog').waitFor({ state: 'hidden' })
+      await page.locator('.auth-warning').waitFor({ state: 'hidden' })
+      assert.equal(await page.evaluate(() => localStorage.getItem('loom.client-token')), server.clientToken)
+      if (await page.locator('.ticket-id').count() && (await page.locator('.ticket-id').innerText()).includes(retainedId)) {
+        assert.match(await page.locator('.ticket-detail h1').innerText(), /Synthetic browser stop intent/,
+          'The already opened retained Ticket must remain exactly the same cancelled work')
+      } else {
+        await page.locator('.ticket-item').filter({ hasText: 'Synthetic browser stop intent' }).click()
+      }
+      await page.waitForFunction(expected => document.querySelector('.ticket-id')?.textContent.includes(expected), retainedId)
+      const restored = await admin.get(`/api/v1/tickets/${retainedId}`)
+      assert.equal(restored.status, 'cancelled', 'Client credential recovery must not rewrite the existing Ticket state')
+      await page.locator('.report-section summary').click()
+      assert.match(await page.locator('.report-section').innerText(), /已取消报告/)
+      const cancelReport = restored.reports.at(-1)
+      assert.equal(cancelReport.state, 'cancelled')
+      assert.ok([1, true].includes(cancelReport.cancel_acknowledged), 'The actual controller Report must include its real cancellation acknowledgement')
+      assert.equal(restored.artifacts.length, 0)
+      assert.equal(restored.effects.length, 0, 'The never-started cancellation cannot invent effects or artifact rows')
+      assert.equal((await admin.get('/api/v1/tickets')).tickets.length, before)
+      const nodes = await admin.get('/api/v1/nodes')
+      assert.equal(nodes.nodes.filter(item => item.id === node.nodeId && item.status === 'online').length, 1, 'Credential update does not create or revoke a Worker')
+      result.authentication_recovery = {
+        actual_center_401: true, prior_snapshot_explicitly_stale: true, old_ticket_selection_preserved_during_warning: true,
+        failed_candidate_not_saved: true, new_ticket_posts_blocked: ticketCount() - before,
+        valid_refresh_then_saved: true, restored_ticket_id: retainedId, restored_ticket_status: restored.status, worker_not_recreated: true,
+        simulation: 'owned SQLite client_token_hash replacement and restoration; Node credentials/Grant/Ticket left intact',
+      }
+      await screenshot('06-restored-authenticated-workspace')
+    })
     if (flags.has('--narrow-viewport')) await phase('fallback-narrow-viewport-only', async () => {
       await page.getByRole('button', { name: '新的任务', exact: true }).click(); await page.setViewportSize({ width: 390, height: 844 })
       await page.waitForSelector('.mobile-tabs')
@@ -352,7 +431,19 @@ async function run() {
   async function tick(expected) {
     await bounded(node.client.heartbeat({ capabilities: node.capabilities, workers: [{ worker_id: 'default' }], inventory: { project_roots: { [projectId]: projectRoot } } }), 'Node heartbeat')
     heartbeatCount++
-    assert.equal((await bounded(node.pollAndRun(), 'Node pull and run')).status, expected)
+    const pollOutcome = await bounded(node.pollAndRun(), 'Node pull and run')
+    if (expected === 'cancel_acknowledged' && pollOutcome.status !== expected) {
+      const localAssignments = Object.entries(node.state.data.assignments).map(([id, assignment]) => ({
+        assignment_id: id, ticket_id: assignment.ticket_id, lease_epoch: assignment.lease_epoch,
+        has_cancel_requested: Boolean(assignment.cancel_requested),
+      }))
+      const rejection = pollOutcome.rejection && {
+        assignment_id: pollOutcome.rejection.assignment_id, ticket_id: pollOutcome.rejection.ticket_id,
+        reason: pollOutcome.rejection.reason, acknowledgement: pollOutcome.rejection.acknowledgement?.outcome,
+      }
+      throw new Error(`Stop acknowledgement capture returned ${JSON.stringify({ status: pollOutcome.status, rejection, last_assignment_id: node.lastAssignmentId, local_assignments: localAssignments })}`)
+    }
+    assert.equal(pollOutcome.status, expected)
     await bounded(node.client.dispatchOutbox(), 'deferred outbox delivery')
     await bounded(node.client.dispatchOutbox(), 'terminal deferred outbox delivery')
   }

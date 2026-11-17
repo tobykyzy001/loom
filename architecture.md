@@ -589,6 +589,8 @@ Install Plugin / Bare Agent
 - **HTTP response reader 只接收受限 JSON bytes**：公共/vendored `LoomHttpClient` 在标准 Web Stream 可用时按实际 chunk bytes 限额并累计，超过配置 capping 便 cancel 对应 reader；不把 `Content-Length` 当安全保证。旧 `arrayBuffer` 仅用于明确没有 stream 的兼容响应，不能据此宣称预分配上限对所有数据都成立。
 - reader.read 具有与同一总量超时/取消 controller 的竞争。caller stop 的原因最优先；单次失败只能尝试一次该 reader 的 cancel，不能把 reader 的失败时间选择变成任务结果、Grant 状态或 Effect。不会因 cleanup Promise 悬空再永久挂住请求。零字节 chunk 仍让出事件循环，保持总 timeout 可结算；正文只在受限合并后解码。未获完整 JSON 的 Assignment 不能进入 Node 的正式任务流程。原生 TCP socket 的取消仅是当前连接的处置，并非已取消或回滚 server-side Effect。明细见 [tests/runner/README.md](tests/runner/README.md)。
 - **节点启动可由持有 Signal 的显式 caller 中止**：预检与已保存身份保持只读验证；已取消后不再发起下一阶段的 registration、heartbeat 或 poll。既经接受并保存的注册token是可重开事实，不等于撤销，也不能把started/present当成ready或新的Grant。可选启动signal独立于runtime Coordinator的dispose，不把Cordis effect幻想成自动可取消。
+- **Web 认证恢复是带所有权的重读**：客户端token凭据有workspace revision。过期/变更前的读响应不能当作最新工作区写入，但写操作的真实权威回执不因epoch变化被假称无效果。401使缓存内容成为显式先前快照，区别于offline和被拒Operation。设置dialog只在actual protected reads通过后持久token，验证失败不自动关闭/写成恢复成功；缺有效认证的新写入被阻止，既有Worker/Grant/任务事实不因登录页切换而删除。
+- **首次预取消也是授权的as-snapshot业务**，不是从取消标记继承历史。只有真实的Assignment、Grant、worker/root/kind等在完整核验后，才原子保存停止和可回放完成；标记Local `execution_started:false` 描述本调度器从未调用 executor，并非外界副作用已自动归零。撤销Grant/关闭lease 只在这个停止链路里免于拒绝新执行；正常执行的expiry/有效性不变。active作业使用同一视图比较其不可变frame与 pending cancellation，而不是把当前Grant状态或Delay误鉴为另一份工作。`model_text`、credential access及各SDK的具体scope仍需分别证明，不由文件型stop约定自动覆盖。
 - 同一 DSH 的多个 Profile / Agent 可以作为独立 Worker / Tenant 命名空间。Profile 的隔离级别要如实声明，不能把安装在同一 DSH 实例的公司 / 个人工作身份混为同一 Worker。
 - 中心保留 Ticket、Grant、Lease、调度和恢复权威；插件可保留本地 Effect Ledger、会话日志和必要缓存，但不成为独立跨机任务权威。
 

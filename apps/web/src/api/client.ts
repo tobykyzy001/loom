@@ -15,6 +15,8 @@ export class ApiError extends Error {
 export interface LoomClientOptions {
   token: () => string
   fetch?: typeof globalThis.fetch
+  /** Optional authentication revision, shared only by this workspace, not a server credential. */
+  credentialEpoch?: () => number
 }
 
 export class LoomClient {
@@ -24,10 +26,18 @@ export class LoomClient {
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const epoch = this.options.credentialEpoch?.()
+    const read = ['GET', 'HEAD', 'OPTIONS'].includes((init.method ?? 'GET').toUpperCase())
+    const token = this.options.token().trim()
+    const currentCredential = () => {
+      if (read && this.options.credentialEpoch
+        && (epoch !== this.options.credentialEpoch() || token !== this.options.token().trim())) {
+        throw new ApiError(0, 'credential_epoch_changed', '凭据已更新，这次旧读取的结果不再用于更新工作区。', path)
+      }
+    }
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
     if (init.body) headers.set('Content-Type', 'application/json')
-    const token = this.options.token().trim()
     if (token) headers.set('Authorization', `Bearer ${token}`)
 
     let response: Response
@@ -39,6 +49,7 @@ export class LoomClient {
     }
 
     const contentType = response.headers.get('content-type') ?? ''
+    currentCredential()
     if (!response.ok) {
       let code = `http_${response.status}`
       let message = response.status === 401
@@ -55,6 +66,7 @@ export class LoomClient {
           // The status remains authoritative if the error payload is malformed.
         }
       }
+      currentCredential()
       throw new ApiError(response.status, code, message, path)
     }
 
@@ -63,8 +75,11 @@ export class LoomClient {
       throw new ApiError(response.status, 'invalid_content_type', '协调器返回了非预期的响应格式。', path)
     }
     try {
-      return (await response.json()) as T
-    } catch {
+      const body = (await response.json()) as T
+      currentCredential()
+      return body
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'credential_epoch_changed') throw error
       throw new ApiError(response.status, 'invalid_json', '协调器返回了无法读取的响应。', path)
     }
   }
