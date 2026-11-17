@@ -114,7 +114,7 @@ function metadataResult({ assignment, reference, action, state, configured, writ
     value_exposed: false, grant_created: false, permission_granted: false, matching_scope_only: true }, null, 2) + '\n')
   const artifact = { artifact_id, bytes, metadata: { name: `credential-ref-${artifact_id}.json`,
     media_type: 'application/json', size_bytes: bytes.length, sha256: sha256(bytes), origin_node_id: assignment.node_id } }
-  const effect = action === 'revoke' ? [{ effect_id: stableUUID(`${inputDigest}:credential-revoke:v1`),
+  const effect = action === 'revoke' ? [{ effect_id: stableUUID(`${inputDigest}:credential-revoke:v1:${assignment.id}`),
     status: effect_status, input_digest: inputDigest, artifacts: [artifact_id],
     evidence: { asset_action: 'revoke', record_id: reference.id, reference_id: reference.reference_id,
       binding_id: reference.binding_id, grant_version: assignment.grant.version, grant_digest: assignment.grant.digest,

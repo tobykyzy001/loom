@@ -547,7 +547,13 @@ pub(crate) fn validate_outcome(
     }
     let state = body["requested_state"].as_str().unwrap_or_default();
     let effects = body["effects"].as_array().cloned().unwrap_or_default();
-    if state != "succeeded" && state != "failed" {
+    if state == "unknown" && (action != "revoke" || effects.len() != 1) {
+        return Err(ApiError::denied(
+            "credential_evidence",
+            "An incomplete credential deletion needs one scoped unknown Effect; no other action can use this path",
+        ));
+    }
+    if state != "succeeded" && state != "failed" && state != "unknown" {
         return Err(ApiError::bad(
             "Interrupted credential outcomes stay reconciling until independently observed",
         ));
@@ -633,7 +639,19 @@ pub(crate) fn validate_outcome(
         }
         return Ok(());
     }
-    if result.state != "revoked" || result.configured || result.configured_state != "missing" {
+    if state == "unknown"
+        && (result.state != "unknown"
+            || result.configured_state != "present_metadata"
+            || !result.configured)
+    {
+        return Err(ApiError::denied(
+            "credential_evidence",
+            "Unknown revocation cannot assert rechecked presence or missing metadata",
+        ));
+    }
+    if state == "succeeded"
+        && (result.state != "revoked" || result.configured || result.configured_state != "missing")
+    {
         return Err(ApiError::denied(
             "credential_evidence",
             "A confirmed revoke must report rechecked missing metadata",
@@ -660,9 +678,21 @@ pub(crate) fn validate_outcome(
             .collect(),
     );
     let input_digest = crate::sha256(canonical_bytes(&digest_input));
+    let expected_effect_status = match state {
+        "succeeded" => "confirmed",
+        _ => "unknown",
+    };
     let effect = &effects[0];
     let evidence = &effect["evidence"];
-    if effect["status"] != "confirmed"
+    if effect["status"] != expected_effect_status
+        || effect["effect_id"].as_str()
+            != Some(
+                credential_effect_id(
+                    &input_digest,
+                    body["assignment_id"].as_str().unwrap_or_default(),
+                )
+                .as_str(),
+            )
         || effect["input_digest"] != input_digest
         || effect["artifacts"] != json!([ids[0]])
         || evidence["asset_action"] != "revoke"
@@ -680,6 +710,22 @@ pub(crate) fn validate_outcome(
         ));
     }
     Ok(())
+}
+
+fn credential_effect_id(input_digest: &str, assignment_id: &str) -> String {
+    let hash =
+        crate::sha256(format!("{input_digest}:credential-revoke:v1:{assignment_id}").as_bytes());
+    let variant =
+        b"89ab"[usize::from_str_radix(&hash[16..17], 16).expect("hex variant") % 4] as char;
+    format!(
+        "{}-{}-4{}-{}{}-{}",
+        &hash[..8],
+        &hash[8..12],
+        &hash[13..16],
+        variant,
+        &hash[17..20],
+        &hash[20..32]
+    )
 }
 
 fn canonical_bytes(value: &Value) -> Vec<u8> {
@@ -707,6 +753,22 @@ fn deserialize<T: serde::de::DeserializeOwned>(body: &Value) -> Result<T, ApiErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_uuid_matches_host_scope_without_truncation_mistakes() {
+        assert_eq!(
+            credential_effect_id(&"a".repeat(64), "test-assignment"),
+            "807876ab-42df-4e45-8bd2-44383d8d564a"
+        );
+        assert_eq!(
+            credential_effect_id(&"a".repeat(64), "test-0"),
+            "5de934f1-7a2b-4389-99be-c274782d47ab"
+        );
+        assert_eq!(
+            credential_effect_id(&"a".repeat(64), "test-7"),
+            "310dfcc3-74cc-4dc5-b975-6b693ecc8271"
+        );
+    }
 
     #[test]
     fn credential_metadata_needs_precise_scope_and_separate_actions() {
@@ -771,5 +833,14 @@ mod tests {
             &json!({"action":"inspect","grant_id":"inspect-grant"})
         )
         .is_err());
+        assert!(
+            validate_outcome(
+                &store,
+                inspected["ticket"]["id"].as_str().unwrap(),
+                &json!({"requested_state":"unknown", "effects":[{"status":"unknown"}]}),
+            )
+            .is_err(),
+            "Inspection cannot use the deliberately narrow unknown-revocation outcome"
+        );
     }
 }

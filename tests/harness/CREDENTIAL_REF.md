@@ -14,6 +14,14 @@ Latest successful fixture instance of this iteration: `inspect=tkt_a11091c64df94
 
 `node tests/harness/real-model-binding.mjs` and `node tests/projects/git-probe.mjs` subsequently remained PASS for this increment.
 
+## Scoped unknown handling
+
+The driver also creates a real failure only inside this synthetic provider document by adding a duplicate `records:` section. The installed LocalCredentialProvider rejects it during the real delete operation, and the controller accepts **only** a scoped unknown-revoke tuple: one unknown Report, one unknown Effect and one same-Reference/source/Binding result Artifact whose actual bytes and SHA are verified. `state:'unknown'` retains last known `present_metadata`; it does **not** imply new observed presence/missing, while raw Secret values remain absent.
+
+The result is persisted **reconciling**, not success. Replaying that exact Report receipt is idempotent (`duplicate:true`), never a re-execution. The normal retry endpoint remains refused for unresolved effects. Independently authorized later revocation produces its separate Assignment and Effect UUID; no unknown Effect is overwritten by confirmed state. This is not generic reconciliation, automatic rollback or exact-once support for other work types.
+
+Cross-language defects exposed here and fixed: `Report.succeeded` maps to `Effect.confirmed`, never literal equality; `Report.unknown` maps to `Effect.unknown`. Effect UUIDs derive from scoped input digest **and Assignment id**, preventing `INSERT OR IGNORE` from discarding subsequent independently authorized attempts. JS/Rust v4-version nibble placement and hex `8/9/a/b` variant mapping are matched by golden vectors, not accidentally accepted UUID text.
+
 ## Hard boundaries
 
 - `credential_inspect` and `credential_revoke` are **separate exact one-operation Grants**. File read/write, `place_model` and `invoke_text` cannot substitute for either. `credential_revoke` can't use `expect_present:true` alone: a current matching inspect Grant and successful Assignment/Report are required, plus one bounded ordinary JSON Artifact, its storage UUID and verified actual bytes/SHA and **all of the safe result identity fields, including absent secrets and `configured:true`**.

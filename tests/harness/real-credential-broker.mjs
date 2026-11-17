@@ -6,6 +6,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { prepareScenario, startIsolatedHost } from './binding-scenario.mjs'
+import { stableArtifactId } from '../../plugins/dsh-loom/lib/ids.js'
 
 const serverSecrets = []
 let root, host, scenario
@@ -90,6 +91,7 @@ try {
   try {
     await assert.rejects(() => action('revoke', revokeGrant.id, { inspection_ticket_id: inspected.id }), error => error.code === 'inspection_proof_required')
   } finally { await writeFile(proofLocation, originalProof, { mode: 0o600 }) }
+  const unknownTicketId = await proveUnknownReport({ admin, action, grant, node, projectId, inspected, ref })
   const revokedTicket = await action('revoke', revokeGrant.id, { inspection_ticket_id: inspected.id })
   const revoked = await waitTerminal(admin, revokedTicket.id, 'Independently consented exact record revocation')
   assert.equal(revoked.status, 'succeeded', JSON.stringify(revoked.reports))
@@ -111,6 +113,8 @@ try {
   assert.equal(revoked.effects[0].status, 'confirmed')
   const currentReference = JSON.parse(revokedTicket.content).credential_ref
   assert.equal(revoked.effects[0].input_digest, expectedRevokeDigest(revokeGrant, currentReference, node, projectId))
+  assert.notEqual(revoked.effects[0].id, (await admin.get(`/api/v1/tickets/${unknownTicketId}`)).effects[0].id,
+    'Independent Grant/Assignments must not overwrite an unknown Effect with a later successful one')
   const effectEvidence = JSON.parse(revoked.effects[0].evidence)
   assert.equal(effectEvidence.grant_digest, revokedTicket.grant_digest)
   assert.equal(effectEvidence.grant_digest, revokeGrant.digest)
@@ -160,7 +164,7 @@ try {
   await writeFile(join(root, 'credential-broker-result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify(result, null, 2))
 } catch (error) {
-  console.error(JSON.stringify({ overall: 'FAIL', error: serverSecrets.reduce((text, key) => text.replaceAll(key, '[redacted]'), String(error.stack || error)), host: host?.diagnostics(), fixture_root: root }, null, 2))
+  console.error(JSON.stringify({ overall: 'FAIL', error: serverSecrets.reduce((text, key) => text.replaceAll(key, '[redacted]'), String(error.stack || error)), host: host?.diagnostics(), controller: scenario?.server?.diagnostics?.(), fixture_root: root }, null, 2))
   process.exitCode = 1
 } finally {
   if (host) await host.stop().catch(() => {})
@@ -187,5 +191,44 @@ function expectedRevokeDigest(_grant, reference, node, projectId) {
   const canonical = value => Array.isArray(value) ? value.map(canonical) :
     value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value
   return createHash('sha256').update(JSON.stringify(canonical(body))).digest('hex')
+}
+async function proveUnknownReport({ admin, action, grant, node, projectId, inspected, ref }) {
+  const file = join(root, 'node-state', 'credential-store', 'records.yaml')
+  const original = await readFile(file)
+  await writeFile(file, Buffer.concat([original, Buffer.from(`\nrecords:\n  loom-local-node/${ref.record_key}:\n    kind: grant\n    payload: {}\n`)]), { mode: 0o600 })
+  let unknownTicket
+  try {
+    const otherGrant = await grant(['credential_revoke'])
+    unknownTicket = await action('revoke', otherGrant.id, { inspection_ticket_id: inspected.id })
+    const terminal = await waitTerminal(admin, unknownTicket.id, 'Unknown write Effect must be accepted as evidence')
+    assert.equal(terminal.status, 'reconciling', JSON.stringify(terminal.reports))
+    assert.equal(terminal.reports.length, 1)
+    assert.equal(terminal.reports[0].state, 'unknown')
+    assert.equal(terminal.effects.length, 1)
+    assert.equal(terminal.effects[0].status, 'unknown')
+    const body = await artifact(admin, terminal)
+    assert.equal(body.state, 'unknown')
+    assert.equal(body.configured, true)
+    assert.equal(body.configured_state, 'present_metadata')
+    assert.equal(body.value_exposed, false)
+    const effect = terminal.effects[0]
+    assert.deepEqual(effect.artifacts, [terminal.artifacts[0].id])
+    assert.equal(effect.input_digest, expectedRevokeDigest(otherGrant, JSON.parse(unknownTicket.content).credential_ref, node, projectId))
+    assert.equal(effect.id, stableArtifactId(`${effect.input_digest}:credential-revoke:v1:${unknownTicket.assignments[0].id}`))
+    assert.equal(JSON.parse(effect.evidence).value_exposed, false)
+    assert.deepEqual(body.record_subject.grant_credential_ref.scope, ref.scope)
+    const identity = await (await import('../../packages/node-client/src/identity.js')).NodeIdentity.open(join(root, 'node-state'))
+    const state = JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8'))
+    assert.equal(state.outbox.length, 0)
+    const delivery = state.deliveries?.find(entry => entry.kind === 'report' && entry.body.ticket_id === unknownTicket.id)
+    assert.ok(delivery, 'Unknown evidence drained through the real node outbox')
+    const http = new (await import('../../packages/node-client/src/http.js')).LoomHttpClient({ baseUrl: scenario.server.baseUrl })
+    const replay = await http.post('/api/v1/nodes/reports', delivery.body, { token: identity.token })
+    assert.equal(replay.duplicate, true)
+    await assert.rejects(() => admin.post(`/api/v1/tickets/${unknownTicket.id}/retry`, {}), error => error.status === 400 && error.code === 'invalid_request')
+    return unknownTicket.id
+  } finally {
+    await writeFile(file, original, { mode: 0o600 })
+  }
 }
 function pause(ms) { return new Promise(resolve => setTimeout(resolve, ms)) }

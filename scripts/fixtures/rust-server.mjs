@@ -99,7 +99,7 @@ export async function startRustConcierge({ env = process.env, root } = {}) {
         if (response.ok) {
           const health = await response.json()
           if (health.status === 'ok') {
-            return { baseUrl: origin, clientToken, external: false, dataDir, stop,
+            return { baseUrl: origin, clientToken, external: false, dataDir, stop, diagnostics: () => log.slice(-16).join(''),
               command: { executable, args: [...args, '--data-dir', '<temporary>', 'serve', '--listen', `127.0.0.1:${port}`] } }
           }
         }
