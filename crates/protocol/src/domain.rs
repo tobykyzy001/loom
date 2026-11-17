@@ -32,18 +32,20 @@ impl TicketStatus {
 pub enum TicketKind {
     ReadSummary,
     EditFile,
+    /// A read-only proof of an explicit local model.json descriptor, not model execution.
+    ModelDescriptor,
 }
 
 impl TicketKind {
     pub const fn required_permission(self) -> Permission {
         match self {
-            Self::ReadSummary => Permission::Read,
+            Self::ReadSummary | Self::ModelDescriptor => Permission::Read,
             Self::EditFile => Permission::Write,
         }
     }
 
     pub const fn requires_explicit_target(self) -> bool {
-        matches!(self, Self::EditFile)
+        matches!(self, Self::EditFile | Self::ModelDescriptor)
     }
 }
 
@@ -83,6 +85,12 @@ impl Operation {
             (TicketKind::ReadSummary, path) => Ok(path.map_or(Self::Read, Self::ReadPath)),
             (TicketKind::EditFile, Some(path)) => Ok(Self::EditFile(path)),
             (TicketKind::EditFile, None) => Err(ProtocolError::SensitiveTargetRequired),
+            (TicketKind::ModelDescriptor, Some(path)) if path.as_str() == "model.json" => {
+                Ok(Self::ReadPath(path))
+            }
+            (TicketKind::ModelDescriptor, _) => Err(ProtocolError::InvalidLifecycle(
+                "model_descriptor requires exactly model.json as its read target",
+            )),
         }
     }
 }

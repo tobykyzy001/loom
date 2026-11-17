@@ -1,10 +1,11 @@
 import { assertIdentifier, assertObject, assertString, sha256 } from './util.js'
 const states = new Set(['online', 'busy', 'degraded'])
 export const CAPABILITIES = Object.freeze([
+  Object.freeze({ ticket_kind: 'model_descriptor', permission: 'read' }),
   Object.freeze({ ticket_kind: 'read_summary', permission: 'read' }),
   Object.freeze({ ticket_kind: 'edit_file', permission: 'write' }),
 ])
-const operations = new Set(['read_summary', 'edit_file'])
+const operations = new Set(['read_summary', 'edit_file', 'model_descriptor'])
 /** Local fence validates the exact issued project/operation; it does not invent a grant from capability alone. */
 export function validateAssignment(assignment, grant, identity, { now = Date.now() } = {}) {
   assertObject(assignment, 'assignment')
@@ -31,6 +32,9 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
     throw new Error('No verifiable center-issued Grant digest')
   }
   if (!operations.has(assignment.kind)) throw new Error('Unsupported assignment kind')
+  if (assignment.kind === 'model_descriptor' && assignment.relative_path !== 'model.json') {
+    throw new Error('model_descriptor requires an explicit model.json read target')
+  }
   const allowed = Array.isArray(grant.operations) ? grant.operations : (Array.isArray(grant.capabilities) ? grant.capabilities : [])
   const permission = assignment.kind === 'edit_file' ? 'write' : 'read'
   if (!allowed.includes(assignment.kind) && !allowed.includes(permission)) throw new Error('Grant does not authorize assignment kind')

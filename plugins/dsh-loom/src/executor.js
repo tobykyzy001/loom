@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { id, sha256, writeJsonAtomic } from './util.js'
+import { modelDescriptorProof } from './model-descriptor.js'
 
 export const MAX_FILE_BYTES = 1_048_576
 export function safeProjectRoot(root) {
@@ -56,6 +57,12 @@ export class ControlledFileExecutor {
     const target = join(realParent, path.split('/').at(-1))
     let finalState = 'unknown'
     try {
+      if (kind === 'model_descriptor') {
+        if (path !== 'model.json') throw new Error('Model descriptor must be the explicit model.json file under its authorized project')
+        const content = await readDescriptor(target, root)
+        return await this.finish({ effectId, artifactId, assignment, grant, content, mediaType: 'application/json',
+          root, target, readOnly: true, evidence, finalState: 'confirmed' })
+      }
       if (kind === 'read_summary') {
         const info = await lstat(target)
         if (info.isSymbolicLink() || !info.isFile() || info.nlink > 1 || info.size > MAX_FILE_BYTES) throw new Error('Only a small, ordinary project file can be read')
@@ -64,7 +71,7 @@ export class ControlledFileExecutor {
         try { bytes = await fd.readFile() } finally { await fd.close() }
         const confirmedRoot = await realpath(root)
         if (confirmedRoot !== root) throw new Error('Grant root changed during execution')
-        const summary = summarize(bytes.toString('utf8'), path)
+        const summary = summarize(bytes, path)
         const content = Buffer.from(summary)
         return await this.finish({ effectId, artifactId, assignment, grant, content, mediaType: 'application/json',
           root, target, readOnly: true, evidence, finalState: 'confirmed' })
@@ -116,9 +123,26 @@ export class ControlledFileExecutor {
       artifact: { artifact_id: artifactId, metadata, bytes: content }, effect }
   }
 }
+async function readDescriptor(target, root) {
+  const info = await lstat(target)
+  if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1 || info.size < 1 || info.size > 8192) {
+    throw new Error('Descriptor source must be a unique small regular file')
+  }
+  const handle = await open(target, 'r')
+  let bytes
+  try { bytes = await handle.readFile() } finally { await handle.close() }
+  if (bytes.length !== info.size || await realpath(target) !== target || await realpath(root) !== root) {
+    throw new Error('Descriptor source changed or escaped its authorized root during reading')
+  }
+  return modelDescriptorProof(bytes)
+}
 function finalStatus(readOnly) { return readOnly ? 'confirmed' : 'confirmed' }
-function summarize(content, path) {
-  return JSON.stringify({ schema: 'loom.synthetic_summary.v1', path, byte_length: Buffer.byteLength(content),
+function summarize(bytes, path) {
+  // Hash raw read bytes before lossy UTF-8 decoding, and keep source proof
+  // distinct from the artifact hash of the serialized summary JSON.
+  const content = bytes.toString('utf8')
+  return JSON.stringify({ schema: 'loom.synthetic_summary.v1', path, byte_length: bytes.length,
+    input_sha256: createHash('sha256').update(bytes).digest('hex'),
     line_count: content.length ? content.split('\n').length : 0,
     lines: content.split('\n').filter((line) => line.trim()).slice(0, 20).map((line) => line.slice(0, 200)) }, null, 2)
 }

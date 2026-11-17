@@ -359,6 +359,10 @@ pub fn capabilities() -> Vec<Capability> {
             ticket_kind: TicketKind::EditFile,
             permission: Permission::Write,
         },
+        Capability {
+            ticket_kind: TicketKind::ModelDescriptor,
+            permission: Permission::Read,
+        },
     ]
 }
 pub fn worker(status: NodeStatus) -> WorkerSnapshot {

@@ -20,6 +20,10 @@ struct ReplaySample {
     schema: String,
     path: String,
     byte_length: u64,
+    /// New workers attest the raw read bytes. Legacy summaries stay parseable
+    /// but a missing field must not be treated as source-byte provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_sha256: Option<String>,
     line_count: usize,
     lines: Vec<String>,
 }
@@ -601,6 +605,13 @@ fn required_summary(relative_path: &str, bytes: &[u8]) -> Result<ReplaySample> {
         || sample.lines.len() > 20
         || sample.byte_length != 0 && sample.line_count == 0
         || sample.byte_length > MAX_SOURCE_BYTES
+        || sample.input_sha256.as_deref() == Some(crate::sha256(bytes).as_str())
+        || sample.input_sha256.as_deref().is_some_and(|digest| {
+            digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
         || sample.lines.iter().any(|line| {
             line.trim().is_empty()
                 || line.chars().count() > 200
@@ -889,5 +900,45 @@ mod byte_representation_tests {
 }"##;
 
         required_summary("input.txt", raw).unwrap();
+    }
+
+    #[test]
+    fn new_source_digest_is_optional_for_legacy_and_never_reuses_artifact_hash() {
+        let sample = ReplaySample {
+            schema: SAMPLE_SCHEMA.into(),
+            path: "input.txt".into(),
+            byte_length: 75,
+            input_sha256: None,
+            line_count: 3,
+            lines: vec![
+                "Real isolated project input.".into(),
+                "No LLM, DSH host or network model was called.".into(),
+            ],
+        };
+        let legacy = serde_json::to_vec_pretty(&sample).unwrap();
+        assert_eq!(
+            required_summary("input.txt", &legacy).unwrap().input_sha256,
+            None
+        );
+        let source =
+            b"Real isolated project input.\nNo LLM, DSH host or network model was called.\n";
+        let input_sha256 = sha256(source);
+        assert_ne!(input_sha256, sha256(&legacy));
+        let augmented = serde_json::to_vec_pretty(&ReplaySample {
+            input_sha256: Some(sha256(source)),
+            ..sample
+        })
+        .unwrap();
+        assert_eq!(
+            required_summary("input.txt", &augmented)
+                .unwrap()
+                .input_sha256
+                .as_deref(),
+            Some(sha256(source).as_str())
+        );
+        let mut invalid: Value = serde_json::from_slice(&augmented).unwrap();
+        invalid["input_sha256"] = Value::String(sha256(&augmented));
+        // Self-attesting that the summary hash is its own source proof is rejected.
+        required_summary("input.txt", &serde_json::to_vec_pretty(&invalid).unwrap()).unwrap_err();
     }
 }

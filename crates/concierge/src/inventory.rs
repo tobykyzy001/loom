@@ -128,24 +128,27 @@ pub enum NodeHealth {
 pub enum Capability {
     ReadSummary,
     EditFile,
+    ModelDescriptor,
 }
 impl Capability {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "read_summary" | "file:read_summary" => Some(Self::ReadSummary),
             "edit_file" | "file:edit_file" => Some(Self::EditFile),
+            "model_descriptor" | "file:model_descriptor" => Some(Self::ModelDescriptor),
             _ => None,
         }
     }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadSummary => "read_summary",
+            Self::ModelDescriptor => "model_descriptor",
             Self::EditFile => "edit_file",
         }
     }
     fn operation(self) -> &'static str {
         match self {
-            Self::ReadSummary => "read",
+            Self::ReadSummary | Self::ModelDescriptor => "read",
             Self::EditFile => "write",
         }
     }

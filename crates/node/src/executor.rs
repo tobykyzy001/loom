@@ -329,6 +329,7 @@ fn summarize(content: &[u8], path: &str) -> Vec<u8> {
     // the input cap; no language model or source-code execution is involved.
     serde_json::to_vec_pretty(
         &json!({"schema":"loom.synthetic_summary.v1","path":path,"byte_length":content.len(),
+        "input_sha256":sha256_hex(content),
         "line_count":if content.is_empty(){0}else{text.split('\n').count()},"lines":lines}),
     )
     .unwrap_or_else(|_| b"{\"error\":\"summary_encoding_failed\"}".to_vec())

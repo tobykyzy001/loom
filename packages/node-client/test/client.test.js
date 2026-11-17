@@ -5,6 +5,7 @@ import { sha256 } from '../src/util.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { verify, createPublicKey, randomUUID } from 'node:crypto'
+import { CAPABILITIES } from '../src/validation.js'
 import { NodeIdentity, NodeState, LoomNodeClient, LoomHttpClient, LoomHttpError, validateAssignment, ControlledFileExecutor, safeRelative, safeProjectRoot, requireIsolatedRoot } from '../src/index.js'
 
 async function fixture() { return mkdtemp(join(tmpdir(), 'loom-node-unit-')) }
@@ -94,13 +95,31 @@ test('assignment validation rejects stale lease, node mismatch, capability-only 
   assert.throws(() => validateAssignment(a, { ...g, digest: undefined }, identity))
 })
 
+test('model_descriptor registration is read-only and requires exact model.json without changing existing grants', async () => {
+  const root = await fixture(); const identity = await NodeIdentity.open(root); const { a, g } = assignment(root, identity)
+  assert.ok(CAPABILITIES.some((capability) => capability.ticket_kind === 'model_descriptor' && capability.permission === 'read'))
+  assert.throws(() => validateAssignment({ ...a, kind: 'model_descriptor', relative_path: 'model.json' }, g, identity), /authorize/)
+  const read = { ...g, operations: ['read'] }
+  assert.equal(validateAssignment({ ...a, kind: 'model_descriptor', relative_path: 'model.json' }, read, identity).kind, 'model_descriptor')
+  assert.throws(() => validateAssignment({ ...a, kind: 'model_descriptor', relative_path: 'model.json' }, { ...g, operations: ['invoke_text'] }, identity), /authorize/)
+  for (const target of [undefined, '../model.json', 'nested/model.json', 'weights.json']) {
+    assert.throws(() => validateAssignment({ ...a, kind: 'model_descriptor', relative_path: target }, g, identity), /model\.json/)
+  }
+})
+
 test('controlled executor performs read and atomic write only within fixture project', async () => {
-  const root = await fixture(); const project = await mkdtemp(join(root, 'project-')); await writeFile(join(project, 'input.txt'), 'Synthetic line\nSecond line\n')
+  const source = Buffer.from('Real isolated project input.\nNo LLM, DSH host or network model was called.\n')
+  const root = await fixture(); const project = await mkdtemp(join(root, 'project-')); await writeFile(join(project, 'input.txt'), source)
   const identity = await NodeIdentity.open(root); const executor = new ControlledFileExecutor({ artifactDir: join(root, 'artifacts') })
   const { a, g } = assignment(project.layout || project, identity)
   const first = await executor.execute(a, g)
   assert.equal(first.state, 'succeeded'); assert.equal(first.effect.status, 'confirmed')
-  assert.equal(JSON.parse(first.artifact.bytes.toString()).schema, 'loom.synthetic_summary.v1')
+  const summary = JSON.parse(first.artifact.bytes.toString())
+  assert.equal(summary.schema, 'loom.synthetic_summary.v1')
+  assert.equal(summary.input_sha256, sha256(source))
+  assert.notEqual(summary.input_sha256, first.artifact.metadata.sha256)
+  assert.equal(first.artifact.metadata.sha256, sha256(first.artifact.bytes))
+  assert.equal(summary.byte_length, source.length)
   const edit = await executor.execute({ ...a, kind: 'edit_file', relative_path: 'deep/nested/result.txt', content: 'new fixture content' }, g)
   assert.equal(await readFile(join(project, 'deep/nested/result.txt'), 'utf8'), 'new fixture content')
   assert.equal(edit.state, 'succeeded')

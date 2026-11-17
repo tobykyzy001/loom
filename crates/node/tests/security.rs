@@ -221,6 +221,31 @@ fn executor_rejects_a_symlink_target_without_creating_an_artifact() {
 }
 
 #[test]
+fn source_hash_is_from_original_bytes_before_lossy_utf8_decoding() {
+    for raw in [b"Alpha\nfixed fact\n".as_slice(), &[0xff, b'a', 0xfe, b'b']] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (assignment, mut state) = executable(&tmp, |_| {});
+        std::fs::write(assignment.binding_root.join("README.md"), raw).unwrap();
+        executor::execute(&assignment, &tmp.path().join("artifacts"), &mut state).unwrap();
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            state.data.outbox[0].body["bytes_base64"].as_str().unwrap(),
+        )
+        .unwrap();
+        let summary: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            summary["input_sha256"],
+            format!("{:x}", Sha256::digest(raw))
+        );
+        assert_ne!(
+            summary["input_sha256"],
+            format!("{:x}", Sha256::digest(&bytes))
+        );
+        assert_eq!(summary["byte_length"], raw.len());
+    }
+}
+
+#[test]
 fn read_summary_and_edit_emit_uuid_artifact_and_exact_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let (assignment, mut state) = executable(&tmp, |_| {});
@@ -250,6 +275,13 @@ fn read_summary_and_edit_emit_uuid_artifact_and_exact_bytes() {
     let summary: Value = serde_json::from_slice(&base).unwrap();
     assert_eq!(summary["path"], "README.md");
     assert_eq!(summary["lines"][0], "Alpha");
+    let source = std::fs::read(assignment.binding_root.join("README.md")).unwrap();
+    assert_eq!(
+        summary["input_sha256"],
+        format!("{:x}", Sha256::digest(&source))
+    );
+    assert_ne!(summary["input_sha256"], upload["metadata"]["sha256"]);
+    assert_eq!(summary["byte_length"], source.len());
     let report = &state.data.outbox[1].body;
     assert_eq!(report["requested_state"], "succeeded");
     assert_eq!(report["worker_id"], "default");

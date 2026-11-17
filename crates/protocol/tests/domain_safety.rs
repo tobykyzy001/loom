@@ -246,6 +246,50 @@ fn paths_are_logical_portable_targets_and_empty_write_is_rejected() {
 }
 
 #[test]
+fn model_descriptor_is_explicit_read_only_model_json_target() {
+    assert_eq!(
+        TicketKind::ModelDescriptor.required_permission(),
+        Permission::Read
+    );
+    assert!(TicketKind::ModelDescriptor.requires_explicit_target());
+    let target = path("model.json");
+    let operation =
+        Operation::for_ticket(TicketKind::ModelDescriptor, Some(target.clone())).unwrap();
+    assert_eq!(operation, Operation::ReadPath(target.clone()));
+    assert_eq!(operation.required_permission(), Permission::Read);
+    for invalid in [
+        None,
+        Some(path("weights.json")),
+        Some(path("nested/model.json")),
+    ] {
+        assert!(Operation::for_ticket(TicketKind::ModelDescriptor, invalid).is_err());
+    }
+    assert!(RelativePath::parse("../model.json").is_err());
+    let mut grant = grant();
+    grant
+        .operations
+        .insert(Operation::ReadPath(path("model.json")));
+    let ticket = Ticket::create(
+        TicketSpec {
+            project_id: ids().3,
+            objective: "Observe descriptor; do not run a model".into(),
+            kind: TicketKind::ModelDescriptor,
+            relative_path: Some(target),
+        },
+        Placement {
+            node_id: ids().0,
+            installation_id: ids().1,
+            worker_id: ids().2,
+        },
+        &grant,
+        at(10),
+    )
+    .unwrap();
+    assert_eq!(ticket.kind, TicketKind::ModelDescriptor);
+    assert_eq!(ticket.operation.required_permission(), Permission::Read);
+}
+
+#[test]
 fn grant_revocation_and_digest_change_fence_execution() {
     let (mut state, report) = fixture();
     let result = state

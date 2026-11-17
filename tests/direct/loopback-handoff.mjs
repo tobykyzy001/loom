@@ -201,9 +201,12 @@ try {
       currentOffer: async () => ({ direct_offer: firstIssue.direct_offer, identity: nodeB.identity, endpoint: peer.endpoint }),
       fetch: async () => new Response(new ReadableStream({ start(controller) {
         controller.enqueue(new Uint8Array(SAFE_LIMIT())); controller.close()
-      } }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': '210', 'x-content-type-options': 'nosniff' } }) })
+      } }), { status: 200, headers: { 'content-type': 'application/json', 'content-length': String(firstIssue.direct_offer.size_bytes), 'x-content-type-options': 'nosniff' } }) })
     await assert.rejects(() => bounded.execute(assignment, assignment.grant),
-      (error) => error.code === 'source_response_limit')
+      (error) => {
+        if (error.code !== 'source_response_limit') throw new Error(`Expected source_response_limit, got ${error.code}: ${error.message}`)
+        return true
+      })
     await assert.rejects(() => readFile(join(rootB, 'docs/destination.txt')), (error) => error.code === 'ENOENT')
     return { response_code: 502, exceeded_artifact_bytes_rejected: true, destination_file_absent_before_success: true }
   })

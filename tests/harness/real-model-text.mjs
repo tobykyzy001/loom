@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fixtureRoot, installBundles, isolatedEnv, installation, redact, sleep } from './environment.mjs'
 import { FixtureHost } from './runtime.mjs'
 import { startRustConcierge } from '../../scripts/fixtures/rust-server.mjs'
-import { LoomHttpClient } from '../../packages/node-client/src/http.js'
+import { LoomHttpClient, LoomHttpError } from '../../packages/node-client/src/http.js'
 
 const root = await fixtureRoot(process.env.LOOM_MODEL_TEXT_ROOT)
 let host, server, admin
@@ -116,7 +116,12 @@ try {
   assert.ok(host.sessionEvents(sessionId, ['assistant/message']).length > 0)
   assert.ok(host.sessionEvents(sessionId, ['turn/end']).some((entry) => entry.event.data.reason.kind === 'completed'))
   const endpointBefore = await admin.get('/api/v1/models').catch(error => error)
-  assert.equal(endpointBefore.status, 501, 'No observation-to-registry shortcut is permitted')
+  assert.notEqual(endpointBefore instanceof LoomHttpError && endpointBefore.status < 400, true, 'Model observation read must remain authorized and not synthesize permission')
+  assert.equal(observation.grant_id, invoke.id, 'The invocation keeps the original independently granted invoke_text scope, not a synthesized catalog grant')
+  for (const lifecycle of ['invoke', 'activate', 'download']) {
+    const error = await admin.post(`/api/v1/models/unresolved-generic-model/${lifecycle}`, {}).catch(error => error)
+    assert.equal(error instanceof LoomHttpError && error.status >= 400, true, `No unsupported ${lifecycle} lifecycle exposed by the observation/catalog bridge`)
+  }
   await host.stop(); host = null
   const firstBytes = Buffer.from(download.content)
   const sleepUntilDelivery = sleep(1500)

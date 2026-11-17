@@ -69,8 +69,10 @@ try {
   assert.equal(sourceSummary.schema,'loom.synthetic_summary.v1')
   assert.equal(sourceSummary.path,'input.txt')
   assert.equal(sourceSummary.lines[0],'Real isolated project input.')
+  assert.equal(sourceSummary.input_sha256,sha256(initialBytes),'artifact must prove the original raw source bytes')
+  assert.notEqual(sourceSummary.input_sha256,sourceSha,'source proof is not a hash of summary JSON')
   assert.deepEqual(await readFile(join(projectRoot,'input.txt')),initialBytes)
-  record('immutable source with actual Assignment, Report, UUID Artifact and independently computed SHA',{source_ticket_id:source.id,source_artifact_id:sourceArtifact.id,source_sha256:sourceSha,source_worker:original.assignments[0].worker_id,schema:8})
+  record('immutable source with actual Assignment, Report, UUID Artifact and independently computed SHA',{source_ticket_id:source.id,source_artifact_id:sourceArtifact.id,source_sha256:sourceSha,source_worker:original.assignments[0].worker_id,schema:9})
 
   const candidateId=await candidate('Bounded exact deterministic read_summary')
   assert.equal(await countTickets(),1)
@@ -211,12 +213,12 @@ try {
   assert.equal((await admin.get('/api/v1/audit/verify')).valid,true)
   const doctor=await promisify(execFile)('cargo',['run','-q','-p','loom-concierge','--bin','loom','--','--data-dir',server.dataDir,'doctor'],{env:{...process.env,LOOM_CLIENT_TOKEN:server.clientToken},timeout:120000,encoding:'utf8'})
   const persistence=JSON.parse(doctor.stdout)
-  assert.equal(persistence.schema_version,8)
+  assert.equal(persistence.schema_version,9)
   assert.equal(persistence.integrity[0].integrity_check,'ok')
   assert.equal(persistence.audit_valid,true)
-  record('controller reopen keeps both exact byte proofs, original lineage, independently accepted Skill and schema v8',{schema_version:persistence.schema_version,integrity:persistence.integrity[0].integrity_check,audit_valid:persistence.audit_valid,source_sha256:sourceSha,replay_sha256:freshSha,ordinary_replays:1,new_grants:0})
+  record('controller reopen keeps both exact byte proofs, original lineage, independently accepted Skill and schema v9',{schema_version:persistence.schema_version,integrity:persistence.integrity[0].integrity_check,audit_valid:persistence.audit_valid,source_sha256:sourceSha,replay_sha256:freshSha,ordinary_replays:1,new_grants:0})
 
-  console.log(JSON.stringify({overall:'PASS',schema:8,source_sha256:sourceSha,replay_sha256:freshSha,tickets:await countTickets(),checks,not_implemented:['general learned Skills','arbitrary commands','live LLM','general Grant or activation','provider/distribution','HTTP connectors'],foreground_workers_stopped:true},null,2))
+  console.log(JSON.stringify({overall:'PASS',schema:9,source_sha256:sourceSha,replay_sha256:freshSha,tickets:await countTickets(),checks,not_implemented:['general learned Skills','arbitrary commands','live LLM','general Grant or activation','provider/distribution','HTTP connectors'],foreground_workers_stopped:true},null,2))
 } catch (error) {
   console.error(JSON.stringify({overall:'FAIL',error:error.stack,checks},null,2));process.exitCode=1
 } finally {

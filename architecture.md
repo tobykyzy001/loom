@@ -262,7 +262,7 @@ Host Agent
 
 schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail返回：原artifact/sha/ticket/assignment/node、精确provider/model、Text mode、host_reported来源、report-declared的执行/输出布尔值、observed_at/recorded_at、可选真实Session UUID、Grant与`grant_current`在读取时的状态。这里的`grant_current`仅表示原记录现未被撤销；**不是当前模型可用，仍须分别查证Node、能力、Lease等**。撤销Grant不删合法的过去任务及报告，而会阻止它成为新的授权。缺失/不同provider/model、其他Grant、错sha、假session UUID、image模态、对stub声称实际LLM均不得成为模型观察。
 
-早期只有文件索引没有现存完整受限ModelMetadata的旧Artifact保持不补造此零散历史；否则仅以严格现状/原始字段记录这个信息缺口，不凭文件名或Goal假装知道做过什么。普通文件任务没有模型观察。 `GET /models`仍在full registry/lifecycle未提供的范围返回501，维护这项窄观察与全局Model Registry不能混淆；Text Result也没有原生文件副作用。
+早期只有文件索引没有现存完整受限ModelMetadata的旧Artifact保持不补造此零散历史；否则仅以严格现状/原始字段记录这个信息缺口，不凭文件名或Goal假装知道做过什么。普通文件任务没有模型观察。 目前完整模型生命周期/激活/下载/通用Provider Registry仍未交付，不能把已实证的模型观察冒充全局`models registry`支持；Text Result也没有原生文件副作用。另有严格的`loom.model-descriptor.v1`注册/放置允许/撤档骨架（仅source byte+受类型约束的小model description），仅后述显式来源检查与元数据授权，不提供模型生成或完整推理工作流。
 
 实际DSH SDK生文本、中心接收、原始Grant/Artifact及恢复后读取由`tests/harness/real-model-text.mjs`验证。模型报告本身是宿主报告，不是Conci erge独立验证任意商业LLM；Stub并不收费或触网。提供方功能、资源生命周期和质量评价仍分别NOT RUN。原任务详情只展示这个边界明确的观察，没有管理模型或浏览器读取Profile/凭据。
 
@@ -272,9 +272,15 @@ schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail�
 
 只接纳已有的 `loom-stub/loom-stub-v1` 文字 SDK fixture：`resource_state: adapter_observed`，`prepared_call_observed:true`，`generation_observed:false`，`input_modalities:['text']`，可选 context window ≤1048576，以及 `install/download/activation/generation` 全 false 的 policy。控制器检查strict字段与有界lowercase标签；不额外原样转发未知key、key/token/credential/endpoint、prompt或主机信源声明。它输出稳定Node/Installation/Worker/provider/model摘要ID，`source: host_reported`，`read_source: authenticated_node_heartbeat`，自己的 `catalogued:true, controller_matches:true`，但强制 `activated:allowed:executable:false`。Common `inventory.resources` 另经既有 `normalize_reported_facts` 处理，不能因为模型条目而覆盖controller直接硬件观测。
 
-空models和合法 `requested_disabled`、`unsupported_*`、`lookup_*` finding是真实的“当前没有符合条件对象”，不是异常或旧模型presence。缺失/非法data、错误policy、unknown worker与错误scope分别输出missing/invalid和固定finding，不能沿用旧模型为当前fresh。观察时间与GET时间分离；现有heartbeat90秒阈值使`models[].freshness=stale`、`resource_state=unavailable`。重开沿用当前**schema v8**的Node inventory，所以不需要新表或migration; GET也不会重新accessSDK、provider、stream或grant一个model_text任务。API policy是`read_catalog_only`，download/install/activation/general_provider_registry/image_generation/model_execution_grants不支持，`/models`保持完整lifecycle未实现。
+空models和合法 `requested_disabled`、`unsupported_*`、`lookup_*` finding是真实的“当前没有符合条件对象”，不是异常或旧模型presence。缺失/非法data、错误policy、unknown worker与错误scope分别输出missing/invalid和固定finding，不能沿用旧模型为当前fresh。观察时间与GET时间分离；现有heartbeat90秒阈值使`models[].freshness=stale`、`resource_state=unavailable`。重开沿用已在v8时期存现有表里的Node inventory；v9仅扩展descriptor授权元数据，不重写这些事实; GET也不会重新accessSDK、provider、stream或grant一个model_text任务。API policy是`read_catalog_only`，download/install/activation/general_provider_registry/image_generation/model_execution_grants不支持；下述局部descriptor Registry不是这些能力的实现。
 
 签署Node的真实HTTP、负例与上线/缺失/恢复由`node tests/model-inventory/controller.mjs`要求验证；真实隔离DSH SDK一次prepareCall和stream/request零次由`node tests/model-inventory/real-dsh.mjs`另行实测。文本adapter观测绝不是任意付费模型、模型质量、下载安装、本地图片、通用provider execution、跨机或全M1完成证明。设备页已以`apps/web/src/components/ModelInventorySection.vue`呈现相同的认证投影，包含精确 Node/Worker、source/text modality、上下文窗口（token声明，不是内存bytes）与观察时间；读取只在进入设备页与用户手动刷新发生，未提供下载或激活操作。`node tests/model-inventory/browser.mjs`用真实签名 Node heartbeat 验证实际Vue请求与只读状态，长标识在390px换行，不改变已有Ticket/Grant/Node计数。它不是手机、生产目录管理或生成/安装能力。
+
+### 3.6.2 本地模型描述符与独立的放置授权
+
+`POST/GET /api/v1/models` 只支持实际Node的小范围`loom.model-descriptor.v1`证据，不是此前全模型管理API的同义复用。显式普通`read`Grant下的专用 `model_descriptor` Task只读当前项目`model.json`（UTF-8≤8KiB、严格五字段`schema/provider/revision/input_modalities/local_only`，本版仅`fixture-local-text/v1/text/local_only:true`），产生json proof Artifact。Proof保留`source_kind`、`relative_path`、`source_document`原文与`source_sha256`，另有独立的proof wrapper SHA。注册再次核对成功Ticket/Assignment/Report、真实Worker/ProjectBinding、当前readGrant、原Artifact索引与实际bytes的SHA、两层严格字段和 `sha256(source_document)==source_sha256`；非literal原文、outer↔document不符、secret键、路径/URL、weights或额外模态均不注册。不能让普通summary或write-effect wrapper冒充这个Artifact。
+
+Schema v9仅在旧models/model_placements上增加null-permitting source和授权身份列，并新增`model_placement_authorizations`。已有v3/v6/v7/v8的Ticket/Grant/Artifact/audit不改写，legacy模型行缺证据也不补造。registry model永远`registered`而非installed/active，retire只标记`retired`保留Artifact/Grant/history。`place_model`是独立Grant operation，不含read/write/invoke_text插入。`POST /models/:id/placement-approvals`强制当前place_model Grant、digest、真实Node/Installation/Worker与相同ProjectBinding；重复相同范围幂等，其它Grant或修改hash拒绝。`/place`只在已有approval下记录“approved_for_placement（未运行）”，同一model+grant+binding返回旧receipt不重复写audit；它不创建Ticket/Assignment/Effect或模型执行。撤销Grant、retire后current是false，任何旧审批仍不可重新授权。没有runtime加载、模型质量、下载、激活、Provider切换、图片生成或自动Placement claim。实际文件生成、独有bytes SHA、负例、独立Grant与retire/reopen见[tests/models/README.md](tests/models/README.md)。
 
 ### 3.7 受限技能候选与具体重放证明
 

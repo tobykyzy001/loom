@@ -81,6 +81,133 @@ mod tests {
         assert_eq!(value["messages"][0]["id"], "delegated");
     }
 
+    #[tokio::test]
+    async fn model_descriptor_is_a_bounded_read_task_not_model_invocation() {
+        const TOKEN: &str = "test-client-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let project_root = directory.path().join("project");
+        std::fs::create_dir(&project_root).unwrap();
+        let store = crate::store::Store::open(directory.path().join("db")).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','fixture',?1,'read_only',1,?2,'{}')",
+                [project_root.to_string_lossy().as_ref(), crate::now().as_str()],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node-descriptor','install','default',?1,'binding-proof',?2)",
+                [project_root.to_string_lossy().as_ref(), crate::now().as_str()],
+            )
+            .unwrap();
+        for (id, operations) in [
+            ("read-grant", json!(["read"])),
+            ("invoke-grant", json!(["invoke_text"])),
+            ("place-grant", json!(["place_model"])),
+        ] {
+            let coin = json!({"id":id,"project_id":"project","node_id":"node-descriptor","installation_id":"install","worker_id":"default","operations":operations,"version":1,"project_binding_id":"binding"});
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES(?1,'project','node-descriptor','default','install',?2,1,?3,?4,'binding')",
+                    params![id, coin["operations"].to_string(), crate::store::hash(&coin.to_string()), crate::now()],
+                )
+                .unwrap();
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node-descriptor','install','public','token','online',?1,?2,?3,?4,?4)",
+                [
+                    json!([{"ticket_kind":"model_descriptor","permission":"read"}]).to_string(),
+                    json!([{"worker_id":"default","status":"online"}]).to_string(),
+                    json!({"project_roots":{"project":project_root}}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+        let app = router(Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        }));
+        let request = |body: Value| {
+            axum::extract::Request::builder()
+                .method("POST")
+                .uri("/api/v1/tickets")
+                .header("content-type", "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        for invalid in [
+            json!({"project_id":"project","goal":"read model metadata","kind":"model_descriptor"}),
+            json!({"project_id":"project","goal":"escape via parent","kind":"model_descriptor","relative_path":"../model.json"}),
+            json!({"project_id":"project","goal":"arbitrary root filename","kind":"model_descriptor","relative_path":"weights.json"}),
+            json!({"project_id":"project","goal":"write disguised as a read","kind":"model_descriptor","relative_path":"model.json","content":"{}"}),
+            json!({"project_id":"project","goal":"override placement","kind":"model_descriptor","relative_path":"model.json","capability":"read_summary"}),
+        ] {
+            let response = app.clone().oneshot(request(invalid)).await.unwrap();
+            assert_eq!(response.status(), 400);
+        }
+        for incompatible in [
+            None,
+            Some(json!("invoke-grant")),
+            Some(json!("place-grant")),
+        ] {
+            let mut body = json!({"project_id":"project","goal":"read-only proof not invocation","kind":"model_descriptor","relative_path":"model.json"});
+            if let Some(grant) = incompatible.clone() {
+                body["grant_id"] = grant;
+            }
+            let response = app.clone().oneshot(request(body)).await.unwrap();
+            if incompatible.is_some() {
+                assert_eq!(
+                    response.status(),
+                    403,
+                    "non-read Grant must not describe a model resource"
+                );
+            } else {
+                assert_eq!(response.status(), 200, "auto selection uses the read Grant");
+            }
+        }
+        let automatic = app
+            .clone()
+            .oneshot(request(json!({"project_id":"project","goal":"read the declared model metadata","kind":"model_descriptor","relative_path":"model.json"})))
+            .await
+            .unwrap();
+        assert_eq!(automatic.status(), 200);
+        let automatic = axum::body::to_bytes(automatic.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let automatic: Value = serde_json::from_slice(&automatic).unwrap();
+        assert_eq!(automatic["kind"], "model_descriptor");
+        assert_eq!(automatic["relative_path"], "model.json");
+        assert_eq!(automatic["status"], "running");
+        assert_eq!(
+            automatic["grant_id"], "read-grant",
+            "auto Grant selection must not choose invoke_text"
+        );
+        assert_eq!(automatic["assignments"].as_array().unwrap().len(), 1);
+        let explicit = app
+            .clone()
+            .oneshot(request(json!({"project_id":"project","goal":"read explicitly granted metadata","kind":"model_descriptor","relative_path":"model.json","grant_id":"read-grant"})))
+            .await
+            .unwrap();
+        assert_eq!(explicit.status(), 200);
+        let explicit = axum::body::to_bytes(explicit.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let explicit: Value = serde_json::from_slice(&explicit).unwrap();
+        assert_eq!(explicit["kind"], "model_descriptor");
+        assert_eq!(explicit["assignments"].as_array().unwrap().len(), 1);
+    }
+
     #[test]
     fn any_delegation_claim_without_a_real_parent_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
@@ -433,8 +560,11 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
             get(skill_replay).post(skill_replay_start),
         )
         .route("/model-inventory", get(model_inventory))
-        .route("/models", get(models))
-        .route("/models/{id}/place", post(models))
+        .route("/models", get(model_list).post(model_register))
+        .route("/models/{id}", get(model_detail))
+        .route("/models/{id}/placement-approvals", post(model_approve))
+        .route("/models/{id}/place", post(model_place))
+        .route("/models/{id}/retire", post(model_retire))
         .route("/pipelines", get(list_pipelines).post(create_pipeline))
         .route("/pipelines/{id}", get(pipeline_detail))
         .route("/pipelines/{id}/run", post(run_pipeline))
@@ -646,12 +776,13 @@ fn explicit_permissions(body: &Value) -> ApiResult<Vec<&'static str>> {
     let mut permissions = Vec::new();
     for operation in operations {
         match operation {
-            "read"|"read_summary"=>if !permissions.contains(&"read"){permissions.push("read")},
+            "read"|"read_summary"|"model_descriptor"=>if !permissions.contains(&"read"){permissions.push("read")},
             "write"|"edit_file"=>if !permissions.contains(&"write"){permissions.push("write")},
             "read_write"=>{if !permissions.contains(&"read"){permissions.push("read");}
                 if !permissions.contains(&"write"){permissions.push("write");}},
             "invoke_text"=>if !permissions.contains(&"invoke_text"){permissions.push("invoke_text")},
-            _=>return Err(ApiError::bad("Operations require explicit read/read_summary, write/edit_file, read_write or separately granted invoke_text.")),
+            "place_model"=>if !permissions.contains(&"place_model"){permissions.push("place_model")},
+            _=>return Err(ApiError::bad("Operations require explicit read/read_summary, write/edit_file, read_write, separately granted invoke_text or separate place_model.")),
         }
     }
     if permissions.is_empty() {
@@ -1860,8 +1991,28 @@ async fn create_ticket(
         .get("projects", &body.project_id)?
         .ok_or_else(|| ApiError::bad("Authorized project reference required"))?;
     let kind = body.kind.as_deref().unwrap_or("read_summary");
-    if !matches!(kind, "read_summary" | "edit_file" | "model_text") {
-        return Err(ApiError::bad("Supported task kinds are read_summary, edit_file and the separately authorized model_text"));
+    if !matches!(
+        kind,
+        "read_summary" | "edit_file" | "model_text" | "model_descriptor"
+    ) {
+        return Err(ApiError::bad("Supported task kinds are read_summary, edit_file, separately authorized model_text and read-only model_descriptor"));
+    }
+    if kind == "model_descriptor" {
+        if body.relative_path.as_deref() != Some("model.json") {
+            return Err(ApiError::bad(
+                "model_descriptor requires relative_path exactly model.json and only reads this bounded descriptor",
+            ));
+        }
+        if body.content.is_some() {
+            return Err(ApiError::bad(
+                "model_descriptor is read-only and cannot supply source content",
+            ));
+        }
+        if body.capability.is_some() {
+            return Err(ApiError::bad(
+                "model_descriptor requires its matching read-only physical capability; no override",
+            ));
+        }
     }
     let path = safe_relative(
         body.relative_path
@@ -1918,7 +2069,7 @@ async fn create_ticket(
         grant
     } else {
         let permission = match kind {
-            "read_summary" => "read",
+            "read_summary" | "model_descriptor" => "read",
             "edit_file" => "write",
             _ => "invoke_text",
         };
@@ -1952,7 +2103,7 @@ async fn create_ticket(
         .unwrap_or_default();
     if !ops.contains(
         &(match kind {
-            "read_summary" => "read",
+            "read_summary" | "model_descriptor" => "read",
             "edit_file" => "write",
             _ => "invoke_text",
         }),
@@ -2278,9 +2429,60 @@ async fn cancel_pipeline(
         json!({"cancel_requested":true,"pipeline":crate::pipeline::detail(&store, &id)?}),
     ))
 }
+async fn model_list(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::model_registry::list(&store)?))
+}
+async fn model_detail(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(
+        json!({"model":crate::model_registry::one(&store,&id)?}),
+    ))
+}
+async fn model_register(
+    AppState(state): AppState<Arc<State>>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let mut store = state.lock()?;
+    Ok(Json(crate::model_registry::register(&mut store, &body)?))
+}
+async fn model_approve(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let mut store = state.lock()?;
+    Ok(Json(crate::model_registry::approve(
+        &mut store, &id, &body,
+    )?))
+}
+async fn model_place(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let mut store = state.lock()?;
+    Ok(Json(crate::model_registry::place(&mut store, &id, &body)?))
+}
+async fn model_retire(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let mut store = state.lock()?;
+    Ok(Json(crate::model_registry::retire(&mut store, &id, &body)?))
+}
+#[allow(dead_code)]
 async fn models(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let _ = state;
-    Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "m3_not_available", "Full model registry, verified placement lifecycle and general provider activation are not delivered yet. Only the separately verified, bounded model_text fixture exists; other models remain unknown without genuine observation."))
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "m3_not_available",
+        "Generalized model lifecycle and provider activation remain unverified. Bounded descriptor registration and explicit place_model approvals are separate evidence workflows, not model invocation or downloaded model availability claims.",
+    ))
 }
 async fn candidates(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let store = state.lock()?;

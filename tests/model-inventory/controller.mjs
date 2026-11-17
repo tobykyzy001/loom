@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { startRustConcierge, testingRoot } from '../../scripts/fixtures/rust-server.mjs'
-import { LoomHttpClient } from '../../packages/node-client/src/http.js'
+import { LoomHttpClient, LoomHttpError } from '../../packages/node-client/src/http.js'
 import { LoomNodeClient } from '../../packages/node-client/src/client.js'
 import { NodeIdentity } from '../../packages/node-client/src/identity.js'
 
@@ -59,7 +59,20 @@ try {
   assert.equal(exact.permission_granted, false)
   assert.equal(exact.policy.supported_operations[0], 'read_catalog_only')
   assert.deepEqual(exact.findings[0].provider, 'loom-stub')
-  await assert.rejects(() => admin.get('/api/v1/models'), error => error.status === 501)
+  // Observation catalog remains distinct from the separately proven descriptor
+  // registration/placement workflow; no model inference or activation route opened.
+  for (const path of ['/api/v1/models/catalogfixture/invoke', '/api/v1/models/catalogfixture/activate', '/api/v1/models/catalogfixture/download']) {
+    try {
+      const result = await admin.post(path, {})
+      throw Object.assign(new Error(`Unsupported lifecycle unexpectedly accepted: ${path}`), { unexpected: true })
+    } catch (error) {
+      assert.equal(error instanceof LoomHttpError, true, `expected authentic rejected HTTP response for ${path}: ${error.message}`)
+      assert.ok(error.status >= 400 && error.status < 500, `${path} must not create generalized model runtime or grant`)
+    }
+  }
+  assert.equal(model.activated, false)
+  assert.equal(model.allowed, false)
+  assert.equal(model.executable, false)
   const firstId = model.id
   await node.heartbeat({ capabilities: [], workers: [worker], inventory })
   assert.equal((await admin.get('/api/v1/model-inventory')).models[0].id, firstId)

@@ -1,6 +1,6 @@
 import { assertIdentifier, assertObject, assertString, sha256 } from './util.js'
 const states = new Set(['online', 'busy', 'degraded'])
-export const CAPABILITIES = Object.freeze(['read_summary', 'edit_file'])
+export const CAPABILITIES = Object.freeze(['read_summary', 'edit_file', 'model_descriptor'])
 const operations = new Set(CAPABILITIES)
 /** Local fence validates the exact issued project/operation; it does not invent a grant from capability alone. */
 export function validateAssignment(assignment, grant, identity, { now = Date.now() } = {}) {
@@ -27,7 +27,7 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
   if (typeof expected !== 'string' || typeof suppliedDigest !== 'string' || expected !== suppliedDigest) {
     throw new Error('No verifiable center-issued Grant digest')
   }
-  if (!operations.has(assignment.kind) && assignment.kind !== 'model_text') throw new Error('Unsupported assignment kind')
+  if (!operations.has(assignment.kind) && assignment.kind !== 'model_text' && assignment.kind !== 'model_descriptor') throw new Error('Unsupported assignment kind')
   const allowed = Array.isArray(grant.operations) ? grant.operations : (Array.isArray(grant.capabilities) ? grant.capabilities : [])
   const permission = assignment.kind === 'edit_file' ? 'write' : assignment.kind === 'model_text' ? 'invoke_text' : 'read'
   if (!allowed.includes(assignment.kind) && !allowed.includes(permission)) throw new Error('Grant does not authorize assignment kind')

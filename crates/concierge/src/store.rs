@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 8 {
+        if current > 9 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 8)"
+                "database schema is from a newer Loom release (found {current}, supported 9)"
             )
         }
         if current == 0 {
@@ -169,6 +169,48 @@ impl Store {
                     PRIMARY KEY(plan_id,target_id)
                 );
                 PRAGMA user_version=8;",
+            )?;
+        }
+        if current < 9 {
+            // Old intentionally minimal v3–v8 snapshots may predate the
+            // prototype model tables. Add those tables before inspecting cols.
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY,name TEXT NOT NULL,revision TEXT NOT NULL,location TEXT NOT NULL,placement_policy TEXT NOT NULL,status TEXT NOT NULL,approved_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS model_placements(id TEXT PRIMARY KEY,model_id TEXT NOT NULL REFERENCES models(id),node_id TEXT NOT NULL,location TEXT NOT NULL,status TEXT NOT NULL,reported_at TEXT NOT NULL);"
+            )?;
+            for (table, column) in [
+                ("models", "node_id"),
+                ("models", "installation_id"),
+                ("models", "worker_id"),
+                ("models", "project_id"),
+                ("models", "source_ticket_id"),
+                ("models", "source_artifact_id"),
+                ("models", "descriptor_json"),
+                ("models", "descriptor_sha256"),
+                ("models", "source_kind"),
+                ("model_placements", "grant_id"),
+                ("model_placements", "binding_id"),
+            ] {
+                let present: i64 = self.connection.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+                    [table, column],
+                    |row| row.get(0),
+                )?;
+                if present == 0 {
+                    self.connection
+                        .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))?;
+                }
+            }
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS model_placement_authorizations(
+                    id TEXT PRIMARY KEY, model_id TEXT NOT NULL REFERENCES models(id),
+                    grant_id TEXT NOT NULL REFERENCES grants(id), grant_digest TEXT NOT NULL,
+                    project_id TEXT NOT NULL REFERENCES projects(id), binding_id TEXT NOT NULL REFERENCES project_bindings(id),
+                    node_id TEXT NOT NULL, installation_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+                    accepted_state TEXT NOT NULL, reviewed_model_digest TEXT NOT NULL, approved_at TEXT NOT NULL,
+                    UNIQUE(model_id,grant_id)
+                 );
+                 PRAGMA user_version=9;",
             )?;
         }
         Ok(())
@@ -485,7 +527,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);

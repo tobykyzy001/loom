@@ -11,6 +11,7 @@ export function wireCapabilities(values) {
   return values.map((value) => {
     if (value.kind === 'model_text') return { ticket_kind: 'model_text', permission: 'invoke_text' }
     if (value.kind === 'dsh_agent_turn') return { ticket_kind: 'dsh_agent_turn', permission: 'read' }
+    if (value === 'model_descriptor') return { ticket_kind: 'model_descriptor', permission: 'read' }
     if (value === 'read_summary' || value === 'dsh_agent_turn') return { ticket_kind: value, permission: 'read' }
     if (value === 'edit_file') return { ticket_kind: 'edit_file', permission: 'write' }
     return value

@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { wireCapabilities } from '../src/runner.js'
 import { createHash } from 'node:crypto'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { ControlledFileExecutor } from '../src/executor.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { LoomHttpClient } from '../src/http.js'
@@ -12,6 +13,43 @@ import { CoordinatorLoop } from '../lib/coordinator.js'
 import { LoomNodeClient } from '../src/client.js'
 
 const values = ['dsh_agent_turn', 'read_summary', 'edit_file']
+
+test('vendored read summary hashes raw source bytes separately from artifact JSON', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'loom-dsh-source-digest-'))
+  const project = join(root, 'project'); await mkdir(project, { recursive: true })
+  const source = Buffer.from('Real isolated project input.\nNo LLM, DSH host or network model was called.\n')
+  await writeFile(join(project, 'input.txt'), source)
+  const executor = new ControlledFileExecutor({ artifactDir: join(root, 'artifacts') })
+  const assignment = { id: 'source-digest-assignment', ticket_id: 'source-digest-ticket',
+    node_id: 'a'.repeat(64), kind: 'read_summary', relative_path: 'input.txt' }
+  const result = await executor.execute(assignment, { project_root: project })
+  const summary = JSON.parse(result.artifact.bytes.toString())
+  const expected = createHash('sha256').update(source).digest('hex')
+  assert.equal(summary.input_sha256, expected)
+  assert.notEqual(summary.input_sha256, result.artifact.metadata.sha256)
+  assert.equal(summary.lines[0], 'Real isolated project input.')
+  assert.equal(summary.byte_length, source.length)
+  assert.equal(result.artifact.metadata.sha256, createHash('sha256').update(result.artifact.bytes).digest('hex'))
+})
+test('vendored raw-byte proof differs across identical lossy decoded text', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'loom-dsh-raw-byte-proof-'))
+  const project = join(root, 'project'); await mkdir(project)
+  const digests = []
+  const executor = new ControlledFileExecutor({ artifactDir: join(root, 'artifacts') })
+  const assignment = { id: 'proof', ticket_id: 'ticket', node_id: 'node',
+    kind: 'read_summary', relative_path: 'input.txt' }
+  for (const [, source] of [Buffer.from([0xff, 0x61]), Buffer.from([0xfe, 0x61])].entries()) {
+    await writeFile(join(project, 'input.txt'), source)
+    const result = await executor.execute(assignment, { project_root: project })
+    const summary = JSON.parse(result.artifact.bytes.toString('utf8'))
+    assert.equal(summary.input_sha256, createHash('sha256').update(source).digest('hex'))
+    assert.equal(summary.byte_length, 2)
+    assert.equal(summary.lines.length, 1)
+    assert.equal(summary.lines[0], '\ufffda')
+    digests.push(summary.input_sha256)
+  }
+  assert.notEqual(digests[0], digests[1])
+})
 test('real Coordinator config exposes typed capabilities and isolated root declarations', () => {
   assert.deepEqual(wireCapabilities(values), [
     { ticket_kind: 'dsh_agent_turn', permission: 'read' },
