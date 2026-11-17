@@ -588,7 +588,7 @@ mod tests {
         drop(_simulation);
     }
     #[test]
-    fn v6_records_upgrade_through_v7_then_v8_then_v9_then_v10() {
+    fn v6_records_upgrade_through_v7_then_v8_then_v9_then_v10_then_v11() {
         let directory = tempfile::tempdir().unwrap();
         let raw = rusqlite::Connection::open(directory.path().join("loom.sqlite3")).unwrap();
         raw.execute_batch("PRAGMA user_version=6;CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,root TEXT NOT NULL UNIQUE,mode TEXT NOT NULL,version INTEGER NOT NULL,created_at TEXT NOT NULL,inventory TEXT NOT NULL);CREATE TABLE grants(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,node_id TEXT NOT NULL,worker_id TEXT NOT NULL,installation_id TEXT NOT NULL,operations TEXT NOT NULL,version INTEGER NOT NULL,digest TEXT NOT NULL,created_at TEXT NOT NULL);CREATE TABLE tickets(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,objective TEXT NOT NULL,kind TEXT NOT NULL,relative_path TEXT NOT NULL,content TEXT,status TEXT NOT NULL,grant_id TEXT NOT NULL,grant_digest TEXT NOT NULL,node_id TEXT NOT NULL,installation_id TEXT NOT NULL,worker_id TEXT NOT NULL,attempt INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);CREATE TABLE assignments(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL,node_id TEXT NOT NULL,worker_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,lease_expires_at TEXT NOT NULL,created_at TEXT NOT NULL);CREATE TABLE artifacts(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL,assignment_id TEXT NOT NULL,origin_node_id TEXT NOT NULL,name TEXT NOT NULL,media_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,storage_name TEXT NOT NULL,location TEXT NOT NULL,lineage TEXT NOT NULL,created_at TEXT NOT NULL);CREATE TABLE reports(id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL,ticket_id TEXT NOT NULL,node_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,summary TEXT NOT NULL,evidence TEXT NOT NULL,session_ref TEXT,cancel_acknowledged INTEGER NOT NULL,created_at TEXT NOT NULL);CREATE TABLE candidates(id TEXT PRIMARY KEY,kind TEXT NOT NULL,scope TEXT NOT NULL,content TEXT NOT NULL,source_refs TEXT NOT NULL,status TEXT NOT NULL,version INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);INSERT INTO projects VALUES('old','old','/fixture','read_only',1,'2026-01-01T00:00:00Z','{}');INSERT INTO grants VALUES('old-grant','old','node','default','installation','[\"read\"]',1,'digest','2026-01-01T00:00:00Z');INSERT INTO tickets VALUES('old-ticket','old','objective','read_summary','README.md',NULL,'succeeded','old-grant','digest','node','installation','default',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');INSERT INTO assignments VALUES('old-assignment','old-ticket','node','default',1,'old-lease',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');INSERT INTO reports VALUES('old-report','old-assignment','old-ticket','node',1,'request','succeeded','summary','[]',NULL,0,'2026-01-01T00:00:00Z');INSERT INTO artifacts VALUES('00000000-0000-4000-8000-000000000015','old-ticket','old-assignment','node','summary.json','application/json',1,'sha','00000000-0000-4000-8000-000000000015.artifact','loom://artifact/00000000-0000-4000-8000-000000000015','[]','2026-01-01T00:00:00Z');INSERT INTO candidates VALUES('legacy-skill','skill','p','{}','[]','pending',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');").unwrap();
@@ -598,7 +598,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 10);
+        assert_eq!(schema, 11);
         assert_eq!(
             store
                 .query("SELECT * FROM skill_replays", [])
@@ -620,7 +620,7 @@ mod tests {
         );
     }
     #[test]
-    fn v7_legacy_grant_and_skill_survive_schema_ten() {
+    fn v7_legacy_grant_and_skill_survive_schema_eleven() {
         let directory = tempfile::tempdir().unwrap();
         {
             let store = Store::open(directory.path()).unwrap();
@@ -648,7 +648,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 10);
+        assert_eq!(schema, 11);
         assert_eq!(
             store.get("grants", "legacy-grant").unwrap().unwrap()["digest"],
             "original-digest"

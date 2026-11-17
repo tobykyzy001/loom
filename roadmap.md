@@ -308,6 +308,10 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 
 ### M5 — 习惯学习、Skill 建议与受控自主性
 
+> 当前仅验证很小的**来源可查人工偏好审阅**子集：明确选择的真实同项目Source Ticket可形成最多32个引用链接的候选，来源去重/过期、明确接受/稍后/不再建议、精确派生Memory及撤回可恢复且有审计。 SQLite新增schema11 `candidate_memory_links`。原Skill的真实独立回放保持不变，且不能退化为workflow/Memory同一回看。 `node tests/observations/candidates.mjs --browser`、`node tests/skills/read-replay.mjs`为当前证据，详见[受限观察与审阅说明](tests/observations/README.md)。 尚未通过**真实沟通中的自动观察/有效抽象、候选内容/作用域编辑、冲突、批量历史整理、自然语言偏好质量、通用Skill归纳**，所以不把M5或N3标为完成。
+
+
+
 **要证明什么**
 
 Loom 能从使用中提出真正有用的 Memory / Skill 建议；长期记忆和主动工作改善体验，但不覆盖新指令、不扩大权限，也不以高频消息或建议制造价值感。

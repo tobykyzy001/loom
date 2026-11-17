@@ -414,6 +414,12 @@ Conversation → HabitObservation → Candidate → User Review → Memory / Ski
 - 被拒绝的建议应降低同类提醒频率，用户可选择“不再建议”；拒绝本身不得被模型重新解释为一个新的长期偏好；
 - 候选及其接受、修改、拒绝、停用均有审计记录，但普通操作日志不应因此无期限保留。
 
+当前受限候选来源与派生内容实现（不等于自动习惯学习已完成）：`POST /candidates` 只接受调用方明确选择的真实项目内 Ticket 引用，不扫描对话或自动归纳工作流。Memory候选最多绑定32个去重且真实存在的同项目Ticket。相同Ticket重复提交不增加次数；Memory候选须有三次**不同的有效来源引用**才会待审阅，不能覆盖旧source_refs或用过期次数冒充新晋升。内容是 `loom.memory-candidate.v1`，其最少来源要求不允许借空引用套用旧无来源候选兼容例外；无效来源不显示为legacy。
+
+一个 `candidate_memory_links`（存储 schema 11）精确关联一个 MemoryCandidate 与一条派生的项目Memory，保留不可变来源集合。待审阅与“稍后”状态仍可在人工确认后保存；接受后再次保存不能生成第二条相同候选记忆。“不再建议”独立且可撤销，不把 reject 当作新的长期偏好。候选回撤与普通 Memory 删除共用事务：只删除关联与切确的一条派生Memory，并把候选恢复为待审阅，不回滚Ticket、Artifact、观察、Grant或执行副作用。老缺关联候选可以保留历史；缺精确关联不得猜删其它Memory。已有源Ticket被撤销执行Grant不等同于撤销回忆内容；保存偏好仍不是新的目录或资源Grant。
+
+Skill走的是另一条已有真实证据路径：一次明确Source Ticket调用只能发起候选或返回相同候选，不把同一个POST调用重复算作新的观察。真正接受仍需另外的普通 `read_summary` 回放产生独立Ticket/Assignment/Artifact，并与原真实字节、SHA相同，不能导出或激活任意工作流。该受控回放不是因为存在候选列表或前端 `replay_verified` 标志就能激活的权限。受限观察/审阅测试、[版本迁移与未覆盖内容](tests/observations/README.md)是本轮实际边界；自动习惯摘要、语义时间线、冲突和跨用户分享仍按前述产品设计等待真实实现。
+
 ## 6. Resource、Project 与 Model Registry
 
 ### 6.1 Host / Worker 能力声明

@@ -50,6 +50,18 @@ test('challenge/register uses only public challenge then node token, not client 
   await assert.rejects(() => http.post('/api/v1/nodes/heartbeat', {}, { token: 'different-client-credential' }), /Client credential/)
 })
 
+test('PATCH follows the same bounded client route/auth policy without manufacturing work', async () => {
+  let request
+  const fetch = async (url, options) => { request = { url: String(url), method: options.method, headers: options.headers, body: options.body }; return response({ status: 'pending' }) }
+  const http = new LoomHttpClient({ baseUrl: 'http://127.0.0.1:65535', clientToken: 'fixture-admin-client', fetch })
+  const body = await http.patch('/api/v1/candidates/candidate_fix', { decision: 'later' })
+  assert.equal(body.status, 'pending')
+  assert.equal(request.method, 'PATCH')
+  assert.equal(request.headers.authorization, 'Bearer fixture-admin-client')
+  assert.deepEqual(JSON.parse(request.body), { decision: 'later' })
+  await assert.rejects(() => http.patch('/api/v1/nodes/credential-authorize', {}, { token: http.clientToken }), /Client credential/)
+})
+
 test('outbox dedupes same body, persists exact request ID and requeues after network failure', async () => {
   const root = await fixture(); const identity = await NodeIdentity.open(root); await identity.setToken({ token: 'node-token' }); const state = await NodeState.open(root)
   let online = false; let requests = []

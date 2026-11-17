@@ -19,6 +19,7 @@ export interface WorkspaceState {
   tickets: Ticket[]
   nodes: LoomNode[]
   memories: Memory[]
+  candidateMemories: unknown
   grants: Grant[]
   audit: AuditEntry[]
   artifacts: Record<string, ArtifactContent>
@@ -35,7 +36,7 @@ const state = reactive<WorkspaceState>({
   page: pages.includes(savedPage) ? savedPage : 'conversation',
   expanded: cachedExpanded(),
   selectedTicketId: localRead(TICKET_KEY),
-  ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], grants: [], audit: [], artifacts: {}, skillData: null,
+  ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], candidateMemories: null, grants: [], audit: [], artifacts: {}, skillData: null,
   installPlans: [], installPlanPolicy: null, modelInventory: null,
   preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, busy: {}, errors: {},
 })
@@ -52,7 +53,7 @@ async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefi
   state.errors[key] = ''
   try {
     const result = await action()
-    state.connected = true
+    if (result !== false) state.connected = true
     return result
   } catch (error) {
     state.errors[key] = error instanceof Error ? error.message : '操作未完成，请稍后重试。'
@@ -121,15 +122,18 @@ export async function refreshWorkspace() {
   await run('workspace', async () => {
     const value = await client.get<unknown>('/bootstrap')
     state.bootstrap = (value ?? {}) as Bootstrap
-    const [projects, tickets, nodes, memories, grants] = await Promise.all([
+    const loadMemorySources = state.page === 'memories'
+    const [projects, tickets, nodes, memories, grants, candidates] = await Promise.all([
       client.get<unknown>('/projects'), client.get<unknown>('/tickets'), client.get<unknown>('/nodes'),
       client.get<unknown>('/memories'), client.get<unknown>('/grants'),
+      loadMemorySources ? client.get<unknown>('/candidates') : Promise.resolve(undefined),
     ])
     state.projects = projectsFrom(projects)
     state.tickets = ticketsFrom(tickets)
     state.nodes = nodesFrom(nodes)
     state.memories = memoriesFrom(memories)
     state.grants = grantsFrom(grants)
+    if (loadMemorySources) state.candidateMemories = candidates
     const preferred = state.selectedTicketId ?? defaultTicketId(state.bootstrap)
     const id = preferred && state.tickets.some(ticket => ticket.id === preferred) ? preferred : null
     if (id) {
@@ -254,19 +258,31 @@ export async function updatePreferences(expanded: boolean, senderFilter: string,
   return true
 }
 
+async function applyMemoryChange(action: () => Promise<unknown>) {
+  const refreshed = await run('memory-write', async () => {
+    await action()
+    const loaded = await loadResources()
+    if (!loaded) {
+      // Keep the confirmation/error visible; do not pretend stale state is verified.
+      const detail = state.errors.resources || '资源暂时不可用'
+      state.errors['memory-write'] = `服务端已接受这次操作，但最新状态尚未刷新：${detail}`
+    }
+    return loaded
+  })
+  return refreshed === true
+}
+
+export async function reviewMemoryCandidate(candidateId: string, decision: string) {
+  return applyMemoryChange(() => client.patch<unknown>(`/candidates/${encodeURIComponent(candidateId)}`, { decision }))
+}
+
 export async function saveMemory(input: { id?: string; project_id?: string | null; scope: string; content: string }) {
-  const result = await run('memory-write', () => input.id
+  return applyMemoryChange(() => input.id
     ? client.patch<unknown>(`/memories/${encodeURIComponent(input.id!)}`, { content: input.content, project_id: input.project_id, scope: input.scope })
     : client.post<unknown>('/memories', input))
-  if (result === undefined) return false
-  await loadResources()
-  return true
 }
 export async function deleteMemory(id: string) {
-  const result = await run('memory-write', () => client.delete<unknown>(`/memories/${encodeURIComponent(id)}`))
-  if (result === undefined) return false
-  await loadResources()
-  return true
+  return applyMemoryChange(() => client.delete<unknown>(`/memories/${encodeURIComponent(id)}`))
 }
 export async function createGrant(input: { project_id: string; operations: GrantOperation[]; ticket_id?: string; node_id?: string; worker_id?: string; project_binding_id?: string }) {
   const result = await run('grant-write', () => client.post<unknown>('/grants', input))
@@ -290,10 +306,11 @@ export async function revokeGrant(id: string) {
 export async function createEnrollmentCode() { return run('enrollment', () => client.post<unknown>('/enrollment-codes', {})) }
 export async function loadResources() {
   const result = await run('resources', async () => {
-    const [nodes, memories, grants] = await Promise.all([client.get<unknown>('/nodes'), client.get<unknown>('/memories'), client.get<unknown>('/grants')])
-    state.nodes = nodesFrom(nodes); state.memories = memoriesFrom(memories); state.grants = grantsFrom(grants)
+    const [nodes, memories, grants, candidates] = await Promise.all([client.get<unknown>('/nodes'), client.get<unknown>('/memories'), client.get<unknown>('/grants'), client.get<unknown>('/candidates')])
+    state.nodes = nodesFrom(nodes); state.memories = memoriesFrom(memories); state.grants = grantsFrom(grants); state.candidateMemories = candidates
+    return true
   })
-  return result !== undefined
+  return result === true
 }
 
 export async function loadSkillEvidence(reference = skillActions): Promise<boolean> {

@@ -147,7 +147,7 @@ try {
   assert.equal(history.model.executable, false)
   assert.equal(history.model.source_ticket_id, source.id)
   assert.equal(history.model.source_artifact_id, artifactId)
-  assert.equal((await tables()).schema, 10)
+  assert.equal((await tables()).schema, 11)
   assert.equal((await tables()).model_placement_authorizations, 1)
   assert.equal((await tables()).model_placements, 1)
   assert.equal((await tables()).models, 1)
@@ -157,11 +157,11 @@ try {
   assert.equal(JSON.parse(restoredArtifact.content).source_document, descriptor)
   assert.equal(restoredArtifact.artifact.sha256, reviewed_sha256)
   assert.equal(await readFile(file, 'utf8'), descriptor)
-  await writeFile(join(root, 'local-descriptor-result.json'), JSON.stringify({ overall: 'PASS', model_id: modelId, source_ticket_id: source.id, source_artifact_id: artifactId, descriptor_sha256: reviewed_sha256, schema: 10, source_worker_harness: 'typescript_local_node', source_assignment_evidence_complete: true, real_bytes_match: true, approval_and_retirement_survived_reopen: true, grant_revocation_current_false: true, runtime_executed: false, model_installed: false, activation: false }, null, 2) + '\n', { mode: 0o600 })
+  await writeFile(join(root, 'local-descriptor-result.json'), JSON.stringify({ overall: 'PASS', model_id: modelId, source_ticket_id: source.id, source_artifact_id: artifactId, descriptor_sha256: reviewed_sha256, schema: 11, source_worker_harness: 'typescript_local_node', source_assignment_evidence_complete: true, real_bytes_match: true, approval_and_retirement_survived_reopen: true, grant_revocation_current_false: true, runtime_executed: false, model_installed: false, activation: false }, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify({ overall: 'PASS', real_descriptor_artifact: true, exact_bytes_verified: true,
     duplicate_persistence: true, separate_placement_grant: true,
     revoked_and_retired_blocked: true, reopen_history_preserved: true,
-    schema: 10, no_model_execution: true, test_root: root }, null, 2))
+    schema: 11, no_model_execution: true, test_root: root }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: String(error.stack || error).replaceAll(token, '[redacted]'), test_root: root }, null, 2))
   process.exitCode = 1

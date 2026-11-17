@@ -52,4 +52,5 @@ export class LoomHttpClient {
   }
   get(route, options) { return this.request('GET', route, undefined, options) }
   post(route, body = {}, options) { assertObject(body, 'body'); return this.request('POST', route, body, options) }
+  patch(route, body = {}, options) { assertObject(body, 'body'); return this.request('PATCH', route, body, options) }
 }

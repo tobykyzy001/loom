@@ -12,6 +12,7 @@ mod model_inventory;
 mod model_observation;
 mod model_registry;
 mod node_api;
+mod observation_input;
 pub mod pipeline;
 mod skill_replay;
 pub(crate) mod store;
@@ -314,6 +315,114 @@ mod skill_replay_regressions {
     }
 
     #[test]
+    fn skill_suppression_never_deletes_or_reclassifies_original_evidence() {
+        let fixture = fixture();
+        assert!(crate::maintenance::review_candidate(
+            &fixture.store,
+            &fixture.candidate,
+            &json!({"decision":"accept"})
+        )
+        .is_ok());
+        assert!(crate::maintenance::review_candidate(
+            &fixture.store,
+            &fixture.candidate,
+            &json!({"decision":"never"})
+        )
+        .is_err());
+        assert_eq!(
+            fixture
+                .store
+                .query("SELECT * FROM skills", [])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            crate::maintenance::review_candidate(
+                &fixture.store,
+                &fixture.candidate,
+                &json!({"decision":"undo"})
+            )
+            .unwrap()["status"],
+            "pending"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .query("SELECT * FROM skills", [])
+                .unwrap()
+                .len(),
+            0
+        );
+        for expected in ["never", "never"] {
+            assert_eq!(
+                crate::maintenance::review_candidate(
+                    &fixture.store,
+                    &fixture.candidate,
+                    &json!({"decision":"never"})
+                )
+                .unwrap()["status"],
+                expected
+            );
+            assert_eq!(no_new_tickets(&fixture), 2);
+        }
+        assert_eq!(
+            crate::maintenance::review_candidate(
+                &fixture.store,
+                &fixture.candidate,
+                &json!({"decision":"undo"})
+            )
+            .unwrap()["status"],
+            "pending"
+        );
+        assert_eq!(
+            crate::maintenance::review_candidate(
+                &fixture.store,
+                &fixture.candidate,
+                &json!({"decision":"accept"})
+            )
+            .unwrap()["status"],
+            "accepted"
+        );
+        assert_eq!(
+            crate::skill_replay::present(&fixture.store, &fixture.candidate).unwrap()["status"],
+            "verified"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .query("SELECT * FROM skills", [])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(fixture.store.list("memories").unwrap().len(), 0);
+
+        fixture.store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES('empty-skill','skill','project-a','{\"content\":\"No source evidence\"}','[]','pending',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", []).unwrap();
+        assert!(crate::maintenance::review_candidate(
+            &fixture.store,
+            "empty-skill",
+            &json!({"decision":"accept"})
+        )
+        .is_err());
+        assert!(crate::skill_replay::create_or_get(
+            &fixture.store,
+            "empty-skill",
+            &json!({"source_ticket_id":fixture.source_ticket})
+        )
+        .is_err());
+        assert_eq!(no_new_tickets(&fixture), 2);
+        assert_eq!(
+            fixture
+                .store
+                .query("SELECT * FROM skills", [])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn immutable_source_and_replay_scope_must_rederive_at_accept() {
         for (label,query) in [
             ("cross-project","UPDATE skill_replays SET project_id='project-b' WHERE candidate_id='candidate-a'"),
@@ -437,10 +546,40 @@ mod skill_replay_regressions {
         assert_eq!(updated["status"], "accepted");
         assert_eq!(store.list("memories").unwrap().len(), 1);
         assert_eq!(store.query("SELECT * FROM skills", []).unwrap().len(), 0);
+
+        store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES('empty-v1','memory','p',?1,'[]','pending',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [json!({"schema":"loom.memory-candidate.v1","content":"Unproven projection","project_id":"p"}).to_string()]).unwrap();
+        assert!(crate::maintenance::review_candidate(&store, "empty-v1", &json!({"decision":"accept"})).is_err(), "A v1 declaration must never smuggle empty references through the legacy-only exception");
+        assert_eq!(store.list("memories").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .query("SELECT * FROM candidate_memory_links", [])
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at) VALUES('unrelated','p','Unrelated explicit preference','project',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", []).unwrap();
+        let original = store
+            .query(
+                "SELECT memory_id FROM candidate_memory_links WHERE candidate_id='memory'",
+                [],
+            )
+            .unwrap()[0]["memory_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let retracted = crate::maintenance::delete_linked_memory(&store, &original)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retracted["candidate_status"], "pending");
+        assert_eq!(store.list("memories").unwrap().len(), 1);
+        assert_eq!(store.list("memories").unwrap()[0]["id"], "unrelated");
+        assert_eq!(store.query("SELECT * FROM skills", []).unwrap().len(), 0);
     }
 
     #[test]
-    fn real_v6_snapshot_migrates_to_v10_without_rewriting_grant_artifact_or_audit() {
+    fn real_v6_snapshot_migrates_to_v11_without_rewriting_grant_artifact_or_audit() {
         let directory = tempfile::tempdir().unwrap();
         let db = rusqlite::Connection::open(directory.path().join("loom.sqlite3")).unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON;
@@ -464,7 +603,7 @@ mod skill_replay_regressions {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         assert!(store
             .query("SELECT * FROM skill_replays", [])
             .unwrap()

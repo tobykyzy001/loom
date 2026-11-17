@@ -13,6 +13,9 @@ import TicketDetail from './views/TicketDetail.vue'
 import ActivityView from './views/ActivityView.vue'
 import DevicesView from './views/DevicesView.vue'
 import ProjectsView from './views/ProjectsView.vue'
+import { memoryCandidates, memoryText, type MemoryCandidate, type ReviewDecision } from './lib/memoryCandidate'
+import { skillSourceRefs } from './lib/skillProof'
+import { reviewMemoryCandidate } from './state/workspace'
 import MemoriesView from './views/MemoriesView.vue'
 import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
@@ -121,6 +124,18 @@ function bindProject(value: ProjectBindingInput) {
 function revokeGrantWithConfirmation(grant: Grant) {
   ask({ title: '撤销这个项目授权？', effect: '拒绝此 Grant 下的新工作并围栏旧执行资格。已有审计、报告和待对账效果不会删除。', changes: [`项目：${projects.value.find(p => p.id === grant.project_id)?.name ?? grant.project_id}`, `操作：${grantOperationsSummary(grant.operations)}`], danger: true, confirmLabel: '确认撤销授权' }, () => revokeGrant(grant.id))
 }
+const memoryCandidateData = computed(() => memoryCandidates(state.candidateMemories))
+function reviewCandidate(candidate: MemoryCandidate, decision: ReviewDecision) {
+  const statusLabel = decision === 'accept' ? '接受后保存这条偏好？' : decision === 'never' ? '不再建议这个项目观察？' : decision === 'undo' && candidate.status === 'never' ? '允许重新审阅这项建议？' : decision === 'undo' ? '撤回由这条候选保存的偏好？' : decision === 'later' ? '稍后再审阅这项建议？' : '拒绝这项来源建议？'
+  const sourceCount = skillSourceRefs(candidate.source_refs).length
+  ask({
+    title: statusLabel,
+    effect: decision === 'accept' ? '明确保留一条来自项目观察的 Memory，不生成 Skill，不创建 Grant，不自动执行或学习任何历史会话。' : decision === 'undo' && candidate.status !== 'never' ? '仅撤回候选派生的 Memory，不伪造撤销历史 Ticket、Artifact 或执行权限。' : '只改变这个候选的审阅状态，不自动保存、执行、读取新秘密或生成授权。',
+    changes: [`项目：${candidate.scope}`, sourceCount ? `真实来源 Ticket：${sourceCount} 个（可回查最早来源）` : '旧手工候选，未提供真实 Ticket 来源', memoryText(candidate) || '候选内容无效'],
+    danger: decision !== 'accept',
+    confirmLabel: decision === 'accept' ? '确认保存这条偏好' : decision === 'undo' ? '确认撤回保存偏好' : decision === 'never' ? '确认不再建议' : decision === 'later' ? '确认稍后审阅' : '确认拒绝建议',
+  }, () => reviewMemoryCandidate(candidate.id, decision))
+}
 function removeMemory(id: string) {
   ask({ title: '删除这条记忆？', effect: '只删除明确保存的偏好，不改变任务、审计或任何 Grant。', changes: ['该明细偏好不再存在于工作空间中。'], danger: true, confirmLabel: '删除这条记忆' }, () => deleteMemory(id))
 }
@@ -181,7 +196,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
       </template>
       <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy.preferences" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />
       <SkillsView v-else-if="state.page === 'skills'" :data="state.skillData" :tickets="tickets" :projects="projects" :loading="state.busy.skills" :busy="state.busy['skill-write']" :error="!state.busy.skills ? state.errors.skills : ''" :load-error="state.errors.skills" @refresh="void loadSkillEvidence()" @replay="skillReplay" @review="skillReview" @ticket="selectTask" />
-      <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" />
+      <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :candidates="memoryCandidateData" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" @review="reviewCandidate" @source="selectTask" />
       <AccessView v-else-if="state.page === 'access'" :grants="state.grants" :projects="projects" :nodes="nodes" :busy="state.busy['grant-write']" :error="state.errors['grant-write'] || (!state.busy.resources ? state.errors.resources : '')" @create="grantCreate" @revoke="revokeGrantWithConfirmation" />
       <HelpView v-else @connect="showConnection = true" />
       <p v-if="state.errors.preferences" class="preferences-error" role="status">{{ state.errors.preferences }}</p>

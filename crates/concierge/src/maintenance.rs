@@ -379,81 +379,166 @@ pub fn retry(store: &Store, ticket: &str) -> Result<()> {
     Ok(())
 }
 
+fn matching_candidate(
+    store: &Store,
+    fingerprint: &str,
+    scope: &str,
+    kind: &str,
+) -> Result<Option<Value>> {
+    let rows=store.query("SELECT * FROM candidates WHERE scope=?1 AND kind=?2 AND status IN ('pending','accepted','rejected','later','never') ORDER BY created_at DESC,id DESC",rusqlite::params![scope,kind])?;
+    for candidate in rows {
+        let value: Value = match serde_json::from_str(candidate["content"].as_str().unwrap_or("{}"))
+        {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value["fingerprint"].as_str() == Some(fingerprint) {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
 pub fn observation_candidate(store: &Store, body: &Value) -> Result<Value> {
-    let project = body["project_id"]
-        .as_str()
-        .context("Observation needs a scoped project")?;
+    let input = crate::observation_input::validate(store, body)?;
+    let project = input["project_id"].as_str().unwrap_or_default().to_owned();
     store
-        .get("projects", project)?
+        .get("projects", &project)?
         .context("Observation scope unknown")?;
-    let value = body["value"]
-        .as_str()
-        .context("Bounded observation value required")?;
-    if value.len() > 500
-        || value.contains("SECRET")
-        || value.contains("api_key")
-        || store
-            .query("SELECT ?1 LIKE '%private_key%'", [value])?
-            .first()
-            .is_some_and(|r| r["'%private_key%'"] == 0)
-    {
-        bail!("Sensitive or excessive content must not become a standing suggestion")
-    }
-    let fingerprint =
-        hash(&json!({"project_id":project,"kind":body["kind"],"value":value}).to_string());
-    let expires = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
-    let changed = store.conn().execute(
-        "UPDATE observations SET occurrences=occurrences+1,source_refs=?2 WHERE fingerprint=?1",
-        params![fingerprint, body["source_refs"].to_string()],
-    )?;
-    if changed == 0 {
-        store.conn().execute("INSERT INTO observations(id,fingerprint,scope,occurrences,source_refs,expires_at,created_at) VALUES(?1,?2,?3,1,?4,?5,?5)",params![crate::id("observation"),fingerprint,project,body["source_refs"].to_string(),expires])?;
-    }
-    let row = store
+    let kind = input["kind"].as_str().unwrap_or_default();
+    let value = input["value"].as_str().unwrap_or_default();
+    let fingerprint = hash(&json!({"project_id":project,"kind":kind,"value":value}).to_string());
+    let source_refs = input["source_refs"].to_string();
+    let now = chrono::Utc::now();
+    let expires = (now + chrono::Duration::days(7)).to_rfc3339();
+    let existing = store
         .query(
             "SELECT * FROM observations WHERE fingerprint=?1",
             [&fingerprint],
         )?
         .into_iter()
-        .next()
-        .unwrap();
-    if row["occurrences"].as_i64().unwrap_or(0) < 3 {
-        return Ok(
-            json!({"candidate":null,"observations":row["occurrences"],"reason":"Not enough consistent observations"}),
-        );
+        .next();
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> Result<Value> {
+        let mut occurrences = 1_i64;
+        let mut merged_refs = input["source_refs"].clone();
+        let mut prior_occurrences = None;
+        if let Some(row) = existing {
+            if row["scope"] != project {
+                bail!("Observation fingerprint is not confined to its actual project")
+            }
+            prior_occurrences = row["occurrences"].as_i64();
+            let outdated = crate::observation_input::expired(
+                row["expires_at"].as_str().unwrap_or_default(),
+                &now.to_rfc3339(),
+            )?;
+            let old_refs: Value =
+                serde_json::from_str(row["source_refs"].as_str().unwrap_or("[]"))?;
+            if !outdated {
+                merged_refs =
+                    crate::observation_input::union_ref_ids(&old_refs, &input["source_refs"])?;
+                if merged_refs == old_refs {
+                    let previous = matching_candidate(store, &fingerprint, &project, kind)?
+                        .into_iter()
+                        .next();
+                    store.conn().execute("ROLLBACK", [])?;
+                    return Ok(
+                        json!({"candidate":previous,"existing_candidate":previous.is_some(),
+                        "observations":row["occurrences"],"promotion":"retained_history_not_auto_promoted",
+                        "reason":"Only a new explicit source Ticket can increase repetition",
+                        "duplicate_source_observation":true,"no_standing_permission":true}),
+                    );
+                }
+            }
+            let merged_refs_json: String = serde_json::to_string(&merged_refs)?;
+            let row_id: String = row["id"].as_str().unwrap_or_default().to_owned();
+            let update = if outdated {
+                store.audit(None,"client","memory.observation_reset_after_expiry",
+                    &json!({"fingerprint":fingerprint,"previous_occurrences":prior_occurrences,"new_source_only":true}))?;
+                store.conn().execute("UPDATE observations SET occurrences=1,source_refs=:refs,expires_at=:expires WHERE id=:id AND fingerprint=:fingerprint",
+                    rusqlite::named_params!{":refs":merged_refs_json,":expires":expires,":id":&row_id,":fingerprint":&fingerprint})?
+            } else {
+                occurrences = row["occurrences"].as_i64().unwrap_or(0) + 1;
+                store.conn().prepare("UPDATE observations SET occurrences=occurrences+1,source_refs=:refs WHERE id=:id AND fingerprint=:fingerprint")?
+                    .execute(rusqlite::named_params!{":refs":merged_refs.to_string(),":id":&row_id,":fingerprint":&fingerprint})?
+            };
+            if update != 1 {
+                bail!("Observation row no longer matches the original id and fingerprint; no overwritten observations")
+            }
+        } else {
+            store.conn().execute("INSERT INTO observations(id,fingerprint,scope,occurrences,source_refs,expires_at,created_at) VALUES(?1,?2,?3,1,?4,?5,?5)",
+                params![crate::id("observation"),fingerprint,project,source_refs,expires])?;
+        }
+        store.audit(None,"client","memory.observation_source_recorded",
+            &json!({"scope":project,"occurrences":occurrences,"sources":merged_refs,"kind":kind,"authority_created":false}))?;
+        let previous = matching_candidate(store, &fingerprint, &project, kind)?
+            .into_iter()
+            .next();
+        if prior_occurrences.is_some() {
+            if let Some(candidate) = previous {
+                if !candidate["id"].is_null() {
+                    store.conn().execute("COMMIT", [])?;
+                    return Ok(
+                        json!({"candidate":candidate,"existing_candidate":true,"occurrences":occurrences,
+                            "promotion":"retained_history_not_auto_promoted","no_standing_permission":true}),
+                    );
+                }
+            }
+        }
+        let minimum_sources = if kind == "skill" { 1 } else { 3 };
+        if occurrences < minimum_sources {
+            store.conn().execute("COMMIT", [])?;
+            return Ok(json!({"candidate":null,"observations":occurrences,
+                "reason":"Not enough consistent observations","no_standing_permission":true}));
+        }
+        let id = crate::id("candidate");
+        let mut candidate = json!({"content":value,"fingerprint":fingerprint,"project_id":project,"kind":kind,
+            "source":"repeated_explicit_choices","replay_state":"unverified"});
+        if kind == "memory" {
+            candidate["schema"] = json!("loom.memory-candidate.v1");
+        }
+        store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'pending',1,?6,?6)",
+            params![id,kind,project,serde_json::to_string(&candidate)?,merged_refs.to_string(),crate::now()])?;
+        store.audit(None,"client","candidate.proposed",&json!({"candidate_id":id,"scope":project,"source_refs":merged_refs,"authority_created":false}))?;
+        store.conn().execute("COMMIT", [])?;
+        Ok(
+            json!({"candidate":store.query("SELECT * FROM candidates WHERE id=?1",[id])?.first(),"preview_required":true,"placement_grant_created":false}),
+        )
+    })();
+    match result {
+        Ok(candidate) => Ok(candidate),
+        Err(error) => {
+            let rollback = store.conn().execute("ROLLBACK", []);
+            match rollback {
+                Ok(_) => Err(error),
+                Err(rollback) => {
+                    Err(error.context(format!("Observation rollback failed: {rollback}")))
+                }
+            }
+        }
     }
-    let id = crate::id("candidate");
-    let kind = body["kind"].as_str().unwrap_or("memory");
-    if !matches!(kind, "memory" | "skill" | "route") {
-        bail!("invalid candidate kind")
-    }
-    let previous_candidates = store.query(
-        "SELECT id FROM candidates WHERE content LIKE ?1 AND status IN ('pending','accepted','rejected')",
-        [format!("%{fingerprint}%")],
-    )?;
-    if !previous_candidates.is_empty() {
-        return Ok(json!({"duplicate_or_blocked":true,"no_standing_permission":true}));
-    }
-    let candidate = json!({"content":value,"fingerprint":fingerprint,"project_id":project,"kind":kind,"source":"repeated_explicit_choices","replay_state":"unverified"});
-    store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'pending',1,?6,?6)",params![id,kind,project,serde_json::to_string(&candidate)?,body["source_refs"].to_string(),crate::now()])?;
-    Ok(
-        json!({"candidate":store.query("SELECT * FROM candidates WHERE id=?1",[id])?.first(),"preview_required":true,"placement_grant_created":false}),
-    )
 }
 
 pub fn review_candidate(store: &Store, candidate_id: &str, body: &Value) -> Result<Value> {
     let rows = store.query("SELECT * FROM candidates WHERE id=?1", [candidate_id])?;
     let candidate = rows.first().context("candidate not found")?;
+    if candidate["kind"] == "memory" {
+        return review_memory_candidate(store, candidate, body);
+    }
+    if candidate["kind"] == "route" && matches!(body["decision"].as_str(), Some("accept" | "undo"))
+    {
+        bail!("A route candidate is not a portable memory or executable permission");
+    }
     let action = body["decision"].as_str().unwrap_or_default();
     if !matches!(action, "accept" | "reject" | "later" | "never" | "undo") {
         bail!("unknown candidate review decision")
     }
-    if action == "never" && candidate["version"].as_i64().unwrap_or(0) > 1 {
-        bail!("do_not_suggest state is retained as audit but suppresses duplicate candidates")
-    }
     if action == "accept" {
         if candidate["status"] != "pending" {
             bail!("Only a pending candidate can be accepted once; repeat review creates no authority or extra memory/skill record");
+        }
+        if candidate["kind"] != "skill" {
+            bail!("Only an explicit MemoryCandidate or separately verified SkillCandidate can be accepted");
         }
         let content: Value = serde_json::from_str(candidate["content"].as_str().unwrap_or("{}"))?;
         let kind = candidate["kind"].as_str().unwrap_or("memory");
@@ -537,30 +622,344 @@ pub fn review_candidate(store: &Store, candidate_id: &str, body: &Value) -> Resu
             }
         }
     } else {
+        if candidate["kind"] == "skill" && candidate["status"] == "accepted" && action != "undo" {
+            bail!("An accepted Skill cannot be rewritten as a suggestion decision without explicit undo");
+        }
         if action == "undo" {
-            if candidate["kind"] == "skill" && candidate["status"] != "accepted" {
-                bail!("Only an explicitly accepted Skill can be undone")
+            if candidate["kind"] == "skill"
+                && !matches!(candidate["status"].as_str(), Some("accepted" | "never"))
+            {
+                bail!("Only an accepted Skill, or an independently suppressed pending Skill, can be undone")
             }
-            // Retraction is separate from proof. It does not repeat the Ticket or Grant.
-            store
-                .conn()
-                .execute("DELETE FROM skills WHERE candidate_id=?1", [candidate_id])?;
+            if candidate["status"] == "accepted"
+                && store
+                    .conn()
+                    .execute("DELETE FROM skills WHERE candidate_id=?1", [candidate_id])?
+                    != 1
+            {
+                bail!("The exact saved Skill proof is required; no other history is withdrawn")
+            }
         }
         let status = if action == "later" {
             "later"
         } else if action == "undo" {
             "pending"
+        } else if action == "never" {
+            "never"
         } else {
             "rejected"
         };
-        store.conn().execute(
-            "UPDATE candidates SET status=?1,updated_at=?2,version=version+1 WHERE id=?3",
-            params![status, crate::now(), candidate_id],
-        )?;
+        if candidate["status"] != status {
+            store.conn().execute(
+                "UPDATE candidates SET status=?1,updated_at=?2,version=version+1 WHERE id=?3",
+                params![status, crate::now(), candidate_id],
+            )?;
+            store.audit(
+                None,
+                "client",
+                "candidate.reviewed",
+                &json!({"candidate_id":candidate_id,"decision":action,"permission_changed":false}),
+            )?;
+        }
         Ok(store
             .query("SELECT * FROM candidates WHERE id=?1", [candidate_id])?
             .first()
             .cloned()
             .unwrap_or(json!(null)))
+    }
+}
+
+fn review_memory_candidate(store: &Store, candidate: &Value, body: &Value) -> Result<Value> {
+    let id = candidate["id"]
+        .as_str()
+        .context("Memory candidate ID required")?;
+    let decision = body["decision"].as_str().unwrap_or_default();
+    if !matches!(decision, "accept" | "reject" | "later" | "never" | "undo") {
+        bail!("Unknown Memory candidate review decision");
+    }
+    if decision == "accept" {
+        if !matches!(candidate["status"].as_str(), Some("pending" | "later")) {
+            bail!("Only a pending or postponed MemoryCandidate can be accepted; there is no second Memory");
+        }
+        let scope = candidate["scope"]
+            .as_str()
+            .context("Candidate requires exact project scope")?;
+        if let Some(edited_scope) = body["scope"].as_str() {
+            if edited_scope != scope {
+                bail!("This preview cannot move evidence to another project or User/Host");
+            }
+        }
+        if body["project_id"].is_string() && body["project_id"] != candidate["scope"] {
+            bail!("Memory scope cannot be changed away from the evidence project");
+        }
+        if store.get("projects", scope)?.is_none() {
+            bail!("Candidate's source project no longer exists");
+        }
+        let refs: Value = serde_json::from_str(
+            candidate["source_refs"]
+                .as_str()
+                .context("Candidate sources invalid")?,
+        )?;
+        let refs = refs
+            .as_array()
+            .context("MemoryCandidate source list invalid")?;
+        if refs.len() > 32 {
+            bail!("MemoryCandidate cannot cite more than 32 actual Tickets");
+        }
+        for reference in refs {
+            let ticket_id = reference
+                .as_str()
+                .context("Source Tickets must have immutable identifiers")?;
+            let ticket = store
+                .get("tickets", ticket_id)?
+                .context("Memory candidate source Ticket is not known")?;
+            if ticket["project_id"] != scope {
+                bail!("Memory candidate cannot use a different project's history");
+            }
+        }
+        let parsed: Value = serde_json::from_str(candidate["content"].as_str().unwrap_or("{}"))?;
+        if parsed["schema"].is_string() && parsed["schema"] != "loom.memory-candidate.v1" {
+            bail!("Unsupported MemoryCandidate schema cannot be treated as legacy");
+        }
+        if refs.is_empty() && parsed["schema"] == "loom.memory-candidate.v1" {
+            bail!("A source-bound MemoryCandidate cannot invoke the empty-ref legacy exception");
+        }
+        let value = body["content"]
+            .as_str()
+            .or_else(|| parsed["content"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if value.trim().is_empty()
+            || value.len() > 500
+            || value.contains("SECRET")
+            || value.contains("api_key")
+            || value.contains("private_key")
+            || value.contains("http://")
+            || value.contains("https://")
+        {
+            bail!("Memory candidate accepts only a bounded public project preference, not credentials or a resource locator");
+        }
+        let refs_json = serde_json::to_string(&refs)?;
+        let memory_id = crate::id("memory");
+        let source_ticket_id = refs.first().and_then(Value::as_str).map(str::to_owned);
+        let created_at = crate::now();
+        store.conn().execute("BEGIN IMMEDIATE", [])?;
+        let result = (|| -> Result<Value> {
+            store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at,source_ticket_id) VALUES(?1,?2,?3,'project',1,?4,?4,?5)",
+                params![memory_id.clone(),scope,value,created_at,source_ticket_id])?;
+            if refs.is_empty() {
+                store.audit(
+                    None,
+                    "client",
+                    "candidate.memory.legacy_accepted_without_ticket_provenance",
+                    &json!({"candidate_id":id,"scope":scope,"new_ticket_or_grant_created":false}),
+                )?;
+            }
+            store.conn().execute("INSERT INTO candidate_memory_links(candidate_id,memory_id,source_refs,created_at) VALUES(?1,?2,?3,?4)",
+                params![id,memory_id,refs_json,created_at])?;
+            let changed = store.conn().execute("UPDATE candidates SET status='accepted',version=version+1,updated_at=?1 WHERE id=?2 AND status IN ('pending','later')",
+                params![created_at,id])?;
+            if changed != 1 {
+                bail!("Another review completed this candidate already")
+            }
+            store.audit(None,"client","candidate.memory.accepted",
+                &json!({"candidate_id":id,"memory_id":memory_id,"source_refs":refs,"scope":scope,"authority_created":false}))?;
+            store.conn().execute("COMMIT", [])?;
+            let mut candidate = store
+                .get("candidates", id)?
+                .context("Accepted candidate lost its binding")?;
+            candidate["derived_memory_id"] = json!(memory_id);
+            candidate["source_ticket_id"] = json!(source_ticket_id);
+            if source_ticket_id.is_none() {
+                candidate["source_evidence"] = json!("legacy_manual_without_ticket_provenance");
+            }
+            Ok(candidate)
+        })();
+        return match result {
+            Ok(candidate) => Ok(candidate),
+            Err(error) => {
+                let rollback = store.conn().execute("ROLLBACK", []);
+                match rollback {
+                    Ok(_) => Err(error),
+                    Err(rollback) => Err(error.context(format!(
+                        "Memory candidate acceptance rollback failed: {rollback}"
+                    ))),
+                }
+            }
+        };
+    }
+    if decision == "undo" {
+        if candidate["status"] == "never" {
+            store.audit(
+                None,
+                "client",
+                "candidate.never.withdrawn",
+                &json!({"candidate_id":id,"execution_authority_changed":false}),
+            )?;
+            store.conn().execute("UPDATE candidates SET status='pending',version=version+1,updated_at=?1 WHERE id=?2", params![crate::now(),id])?;
+        } else {
+            if candidate["status"] != "accepted" {
+                bail!("Only an accepted project Memory can be withdrawn");
+            }
+            let links = store.query(
+                "SELECT * FROM candidate_memory_links WHERE candidate_id=?1",
+                [id],
+            )?;
+            if links.len() != 1 {
+                bail!("Legacy memory history has no exact candidate link; unknown records are not deleted");
+            }
+            withdraw_linked_candidate(store, candidate)?;
+        }
+    } else {
+        if candidate["status"] == "accepted" && decision != "undo" {
+            bail!("An accepted Memory is not overwritten by another suggestion state; use explicit undo");
+        }
+        let status = match decision {
+            "NEVER" | "never" => "never",
+            "later" => "later",
+            _ => "rejected",
+        };
+        if candidate["status"] != status {
+            store.conn().execute(
+                "UPDATE candidates SET status=?1,version=version+1,updated_at=?2 WHERE id=?3",
+                params![status, crate::now(), id],
+            )?;
+            store.audit(
+                None,
+                "client",
+                "candidate.reviewed",
+                &json!({"candidate_id":id,"decision":decision,"permission_changed":false}),
+            )?;
+        }
+    }
+    Ok(store.get("candidates", id)?.unwrap_or(json!(null)))
+}
+
+/// One authoritative withdrawal for both candidate undo and the ordinary
+/// Memory deletion control. It removes only a linked preference, never Ticket,
+/// Artifact, an original observation or an execution permission.
+pub fn delete_linked_memory(store: &Store, memory_id: &str) -> Result<Option<Value>> {
+    let links = store.query(
+        "SELECT candidate_id FROM candidate_memory_links WHERE memory_id=?1",
+        [memory_id],
+    )?;
+    if links.is_empty() {
+        return Ok(None);
+    }
+    if links.len() != 1 {
+        bail!("A derived Memory must have one exact candidate link");
+    }
+    let rows = store.query(
+        "SELECT * FROM candidates WHERE id=?1",
+        [links[0]["candidate_id"]
+            .as_str()
+            .context("Linked candidate identity required")?],
+    )?;
+    let candidate = rows.first().context("Linked MemoryCandidate is missing")?;
+    if candidate["kind"] != "memory" || candidate["status"] != "accepted" {
+        bail!("Linked candidate is not an accepted Memory; preserve the uncertain historical link")
+    }
+    withdraw_linked_candidate(store, candidate)?;
+    Ok(Some(
+        json!({"deleted":true,"candidate_withdrawal":true,"candidate_id":candidate["id"],
+        "candidate_status":"pending","grants_changed":false,"ticket_or_artifact_rollback":false}),
+    ))
+}
+
+fn withdraw_linked_candidate(store: &Store, candidate: &Value) -> Result<()> {
+    let id = candidate["id"]
+        .as_str()
+        .context("MemoryCandidate identity required")?;
+    let links = store.query(
+        "SELECT * FROM candidate_memory_links WHERE candidate_id=?1",
+        [id],
+    )?;
+    if links.len() != 1 {
+        bail!("Legacy memory has no exact link; its history cannot be silently withdrawn");
+    }
+    let memory_id = links[0]["memory_id"]
+        .as_str()
+        .context("Exact derived Memory ID required")?;
+    if candidate["scope"]
+        .as_str()
+        .is_none_or(|scope| scope.is_empty())
+    {
+        bail!("Linked candidate must retain its identified project scope");
+    }
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> Result<()> {
+        if store.conn().execute(
+            "DELETE FROM candidate_memory_links WHERE candidate_id=:candidate_id",
+            rusqlite::named_params! {":candidate_id":id},
+        )? != 1
+        {
+            bail!("Candidate link changed before withdrawal");
+        }
+        if store.conn().execute(
+            "DELETE FROM memories WHERE id=:memory_id",
+            rusqlite::named_params! {":memory_id":memory_id},
+        )? != 1
+        {
+            bail!("Exact derived Memory no longer has its original project scope; preserve the history");
+        }
+        if store.conn().execute("UPDATE candidates SET status='pending',version=version+1,updated_at=:time WHERE id=:id AND status='accepted'",
+            rusqlite::named_params!{":time":crate::now(),":id":id})? != 1 {
+            bail!("Candidate changed before withdrawal; no partial delete is committed");
+        }
+        store.audit(None,"client","candidate.memory.withdrawn",
+            &json!({"candidate_id":id,"memory_id":memory_id,"previous_effect_undone":false,"grants_changed":false}))?;
+        store.conn().execute("COMMIT", [])?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            store.conn().execute("ROLLBACK", [])?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    #[test]
+    fn same_source_is_idempotent_and_fresh_source_ranges_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let time = crate::now();
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('p','p','/private-fixture-only','read_only',1,?1,'{}')", [&time]).unwrap();
+        store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','p','node','default','installation','[\"read\"]',1,'digest',?1)", [&time]).unwrap();
+        for id in ["source-a", "source-b"] {
+            store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES(?1,'p','test source','read_summary','input.txt','running','grant','digest','node','installation','default',1,?2,?2)",
+                params![id, time]).unwrap();
+        }
+        let first = json!({"project_id":"p","kind":"memory","value":"Bounded synthetic preference","source_refs":["source-a"]});
+        assert_eq!(
+            observation_candidate(&store, &first).unwrap()["observations"],
+            1
+        );
+        assert_eq!(
+            observation_candidate(&store, &first).unwrap()["observations"],
+            1
+        );
+        let second = json!({"project_id":"p","kind":"memory","value":"Bounded synthetic preference","source_refs":["source-b"]});
+        let result = observation_candidate(&store, &second).unwrap();
+        assert_eq!(result["observations"], 2);
+        assert_eq!(
+            store
+                .query("SELECT count(*) AS count FROM candidate_memory_links", [])
+                .unwrap()[0]["count"],
+            0
+        );
+        let rows = store
+            .query("SELECT occurrences,source_refs FROM observations", [])
+            .unwrap();
+        assert_eq!(rows[0]["occurrences"], 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(rows[0]["source_refs"].as_str().unwrap()).unwrap(),
+            json!(["source-a", "source-b"])
+        );
     }
 }

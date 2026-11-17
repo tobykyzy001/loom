@@ -3049,10 +3049,36 @@ async fn edit_memory(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let content = required(&body, "content", 8000)?;
+    let scope = body["scope"].as_str();
+    if scope.is_some_and(|value| !matches!(value, "project" | "user" | "worker" | "host")) {
+        return Err(ApiError::bad("Memory scope must be explicit and supported"));
+    }
+    let project_id = body["project_id"].as_str();
     let store = state.lock()?;
+    if scope == Some("project") || (scope.is_none() && project_id.is_some()) {
+        let Some(project) = project_id else {
+            return Err(ApiError::bad(
+                "Explicit project memory needs a real project",
+            ));
+        };
+        if store.get("projects", project)?.is_none() {
+            return Err(ApiError::missing("Memory scope project not found"));
+        }
+    }
+    let existing = store
+        .get("memories", &memory)?
+        .ok_or_else(|| ApiError::missing("Memory not found"))?;
+    let scope_sql = scope.unwrap_or_else(|| existing["scope"].as_str().unwrap_or("project"));
+    let project_sql = if scope == Some("project") || (scope.is_none() && project_id.is_some()) {
+        project_id
+    } else if scope.is_none() {
+        existing["project_id"].as_str()
+    } else {
+        None
+    };
     if store.conn().execute(
-        "UPDATE memories SET content=?1,version=version+1,updated_at=?2 WHERE id=?3",
-        params![content, now(), memory],
+        "UPDATE memories SET content=?1,project_id=?2,scope=?3,version=version+1,updated_at=?4 WHERE id=?5",
+        params![content, project_sql, scope_sql, now(), memory],
     )? != 1
     {
         return Err(ApiError::missing("Memory not found"));
@@ -3066,6 +3092,9 @@ async fn delete_memory(
     axum::extract::Path(memory): axum::extract::Path<String>,
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
+    if let Some(withdrawn) = crate::maintenance::delete_linked_memory(&store, &memory)? {
+        return Ok(Json(withdrawn));
+    }
     if store
         .conn()
         .execute("DELETE FROM memories WHERE id=?1", [memory])?
@@ -3228,7 +3257,7 @@ async fn models(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>>
 }
 async fn candidates(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
-    let rows = store.query("SELECT * FROM candidates ORDER BY created_at DESC", [])?;
+    let rows = store.query("SELECT c.*,cm.memory_id AS derived_memory_id FROM candidates AS c LEFT JOIN candidate_memory_links AS cm ON cm.candidate_id=c.id ORDER BY c.created_at DESC", [])?;
     let replay_proof = crate::skill_replay::list(&store)?;
     Ok(Json(
         json!({"candidates":rows,"skill_replays":replay_proof["skill_replays"],"skills":replay_proof["skills"],

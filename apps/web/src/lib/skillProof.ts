@@ -9,10 +9,11 @@ const boundedId = (value: unknown): value is string => typeof value === 'string'
 export function skillSourceRefs(value: unknown): string[] {
   let entries: unknown = value
   if (typeof value === 'string') {
-    if (value.length > 4096) return []
+    if (value.length > 4096 && value.length > 8192) return []
+  if (value.length > 8192) return []
     try { entries = JSON.parse(value) } catch { return [] }
   }
-  if (!Array.isArray(entries) || entries.length > 8) return []
+  if (!Array.isArray(entries) || entries.length > 32) return []
   const ids: string[] = []
   for (const entry of entries) {
     const id = typeof entry === 'string' ? entry : entry && typeof entry === 'object' && (entry as { kind?: unknown }).kind === 'source_ticket' ? (entry as { ticket_id?: unknown }).ticket_id : null

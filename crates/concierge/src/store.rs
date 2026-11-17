@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 10 {
+        if current > 11 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 10)"
+                "database schema is from a newer Loom release (found {current}, supported 11)"
             )
         }
         if current == 0 {
@@ -235,6 +235,16 @@ impl Store {
                     .execute_batch("ALTER TABLE models ADD COLUMN source_assignment_id TEXT")?;
             }
             self.connection.execute_batch("PRAGMA user_version=10")?;
+        }
+        if current < 11 {
+            self.connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS candidate_memory_links(
+                candidate_id TEXT PRIMARY KEY REFERENCES candidates(id),
+                memory_id TEXT NOT NULL UNIQUE REFERENCES memories(id),
+                source_refs TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            ); PRAGMA user_version=11",
+            )?;
         }
         Ok(())
     }
@@ -523,7 +533,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let models = store
             .query(
                 "SELECT id,assignment_digest,source_assignment_id FROM models",
@@ -581,7 +591,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);
