@@ -718,8 +718,11 @@ fn review_memory_candidate(store: &Store, candidate: &Value, body: &Value) -> Re
             }
         }
         let parsed: Value = serde_json::from_str(candidate["content"].as_str().unwrap_or("{}"))?;
-        if parsed["schema"].is_string() && parsed["schema"] != "loom.memory-candidate.v1" {
-            bail!("Unsupported MemoryCandidate schema cannot be treated as legacy");
+        if parsed
+            .get("schema")
+            .is_some_and(|schema| schema != "loom.memory-candidate.v1")
+        {
+            bail!("Unsupported or non-text MemoryCandidate schema cannot be treated as legacy");
         }
         if refs.is_empty() && parsed["schema"] == "loom.memory-candidate.v1" {
             bail!("A source-bound MemoryCandidate cannot invoke the empty-ref legacy exception");
@@ -813,6 +816,12 @@ fn review_memory_candidate(store: &Store, candidate: &Value, body: &Value) -> Re
     } else {
         if candidate["status"] == "accepted" && decision != "undo" {
             bail!("An accepted Memory is not overwritten by another suggestion state; use explicit undo");
+        }
+        if candidate["status"] == "never" && decision != "never" {
+            bail!("A never-suggest MemoryCandidate can only restore review explicitly; never cannot become another decision");
+        }
+        if candidate["status"] == "rejected" && decision != "reject" {
+            bail!("A rejected source suggestion is history and cannot become pending, later, accepted or undo");
         }
         let status = match decision {
             "NEVER" | "never" => "never",
@@ -961,5 +970,118 @@ mod observation_tests {
             serde_json::from_str::<Value>(rows[0]["source_refs"].as_str().unwrap()).unwrap(),
             json!(["source-a", "source-b"])
         );
+    }
+
+    #[test]
+    fn review_status_and_strict_schema_cannot_rewrite_provenance_or_other_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let time = crate::now();
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('p','Strict fixture','/owned-test-project','read_only',1,?1,'{}')",[&time]).unwrap();
+        store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','p','node','default','installation','[\"read\"]',1,'digest',?1)",[&time]).unwrap();
+        store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES('source-a','p','Actual stored ticket','read_summary','input.txt','running','grant','digest','node','installation','default',1,?1,?1)",[&time]).unwrap();
+        store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES('reviewed','memory','p',?1,'[\"source-a\"]','pending',1,?2,?2)",
+            params![json!({"schema":"loom.memory-candidate.v1","content":"Bounded reviewed preference"}).to_string(),time]).unwrap();
+        assert_eq!(
+            review_candidate(&store, "reviewed", &json!({"decision":"accept"})).unwrap()["status"],
+            "accepted"
+        );
+        for decision in ["accept", "never", "reject"] {
+            assert!(review_candidate(&store, "reviewed", &json!({"decision":decision})).is_err());
+            assert_eq!(store.list("memories").unwrap().len(), 1);
+        }
+        assert_eq!(
+            review_candidate(&store, "reviewed", &json!({"decision":"undo"})).unwrap()["status"],
+            "pending"
+        );
+        assert_eq!(
+            review_candidate(&store, "reviewed", &json!({"decision":"never"})).unwrap()["status"],
+            "never"
+        );
+        let suppressed = store.get("candidates", "reviewed").unwrap().unwrap();
+        let suppressed_audit = store.audits(None).unwrap();
+        assert!(review_candidate(&store, "reviewed", &json!({"decision":"never"})).is_ok());
+        assert_eq!(
+            store.audits(None).unwrap(),
+            suppressed_audit,
+            "An idempotent never has no additional audit write"
+        );
+        assert_eq!(
+            store.get("candidates", "reviewed").unwrap().unwrap(),
+            suppressed,
+            "Repeated never changes neither status nor version"
+        );
+        for decision in ["later", "reject", "accept"] {
+            assert!(
+                review_candidate(&store, "reviewed", &json!({"decision":decision})).is_err(),
+                "never -> {decision} must not become a new permission or preference"
+            );
+        }
+        assert_eq!(
+            store.get("candidates", "reviewed").unwrap().unwrap()["status"],
+            "never"
+        );
+        assert_eq!(
+            review_candidate(&store, "reviewed", &json!({"decision":"undo"})).unwrap()["status"],
+            "pending"
+        );
+        assert_eq!(
+            review_candidate(&store, "reviewed", &json!({"decision":"reject"})).unwrap()["status"],
+            "rejected"
+        );
+        let rejected = store.get("candidates", "reviewed").unwrap().unwrap();
+        for decision in ["accept", "later", "never", "undo"] {
+            assert!(
+                review_candidate(&store, "reviewed", &json!({"decision":decision})).is_err(),
+                "rejected -> {decision} cannot revive suppressed history"
+            );
+            assert_eq!(
+                store.get("candidates", "reviewed").unwrap().unwrap(),
+                rejected
+            );
+        }
+        assert_eq!(
+            review_candidate(&store, "reviewed", &json!({"decision":"reject"})).unwrap(),
+            rejected
+        );
+        assert_eq!(store.list("memories").unwrap().len(), 0);
+        assert_eq!(store.list("grants").unwrap().len(), 1);
+
+        for (idx, schema, refs) in [
+            (0, Value::Null, "[]"),
+            (1, json!(1), "[]"),
+            (2, json!("some-unknown-schema"), "[]"),
+            (3, json!("loom.memory-candidate.v1"), "[]"),
+            (4, json!("loom.memory-candidate.v1"), "{malformed"),
+        ] {
+            let id = format!("invalid-v1-{idx}");
+            let content = json!({"schema":schema,"content":"Unproven preference","project_id":"p"});
+            store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES(?1,'memory','p',?2,?3,'pending',1,?4,?4)",
+                params![id,content.to_string(),refs,time]).unwrap();
+            assert!(review_candidate(&store, &id, &json!({"decision":"accept"})).is_err());
+        }
+        assert_eq!(store.list("memories").unwrap().len(), 0);
+        assert_eq!(
+            store
+                .query("SELECT * FROM candidate_memory_links", [])
+                .unwrap()
+                .len(),
+            0
+        );
+
+        store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES('legacy-unlinked','memory','p','{\"content\":\"Historical legacy\"}','[]','accepted',1,?1,?1)",[&time]).unwrap();
+        store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at) VALUES('unrelated-memory','p','Explicitly unrelated memory','project',1,?1,?1)",[&time]).unwrap();
+        assert!(review_candidate(&store, "legacy-unlinked", &json!({"decision":"undo"})).is_err());
+        assert_eq!(store.list("memories").unwrap().len(), 1);
+        assert_eq!(store.list("memories").unwrap()[0]["id"], "unrelated-memory");
+        assert_eq!(
+            store.get("candidates", "legacy-unlinked").unwrap().unwrap()["status"],
+            "accepted"
+        );
+        assert!(
+            !store.audits(None).unwrap().is_empty(),
+            "Only real accepted/retracted and reviewed commands are audited"
+        );
+        assert!(store.verify_audit().unwrap());
     }
 }

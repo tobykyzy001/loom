@@ -133,7 +133,7 @@ function reviewCandidate(candidate: MemoryCandidate, decision: ReviewDecision) {
     effect: decision === 'accept' ? '明确保留一条来自项目观察的 Memory，不生成 Skill，不创建 Grant，不自动执行或学习任何历史会话。' : decision === 'undo' && candidate.status !== 'never' ? '仅撤回候选派生的 Memory，不伪造撤销历史 Ticket、Artifact 或执行权限。' : '只改变这个候选的审阅状态，不自动保存、执行、读取新秘密或生成授权。',
     changes: [`项目：${candidate.scope}`, sourceCount ? `真实来源 Ticket：${sourceCount} 个（可回查最早来源）` : '旧手工候选，未提供真实 Ticket 来源', memoryText(candidate) || '候选内容无效'],
     danger: decision !== 'accept',
-    confirmLabel: decision === 'accept' ? '确认保存这条偏好' : decision === 'undo' ? '确认撤回保存偏好' : decision === 'never' ? '确认不再建议' : decision === 'later' ? '确认稍后审阅' : '确认拒绝建议',
+    confirmLabel: decision === 'accept' ? '确认保存这条偏好' : decision === 'undo' && candidate.status === 'never' ? '确认恢复候选' : decision === 'undo' ? '确认撤回保存偏好' : decision === 'never' ? '确认不再建议' : decision === 'later' ? '确认稍后审阅' : '确认拒绝建议',
   }, () => reviewMemoryCandidate(candidate.id, decision))
 }
 function removeMemory(id: string) {

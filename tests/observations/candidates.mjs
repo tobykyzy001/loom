@@ -62,18 +62,20 @@ try {
     return response.id
   }
   const other = await post('/tickets', { project_id: otherProject, objective: 'A separate project source for forbidden cross-scope observation', kind: 'read_summary', relative_path: 'input.txt', grant_id: grants[1] })
-  for (const [label, input] of [
-    ['missing evidence', { value: 'Preference', source_refs: [] }],
-    ['fabricated evidence', { value: 'Preference', source_refs: ['tkt_not_real'] }],
-    ['cross project', { value: 'Preference', source_refs: [other.id] }],
-    ['unknown field', { value: 'Preference', source_refs: [tickets[0]], implicit_grant: true }],
-    ['unrecognized kind', { value: 'Preference', kind: 'classified_as_runtime', source_refs: [tickets[0]] }],
+  const firstSource = await makeTicket(1)
+  for (const [label, input, reason] of [
+    ['missing evidence', { value: 'Preference', source_refs: [] }, 'source_refs must contain 1 through 32 Ticket IDs'],
+    ['fabricated evidence', { value: 'Preference', source_refs: ['tkt_not_real'] }, 'source Ticket not found'],
+    ['cross project', { value: 'Preference', source_refs: [other.id] }, 'belongs to another project'],
+    ['unknown field', { value: 'Preference', source_refs: [firstSource], implicit_grant: true }, 'unsupported field'],
+    ['unrecognized kind', { value: 'Preference', kind: 'classified_as_runtime', source_refs: [firstSource] }, 'kind must be memory, skill or route'],
   ]) {
-    await assert.rejects(() => post('/candidates', { project_id: projectId, kind: 'memory', ...input }), error => /4[0-9][0-9]|5[0-9][0-9]/.test(String(error.status)) && error.message.length > 0)
+    await assert.rejects(() => post('/candidates', { project_id: projectId, kind: 'memory', ...input }), error => error.message.includes(reason), `${label}: expected ${reason}`)
   }
   assert.equal((await get('/memories')).memories.length, 0)
+  assert.equal((await get('/candidates')).candidates.length, 0)
+  assert.equal((await get('/grants')).grants.length, 2)
 
-  const firstSource = await makeTicket(1)
   for (const expected of [1, 1]) {
     const observation = await post('/candidates', { project_id: projectId, kind: 'memory', value: 'Concise reports with citations', source_refs: [firstSource] })
     assert.equal(observation.observations, expected)
@@ -118,10 +120,18 @@ try {
   assert.equal(restored.memory.source_ticket_id, firstSource)
   assert.notEqual(await patch(`/memories/${memories[0].id}`, { content: memories[0].content, scope: 'project', project_id: 'missing' }).catch(error => error.status), 200)
   await assert.rejects(() => patch(`/candidates/${candidateId}`, { decision: 'accept' }), error => /pending|second Memory/.test(error.message), 'Every already-accepted candidate must require an explicit undo before a new save')
+  const unrelated = await post('/memories', { project_id: projectId, scope: 'project', content: 'A separately saved manual preference, not a candidate observation' })
+  assert.equal((await get('/memories')).memories.length, 2)
   const directDelete = await admin.request('DELETE', `/api/v1/memories/${encodeURIComponent(memories[0].id)}`)
   assert.equal(directDelete.candidate_withdrawal, true)
   assert.equal(directDelete.candidate_status, 'pending')
   assert.equal(directDelete.grants_changed, false)
+  const survivingMemories = (await get('/memories')).memories
+  assert.equal(survivingMemories.length, 1)
+  assert.equal(survivingMemories[0].id, unrelated.id, 'Linked withdrawal must not remove an unrelated manual Memory')
+  const ordinaryDelete = await admin.request('DELETE', `/api/v1/memories/${encodeURIComponent(unrelated.id)}`)
+  assert.equal(ordinaryDelete.deleted, true)
+  assert.equal(ordinaryDelete.candidate_withdrawal, undefined, 'Unlinked Memory deletion remains its own ordinary operation')
   assert.equal((await get('/memories')).memories.length, 0)
   assert.equal((await get('/candidates')).candidates.find(row => row.id === candidateId).status, 'pending')
   const restoredAfterDelete = await patch(`/candidates/${candidateId}`, { decision: 'accept' })
@@ -170,7 +180,7 @@ try {
   assert.equal(expired.promotion, 'retained_history_not_auto_promoted')
   assert.equal(expired.candidate.id, candidateId, 'Previously observed candidate stays readable without claiming another promotion')
   assert.equal((await get('/memories')).memories.length, 0)
-  assert.equal((await get('/candidates')).candidates.filter(row => row.id.startsWith('candidate_')).length, 3)
+  assert.equal((await get('/candidates')).candidates.filter(row => row.id.startsWith('candidate_')).length, 3 + Number(process.argv.includes('--browser')))
   assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'SELECT COUNT(*) FROM candidate_memory_links'), 0)
   assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 11)
   assert.equal((await get('/audit/verify')).valid, true)

@@ -39,4 +39,32 @@ describe('explicit project MemoryCandidate preview', () => {
     expect(skillSourceRefs(refs)).toEqual(refs)
     expect(skillSourceRefs([...refs, 'extra'])).toEqual([])
   })
+
+  it('keeps all unsupported state transitions unavailable without making rejected/never look pending', () => {
+    const history = { ...valid, status: 'rejected' }
+    const never = { ...valid, status: 'never' }
+    const accepted = { ...valid, status: 'accepted', derived_memory_id: 'memory_123' }
+    const legacyAccepted = omitDerived(accepted)
+    for (const decision of ['accept', 'reject', 'later', 'never', 'undo'] as const) {
+      expect(memoryDecision(decision, valid), `pending/${decision}`).toBe(decision === 'undo' ? null : decision)
+      expect(memoryDecision(decision, history), `rejected/${decision}`).toBeNull()
+      expect(memoryDecision(decision, never), `never/${decision}`).toBe(decision === 'undo' ? 'undo' : null)
+      expect(memoryDecision(decision, legacyAccepted), `legacy accepted/${decision}`).toBeNull()
+      const expected = decision === 'undo' ? null : decision
+      if (decision !== 'accept') expect(memoryDecision(decision, { ...valid, status: 'later' }), `later/${decision}`).toBe(expected)
+      expect(memoryDecision(decision, accepted), `accepted/${decision}`).toBe(decision === 'undo' ? 'undo' : null)
+    }
+  })
+  it('does not hide unknown or non-string schema behind legacy evidence', () => {
+    for (const schema of [null, 1, false, '', 'other', ' loom.memory-candidate.v1 ']) {
+      const candidate = { ...valid, content: JSON.stringify({ content: 'Unproven', schema }), source_refs: JSON.stringify([]) }
+      expect(memoryCandidates({ candidates: [candidate] })).toEqual([])
+    }
+  })
 })
+
+function omitDerived(candidate: MemoryCandidate): MemoryCandidate {
+  const rest = { ...candidate }
+  delete rest.derived_memory_id
+  return rest
+}
