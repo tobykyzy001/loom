@@ -6,6 +6,7 @@ import { exactTextRoute, inspectTextRoute, validTextGrant } from './model-policy
 import { loadTextRequest, modelBindingSnapshot, validateModelBinding } from './model-binding.js'
 import { inspectModelCatalog, mergeModelCatalogFacts, emptyModelCatalog } from './model-inventory.js'
 import { credentialSnapshot } from './credential-broker.js'
+import { admissionFence, sameAuthorizedAssignment } from '../src/admission.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
@@ -51,7 +52,20 @@ export class DshDispatcher {
     return mergeModelCatalogFacts(base, this.modelCatalog)
   }
   sessionRefs() { return [...this.adapter.sequence.entries()].map(([assignment_id, record]) => ({ assignment_id, ...this.adapter.sessionRef(record.agent.session) })) }
+  immutableInput(assignment) {
+    // The poll's parsed binding is only a derived view of the immutable request.
+    // Verify first; never let a fresher current grant collection replace it.
+    return assignment.kind === 'model_text'
+      ? { ...assignment, model_binding: loadTextRequest(assignment).modelBinding }
+      : assignment
+  }
   async canExecute(assignment) {
+    if (assignment.kind === 'model_text') {
+      try { assignment = this.immutableInput(assignment) } catch { return false }
+    }
+    const previous = this.runner?.state?.data?.assignments?.[assignment.id]
+    if (admissionFence(previous, assignment) || (previous && !sameAuthorizedAssignment(previous, assignment))
+      || (previous?.cancel_requested && !assignment.cancel_requested)) return false
     if (assignment.kind === 'credential_ref') {
       if (this.config.credential_broker_tasks !== 'dsh_records' || !(await this.credentialBroker())?.available) {
         process.stderr.write(`[loom-local-node] credential preflight refused ${assignment.id}: unavailable_broker\n`)
@@ -104,6 +118,12 @@ export class DshDispatcher {
     }
   }
   async executeAssignment(assignment) {
+    assignment = this.immutableInput(assignment)
+    const previous = this.runner.state.data.assignments[assignment.id]
+    const stale = admissionFence(previous, assignment)
+      || (previous?.cancel_requested && !assignment.cancel_requested && 'assignment_already_cancelled')
+      || (previous && !sameAuthorizedAssignment(previous, assignment) && 'assignment_input_changed')
+    if (stale) return this.runner.rejectAssignment(assignment, stale)
     if (assignment.kind === 'credential_ref') {
       if (this.config.credential_broker_tasks !== 'dsh_records' || !(await this.credentialBroker())?.available) {
         const error = new Error('Host credential broker unavailable or record mismatch'); error.code = 'credential_unavailable'; error.state = 'unknown'; throw error
@@ -143,18 +163,26 @@ export class DshDispatcher {
       return this.fileDispatcher.executeAssignment(assignment)
     }
     if (this.active.get(assignment.id)?.executing) throw new Error('Assignment is already active')
-    this.active.set(assignment.id, { ...(this.active.get(assignment.id) || {}), assignment, executing: true })
-    this.runner.state.data.assignments[assignment.id] = assignment
-    await this.runner.state.flush()
+    // Whole task/root/Grant validity and immutable model input are checked before durable
+    // admission or side effects. A current placement view cannot rewrite original work.
     try {
       if (assignment.kind === 'model_text') {
-        // Re-check the freshly polled Grant records AND prove the Assignment was
-        // not mutated between approval and execution. No new prepareCall occurs.
+        validateAssignment(assignment, assignment.grant, this.runner.identity)
         if (modelBindingSnapshot(assignment) !== this.active.get(assignment.id)?.modelBindingSnapshot) {
           throw new Error('Immutable text model binding changed after preflight')
         }
         await validateModelBinding(assignment, this.runner.identity)
       }
+      this.active.set(assignment.id, { ...(this.active.get(assignment.id) || {}), assignment, executing: true })
+      this.runner.state.data.assignments[assignment.id] = assignment
+      await this.runner.state.flush()
+    } catch (error) {
+      // No operation is executing yet; drop only this attempt's preflight placeholder.
+      // Durable assignments, session history and completed effects are never deleted here.
+      this.active.delete(assignment.id)
+      throw error
+    }
+    try {
       await this.runner.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: true })
       const { provenance, modelObservation, textRoute } = this.active.get(assignment.id) || {}
@@ -174,24 +202,29 @@ export class DshDispatcher {
       const digest = sha256(canonical({ assignment_id: assignment.id, kind: assignment.kind, objective: assignment.objective,
         ...(assignment.kind === 'model_text' ? { model_binding: JSON.parse(assignment.content).model_binding,
           grant_digest: assignment.grant_digest, lease_epoch: assignment.lease_epoch } : {}) }))
-      const result = await this.runner.state.once(assignment.id, digest, operation)
-      // Effects and artifact bytes must originate from committed tool/session facts, not narrative assertions.
-      if (result.state === 'unknown' && result.content) {
-        const previous = this.runner.state.data.deliveries?.find((item) => item.kind === 'artifact' && item.body?.metadata?.name === `loom-session-${assignment.id}.json`)
-        if (previous && !this.runner.state.outbox.some((item) => item.kind === 'artifact' && item.digest === previous.digest)) {
-          await this.runner.state.enqueue('artifact', previous.body, { digest: previous.digest })
+      return this.runner.state.once(assignment.id, digest, async () => {
+        const result = await operation()
+        // Normalize BEFORE the sole durable completion commit, including real-byte effects.
+        // Never repair this projection by executing another Agent after a restart.
+        if (result.state === 'unknown' && result.content) {
+          const previous = this.runner.state.data.deliveries?.find((item) => item.kind === 'artifact' && item.body?.metadata?.name === `loom-session-${assignment.id}.json`)
+          if (previous && !this.runner.state.outbox.some((item) => item.kind === 'artifact' && item.digest === previous.digest)) {
+            await this.runner.state.enqueue('artifact', previous.body, { digest: previous.digest })
+          }
+          result.content = null
         }
-        result.content = null
-      }
-      if (!result.artifact && result.content && ['succeeded', 'unknown'].includes(result.state)) result.artifact = { artifact_id: stableUUID(`${digest}:loom-dsh-assistant-artifact:v1`), metadata: result.metadata, bytes: result.content }
-      if (result.artifact) {
-        if (typeof result.artifact.artifact_id !== 'string' || !result.artifact.artifact_id) throw new Error('A completed DSH report requires its actual stable UUID Artifact ID')
-        const metadata = { ...(result.artifact.metadata || {}), artifact_id: result.artifact.artifact_id }
-        result.artifact.metadata = metadata
-        result.artifact_ids = [...new Set([...(result.artifact_ids || []), result.artifact.artifact_id])]
-        result.artifacts = [...(result.artifacts || []), metadata]
-      }
-      return result
+        if (!result.artifact && result.content && ['succeeded', 'unknown'].includes(result.state)) result.artifact = { artifact_id: stableUUID(`${digest}:loom-dsh-assistant-artifact:v1`), metadata: result.metadata, bytes: result.content }
+        if (result.artifact) {
+          if (typeof result.artifact.artifact_id !== 'string' || !result.artifact.artifact_id) {
+            return { ...result, state: 'unknown', summary: 'The observed DSH result lacks its stable Artifact ID; effect reconciliation is required.', artifact: null }
+          }
+          const metadata = { ...(result.artifact.metadata || {}), artifact_id: result.artifact.artifact_id }
+          result.artifact.metadata = metadata
+          result.artifact_ids = [...new Set([...(result.artifact_ids || []), result.artifact.artifact_id])]
+          result.artifacts = [...(result.artifacts || []), metadata]
+        }
+        return result
+      })
     } finally { this.active.delete(assignment.id) }
   }
   async credentialBroker() {

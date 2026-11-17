@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { verify, createPublicKey, randomUUID } from 'node:crypto'
 import { CAPABILITIES } from '../src/validation.js'
+import { cancellationFence, sameAuthorizedAssignment } from '../src/admission.js'
 import { NodeIdentity, NodeState, LoomNodeClient, LoomHttpClient, LoomHttpError, validateAssignment, ControlledFileExecutor, safeRelative, safeProjectRoot, requireIsolatedRoot } from '../src/index.js'
 
 async function fixture() { return mkdtemp(join(tmpdir(), 'loom-node-unit-')) }
@@ -256,4 +257,35 @@ test('restart converts pending completion to unknown and never executes duplicat
   const duplicate = await recovered.once('alpha', 'a-digest', () => { operations++; return {} })
   assert.equal(duplicate.duplicate, true); assert.equal(operations, 0)
   await assert.rejects(() => recovered.once('alpha', 'different-digest', async () => ({})), /different input/)
+})
+
+test('cancel-before-execution preserves its assignment/digest and never invokes the operation after reopen', async () => {
+  const root = await fixture()
+  const state = await NodeState.open(root)
+  await state.mutate((data) => { data.assignments.cancelled = { assignment_id: 'cancelled', lease_epoch: 1, grant_digest: 'fixture-grant', cancel_requested: true } })
+  let executions = 0
+  const once = await state.once('cancelled', 'known-input-digest', async () => { executions++ })
+  assert.equal(once.state, 'cancelled')
+  assert.equal(once.digest, 'known-input-digest')
+  assert.equal(once.assignment_id, 'cancelled')
+  assert.equal(executions, 0)
+  const restored = await NodeState.open(root)
+  const replay = await restored.once('cancelled', 'known-input-digest', async () => { executions++ })
+  assert.equal(replay.state, 'cancelled')
+  assert.equal(replay.duplicate, true)
+  assert.equal(executions, 0)
+  assert.equal(restored.data.completions.cancelled.digest, 'known-input-digest')
+})
+
+test('lease timing is not work-input drift, but expired execution remains refused', async () => {
+  const root = await fixture()
+  const identity = await NodeIdentity.open(root)
+  const { a: seed, g } = assignment(root, identity)
+  const a = { ...seed, grant: g }
+  const shortened = { ...a, lease_expires_at: new Date().toISOString(), grant: { ...a.grant, revoked_at: new Date().toISOString() }, cancel_requested: true }
+  assert.equal(sameAuthorizedAssignment(a, shortened), true)
+  assert.equal(cancellationFence(a, shortened), null, "an existing stopped task's mutable Grant/time view is not new work")
+  assert.throws(() => validateAssignment({ ...a, lease_expires_at: new Date(Date.now() - 1000).toISOString() }, g, identity), /expired/)
+  assert.equal(sameAuthorizedAssignment(a, { ...a, relative_path: 'other.txt' }), false)
+  assert.equal(cancellationFence(a, { ...a, lease_epoch: 0, cancel_requested: true }), 'stale_lease_epoch')
 })

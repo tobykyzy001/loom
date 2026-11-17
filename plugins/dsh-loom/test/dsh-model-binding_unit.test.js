@@ -2,6 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { validateModelBinding, loadTextRequest } from '../lib/model-binding.js'
 import { DshDispatcher } from '../lib/dsh-dispatcher.js'
+import { CoordinatorLoop } from '../lib/coordinator.js'
+import { LoomHttpClient } from '../src/http.js'
+import { LoomNodeClient } from '../src/client.js'
 
 const identity = { node_id: 'a'.repeat(64), installation_id: 'install-actual' }
 const invokeDigest = 'b'.repeat(64)
@@ -171,6 +174,7 @@ test('valid preflight stores a frozen snapshot; execute revalidates without a se
   await assert.rejects(() => subject.executeAssignment(revoked), /not explicitly current/)
   assert.equal(prepares, 1)
   assert.equal(subject.active.size, 0)
+  assert.deepEqual(subject.runner.state.data.assignments, {}, 'A failed authorization cannot become a pre-execution durable assignment')
 })
 
 test('descriptor route is separately opt-in and uses only the existing local file dispatcher', async () => {
@@ -219,4 +223,56 @@ test('changing a binding after canExecute rejects execution before Agent/SDK wor
   assignment.model_binding = { ...JSON.parse(assignment.content).model_binding, model_id: 'different-model' }
   await assert.rejects(() => subject.executeAssignment(assignment), /Conflicting immutable model bindings|changed after preflight/i)
   assert.equal(prepares, 1)
+  assert.equal(subject.runner.state.data.assignments[assignment.id], undefined, 'A conflicting parsed binding cannot be durably admitted first')
+})
+
+test('model cancellation preserves immutable binding and requires no new model authorization', async () => {
+  const subject = dispatcher(async ({ provider, model }) => ({ config: { provider, model }, inputModalities: ['text'], stream: async () => {} }))
+  subject.adapter.ctx.llm.listModels = async () => [{ id: 'loom-stub-v1', provider: 'loom-stub', inputModalities: ['text'] }]
+  subject.adapter.ctx.llm.resolveModelInfo = async () => ({ id: 'loom-stub-v1', provider: 'loom-stub', inputModalities: ['text'] })
+  const assignment = fixture()
+  assert.equal(await subject.canExecute(assignment), true)
+  const entered = Promise.withResolvers()
+  const gate = Promise.withResolvers()
+  let producerCalls = 0
+  let cancelCalls = 0
+  let reports = 0
+  subject.runner.state.once = async (id, digest, operation) => ({ assignment_id: id, digest, ...(await operation()) })
+  subject.runner.report = async () => { reports++ }
+  subject.adapter.executeAssignment = async () => {
+    producerCalls++
+    entered.resolve()
+    return gate.promise
+  }
+  subject.adapter.cancel = async () => {
+    cancelCalls++
+    gate.resolve({ state: 'cancelled', summary: 'Observed abort in this synthetic fixture' })
+    return true
+  }
+  const acks = []
+  const http = new LoomHttpClient({ baseUrl: 'http://127.0.0.1:1', fetch: async (_url, init) => {
+    acks.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ accepted: true }), { headers: { 'content-type': 'application/json' } })
+  } })
+  subject.runner.client = new LoomNodeClient({ http,
+    identity: { nodeId: identity.node_id, data: { installation_id: identity.installation_id }, token: 'fixture-node-token' },
+    state: { outbox: [] } })
+  const loop = new CoordinatorLoop({ max_active_workers: 1 }, subject, subject.runner.client)
+  const original = loop.startAssignment(assignment)
+  await entered.promise
+  await loop.handle({ ...assignment, cancel_requested: true,
+    // Stop an already admitted task; its changing current views are not a new model call.
+    lease_expires_at: new Date(Date.now() - 1000).toISOString(), model_binding: loadTextRequest(assignment).modelBinding,
+    grants: [], purpose: 'cancel_requested', status: 'cancel_requested' })
+  await original
+  assert.equal(cancelCalls, 1)
+  assert.equal(producerCalls, 1)
+  assert.equal(reports, 1, 'The original Assignment is the only report producer')
+  assert.deepEqual(subject.runner.state.data.assignments[assignment.id].model_binding, loadTextRequest(assignment).modelBinding)
+  assert.equal(subject.runner.state.data.assignments[assignment.id].cancel_requested, true)
+  const stopAck = acks.find(body => body.cancel_requested === true)
+  assert.equal(stopAck.cancellation, true)
+  assert.equal(stopAck.accepted, true)
+  assert.equal(stopAck.assignment_id, assignment.id)
+  assert.equal(stopAck.lease_epoch, assignment.lease_epoch)
 })

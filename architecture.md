@@ -583,6 +583,9 @@ Install Plugin / Bare Agent
 - 主动注册只代表可发现或已认证节点，**注册本身不是任务 Grant、目录访问或无条件 Membership**。首次加入需一次性配对码、预注册设备身份或管理员批准；凭据自动取得不等于信任自动扩张。
 - 节点配置中心地址和最小凭据；中心对节点进行身份挑战。节点也必须验证中心 TLS / 签名身份，不能只因内网 IP 就上传私密库存。
 - 节点保存可重放的 Outbox 和幂等上报；协议版本不兼容、中心离线、Token 撤销时明示状态，不盲目清空任务或重复副作用。
+- **TypeScript LocalNode 与 vendored dispatcher 使用持久 assignment 作入场围栏，而不是跨为空白的进程内 grant 缓存。** 非取消执行先验证 Node/Grant/ProjectBinding 与本地 root，再保存可信 assignment、检查 input digest 和活跃作业的同一工作输入。path/content、worker、Grant digest 等改变不能借同一 Assignment ID 偷换工作。当前 Controller 在每轮 poll 重新生成 `status/purpose/operation/resource/grants/grant_status` 等观察字段，它们不是不可变的工作输入；`lease_expires_at` 是当前时间窗而非工作内容， Grant 当前 `revoked_at/expires_at` 由最新有效性检查而不是已保存工作快照决定。
+- 本地持久 `rejections` 只是拒绝与核销尝试的账本，按 assignment/epoch/grant digest 出牌；**拒绝核销既不是 Grant，也不是 Ticket/Report 的终态**。匹配已接收 Assignment 的取消仍可处理，未知/旧 epoch/换摘要的取消不能 abort agent 或改写历史。撤销当前 Grant 阻止新执行，但不等于抹去旧作业的停止意图或已经产生的效果。`once()` 保留 logical input digest，DSH Result 的 artifact/Effect 归一化必须在持久完成提交内部完成。
+- 同一 immutable Report/Artifact 的逻辑内容决定其 64-hex `request_id` 和 logical digest；精确回放保留原 receipt，任何实质 body/byte/metadata 改变都不得冒充相同请求。此规则仍受 node/route/中央持久 receipt 精确 byte payload 校验；不是到其它主机或协议的 exactly-once 承诺。Detail 与运行边界见 [tests/runner/README.md](tests/runner/README.md)。
 - 同一 DSH 的多个 Profile / Agent 可以作为独立 Worker / Tenant 命名空间。Profile 的隔离级别要如实声明，不能把安装在同一 DSH 实例的公司 / 个人工作身份混为同一 Worker。
 - 中心保留 Ticket、Grant、Lease、调度和恢复权威；插件可保留本地 Effect Ledger、会话日志和必要缓存，但不成为独立跨机任务权威。
 

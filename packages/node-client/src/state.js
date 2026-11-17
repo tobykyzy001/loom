@@ -12,6 +12,8 @@ export class NodeState extends EventEmitter {
       throw new Error('Invalid persistent Loom node state')
     }
     state.data = data
+    if (data.rejections === undefined) data.rejections = {}
+    else if (!data.rejections || typeof data.rejections !== 'object' || Array.isArray(data.rejections)) throw new Error('Invalid local rejection ledger')
     // A synchronous initializer can legitimately return before its effect is known.
     for (const record of Object.values(data.completions)) {
       if (record.state === 'running' || record.state === 'restarting') {
@@ -60,20 +62,25 @@ export class NodeState extends EventEmitter {
   async once(key, digest, operation) {
     const existing = this.data.completions[key]
     if (existing) {
-      if (existing.digest && existing.digest !== digest) throw new Error('Assignment reused with different input')
+      const bad = typeof existing.digest !== 'string' || !existing.digest
+      if (bad || existing.digest !== digest) {
+        const error = new Error(bad ? 'Persistent completion has no verifiable task input digest' : 'Assignment reused with different input')
+        error.fenced = true
+        throw error
+      }
       return { ...existing, duplicate: true }
     }
     const pending = { assignment_id: key, digest, state: 'running', summary: 'The deterministic operation is in progress.', artifacts: [], effects: [] }
     await this.mutate((data) => { data.completions[key] = pending })
     if (this.data.assignments[key]?.cancel_requested) {
-      return this.complete(key, { state: 'cancelled', summary: 'Cancelled before the operation started.', artifacts: [], effects: [] })
+      return this.complete(key, { ...pending, state: 'cancelled', summary: 'Cancelled before the operation started.', artifacts: [], effects: [] })
     }
     let result
     try { result = await operation() } catch (error) {
       result = { state: 'failed', summary: error?.message || `Deterministic execution failed with ${typeof error}`, artifact: null, effect: null,
         ...(error?.code ? { code: error.code } : {}) }
     }
-    return this.complete(key, result)
+    return this.complete(key, { ...pending, ...result, digest, assignment_id: key })
   }
   async complete(key, result) {
     await this.mutate((data) => { data.completions[key] = result })

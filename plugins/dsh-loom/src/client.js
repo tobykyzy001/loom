@@ -51,7 +51,11 @@ export class LoomNodeClient {
       requested_state: requestedState, summary, evidence, artifact_ids, effects,
       ...(cancelAcknowledged ? { cancel_acknowledged: true } : {}) }
     if (leaseEpoch === undefined) delete body.lease_epoch
-    return this.state.enqueue('report', body, { digest: this.logicalDigest(body) })
+    const digest = this.logicalDigest(body)
+    // An identical immutable receipt keeps its identity across a durable reopen.
+    // Changed results/effects yield a different digest and cannot borrow this receipt.
+    body.request_id = digest
+    return this.state.enqueue('report', body, { digest })
   }
   async artifact({ ticketId, artifactId, assignmentId, leaseEpoch, metadata, bytes, signal }) {
     const content = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
@@ -59,16 +63,20 @@ export class LoomNodeClient {
     const body = { ...envelope(this, id()), ticket_id: ticketId, artifact_id: artifactId, assignment_id: assignmentId,
       ...(leaseEpoch === undefined ? {} : { lease_epoch: leaseEpoch }),
       metadata: { ...metadata, size_bytes: content.length, sha256 }, bytes_base64: content.toString('base64') }
-    return this.state.enqueue('artifact', body, { digest: this.logicalDigest(body) })
+    const digest = this.logicalDigest(body)
+    // Identical immutable bytes/metadata map to the same receipt, never a new upload ID.
+    body.request_id = digest
+    return this.state.enqueue('artifact', body, { digest })
   }
   logicalDigest(body) {
     const { request_id, ...rest } = body
     return sha256(canonical({ logical_fields: rest }))
   }
-  async acknowledge({ ticketId, assignmentId, leaseEpoch, accepted, reason = '', cancellation = false }) {
+  async acknowledge({ ticketId, assignmentId, leaseEpoch, accepted, reason = '', cancelRequested = false, cancellation = false }) {
+    const stop = Boolean(cancelRequested || cancellation)
     const body = { ...envelope(this, id()), ticket_id: ticketId, assignment_id: assignmentId,
       ...(leaseEpoch === undefined ? {} : { lease_epoch: leaseEpoch }), accepted: Boolean(accepted),
-      reason, cancellation: Boolean(cancellation) }
+      reason, cancel_requested: stop, cancellation: stop }
     const response = await this.http.post('/api/v1/nodes/acknowledge', body, { token: this.identity.token })
     return { request: body, response }
   }

@@ -6,15 +6,16 @@ import { NodeIdentity } from './identity.js'
 import { NodeState } from './state.js'
 import { CAPABILITIES, envelope, validateAssignment } from './validation.js'
 import { ControlledFileExecutor } from './executor.js'
-import { canonical, id, sha256, requireIsolatedRoot } from './util.js'
+import { canonical, sha256, requireIsolatedRoot } from './util.js'
+import { admissionFence, cancellationFence, optionalNodeAckError, rejectionFingerprint, sameAuthorizedAssignment } from './admission.js'
 
 export class LocalNodeRunner {
   constructor(options) {
     this.options = options
     this.stopped = false
     this.lastAssignmentId = null
-    this.versions = new Map()
     this.active = new Map()
+    this.activeAssignments = new Map()
     this.capabilities = CAPABILITIES
   }
   async start({ enrollmentCode } = {}) {
@@ -46,45 +47,82 @@ export class LocalNodeRunner {
     if (!assignment) return { status: 'idle' }
     if ((assignment.cancel_requested === true || assignment.cancel_requested === 1) && assignment.id) {
       const previous = this.state.data.assignments[assignment.id]
-      await this.state.mutate((data) => { data.assignments[assignment.id] = { ...previous, ...assignment, cancel_requested: true } })
-      this.active.get(assignment.id)?.abort(new Error('Center cancellation requested'))
-      const acknowledged = await this.report(assignment, { state: 'cancelled',
+      const activeAssignment = this.activeAssignments.get(assignment.id)
+      const stale = cancellationFence(previous, assignment, activeAssignment)
+      if (stale) return this.rejectAssignment(assignment, stale)
+      // Preserve the complete previously admitted frame and its validated identity.
+      // Cancellation annotations must not overwrite the original facts.
+      const authorizedCancel = await this.state.mutate((data) => {
+        const current = data.assignments[assignment.id]
+        if (!sameAuthorizedAssignment(previous, current)) return false
+        data.assignments[assignment.id] = { ...current, cancel_requested: true }
+        return true
+      })
+      if (!authorizedCancel) return this.rejectAssignment(assignment, 'cancellation_assignment_changed_before_persist')
+      const controller = this.active.get(assignment.id)
+      if (controller && this.activeAssignments.get(assignment.id) === activeAssignment) {
+        controller.abort(new Error('Center cancellation requested'))
+      }
+      const acknowledged = await this.report(previous, { state: 'cancelled', cancel_acknowledged: true,
         summary: 'Cancellation intent acknowledged; any pre-existing effect requires its own evidence.' })
       return { status: 'cancel_acknowledged', assignmentId: assignment.id, ...acknowledged }
     }
     this.lastAssignmentId = assignment.id
     const previous = this.state.data.assignments[assignment.id]
-    if (previous) {
-      const previousEpoch = previous.lease_epoch
-      if (Number.isSafeInteger(previousEpoch)
-        && (!Number.isSafeInteger(assignment.lease_epoch) || assignment.lease_epoch < previousEpoch)) {
-        await this.rejectAssignment(assignment, 'Lease epoch moved backwards')
-        return { status: 'fenced', assignmentId: assignment.id }
-      }
-    }
-    await this.state.mutate((data) => { data.assignments[assignment.id] = assignment })
-    if (this.active.has(assignment.id)) return { status: 'duplicate_active', assignmentId: assignment.id }
-    const version = this.versions.get(assignment.id) || {}
-    if (!Number.isSafeInteger(assignment.lease_epoch) || assignment.lease_epoch < (version.lease_epoch || 0)
-      || (assignment.grant_digest && version.grant_digest && assignment.grant_digest !== version.grant_digest)) {
-      await this.rejectAssignment(assignment, 'Stale Lease or Grant fencing')
-      return { status: 'fenced', assignmentId: assignment.id }
-    }
-    this.versions.set(assignment.id, { lease_epoch: assignment.lease_epoch, grant_version: assignment.grant_version, grant_digest: assignment.grant_digest })
     const grant = assignment.grant || this.options.grants?.[assignment.grant_digest]
     let verified
-    try { verified = validateAssignment(assignment, grant, this.identity) } catch (error) {
-      await this.report(assignment, { state: 'failed', summary: `Assignment rejected: ${error.message}`, artifact: null, effect: null })
+    try {
+      // Validation precedes active identification: an active ID is not an authorization cache.
+      verified = validateAssignment(assignment, grant, this.identity)
+      const incoming = { ...assignment, ...verified }
+      const stale = admissionFence(previous, incoming)
+      if (stale) return this.rejectAssignment(assignment, stale)
+      await this.assertApprovedRoot(assignment, grant)
+      if (this.active.has(assignment.id)) {
+        const activeAssignment = this.activeAssignments.get(assignment.id)
+        if (!sameAuthorizedAssignment(activeAssignment, incoming) || !sameAuthorizedAssignment(this.state.data.assignments[assignment.id], incoming)) {
+          return this.rejectAssignment(assignment, 'active_assignment_mismatch')
+        }
+        return { status: 'duplicate_active', assignmentId: assignment.id }
+      }
+      await this.state.mutate((data) => {
+        // Recheck the exact frame being committed after any earlier async rejection/write.
+        // Reading state.data before this queued mutation is not durable authorization evidence.
+        const current = data.assignments[assignment.id]
+        const currentStale = admissionFence(current, incoming)
+        if (currentStale || (current && !sameAuthorizedAssignment(current, incoming))) {
+          const error = new Error(currentStale || 'active_assignment_mismatch')
+          error.fenced = true
+          throw error
+        }
+        data.assignments[assignment.id] = current?.cancel_requested ? { ...incoming, cancel_requested: true } : incoming
+      })
+    } catch (error) {
       await this.rejectAssignment(assignment, error.message)
-      return { status: 'rejected', assignmentId: assignment.id, reason: error.message }
+      return { status: error.fenced ? 'fenced' : 'rejected', assignmentId: assignment.id, reason: error.message }
+    }
+    if (this.active.has(assignment.id)) {
+      const activeAssignment = this.activeAssignments.get(assignment.id)
+      if (!sameAuthorizedAssignment(activeAssignment, this.state.data.assignments[assignment.id])) {
+        return this.rejectAssignment(assignment, 'active_assignment_changed_during_admission')
+      }
+      return { status: 'duplicate_active', assignmentId: assignment.id }
     }
     const controller = new AbortController()
     this.active.set(assignment.id, controller)
+    const activeAssignment = structuredClone(this.state.data.assignments[assignment.id])
+    this.activeAssignments.set(assignment.id, activeAssignment)
     try {
+      if (!sameAuthorizedAssignment(this.state.data.assignments[assignment.id], activeAssignment)) {
+        return this.rejectAssignment(assignment, 'active_assignment_changed_before_execution')
+      }
       const digest = sha256(canonical({ assignment_id: assignment.id, lease_epoch: assignment.lease_epoch, grant_version: assignment.grant_version }))
-      await this.assertApprovedRoot(assignment, grant)
       const known = this.state.data.completions[assignment.id]
-      if (known && known.digest !== digest) throw new Error('Assignment reused with different input')
+      if (known) {
+        const missing = typeof known.digest !== 'string' || known.digest.length === 0
+        if (missing || known.digest !== digest) return this.rejectAssignment(assignment,
+          missing ? 'Persistent completion has no verifiable task input digest' : 'Assignment reused with different input')
+      }
       if (known) {
         // A late/repeated poll is evidence dedupe, not a new execution or delivery acknowledgement.
         return { status: known.state, assignmentId: assignment.id, duplicate: true,
@@ -98,7 +136,10 @@ export class LocalNodeRunner {
       await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: result.state !== 'failed' })
       return { status: result.state, assignmentId: assignment.id, ...(await this.report(assignment, result)) }
-    } finally { this.active.delete(assignment.id) }
+    } finally {
+      this.active.delete(assignment.id)
+      this.activeAssignments.delete(assignment.id)
+    }
   }
   async assertApprovedRoot(assignment, grant) {
     const mapping = this.options.projectRoots?.[assignment.project_id]
@@ -124,11 +165,45 @@ export class LocalNodeRunner {
       state: result.state, summary: result.summary,
       evidence: result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : []), artifacts, effects })
   }
-  async rejectAssignment(assignment, reason) {
-    try {
-      await this.client.acknowledge({ ticketId: assignment.ticket_id || id(), assignmentId: assignment.id,
-        leaseEpoch: assignment.lease_epoch, accepted: false, reason })
-    } catch { /* durable next center poll can fence/retry; local report still never indicates success */ }
+  async rejectAssignment(assignment, reason, localStatus = 'fenced') {
+    const fingerprint = rejectionFingerprint(assignment)
+    const existing = this.state.data.rejections?.[fingerprint]
+    if (['accepted', 'quarantined'].includes(existing?.acknowledgement?.outcome)) {
+      return { status: localStatus, assignmentId: assignment.id, rejection: existing }
+    }
+    const now = new Date().toISOString()
+    const rejection = {
+      schema: 'loom.local-rejection.v1', fingerprint,
+      assignment_id: assignment.id, ticket_id: typeof assignment.ticket_id === 'string' ? assignment.ticket_id : null,
+      lease_epoch: assignment.lease_epoch,
+      grant_digest: assignment.grant_digest || assignment.grant?.grant_digest || assignment.grant?.digest || null,
+      local_status: localStatus, reason: String(reason).slice(0, 500),
+      created_at: existing?.created_at || now, updated_at: now,
+      // Only an acknowledgement attempt outcome, never task execution permission.
+      acknowledgement: { outcome: 'pending' },
+    }
+    await this.state.mutate((data) => {
+      data.rejections ||= {}
+      data.rejections[fingerprint] = rejection
+    })
+    const idsValid = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(assignment.id || '') && /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(assignment.ticket_id || '')
+    let acknowledgement
+    if (!idsValid) {
+      acknowledgement = { outcome: 'not_attempted', reason: 'missing_current_ticket_or_assignment_id' }
+    } else {
+      try {
+        const receipt = await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
+          leaseEpoch: assignment.lease_epoch, accepted: false, reason })
+        acknowledgement = receipt.response?.accepted === true ? { outcome: 'accepted' } : { outcome: 'pending' }
+      } catch (error) {
+        acknowledgement = optionalNodeAckError(error)
+      }
+    }
+    await this.state.mutate((data) => {
+      data.rejections[fingerprint] = { ...data.rejections[fingerprint], updated_at: new Date().toISOString(), acknowledgement }
+    })
+    return { status: localStatus, assignmentId: assignment.id,
+      rejection: this.state.data.rejections[fingerprint] }
   }
   async tick() { await this.pollAndRun(); return this.client.dispatchOutbox() }
 }

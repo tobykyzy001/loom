@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 import { LocalNodeRunner, wireCapabilities } from '../src/runner.js'
 import { sleep } from '../src/util.js'
+import { admissionFence, cancellationFence, sameAuthorizedAssignment } from '../src/admission.js'
 
 /** Bounded outbound-only coordinator plugin runner. Idempotent local completions and backoff survive restart. */
 export class CoordinatorLoop {
@@ -46,7 +47,7 @@ export class CoordinatorLoop {
   startAssignment(assignment) {
     const taskKey = assignment.cancel_requested ? `${assignment.id}:cancellation` : assignment.id
     if (this.pending.has(taskKey)) return
-    if (this.lastAssignment?.id === assignment.id && this.lastAssignment.lease_epoch === assignment.lease_epoch && !assignment.cancel_requested) return
+    if (this.lastAssignment?.id === assignment.id && this.lastAssignment.lease_epoch === assignment.lease_epoch && this.lastAssignment.grant_digest === assignment.grant_digest && !assignment.cancel_requested) return
     this.lastAssignment = assignment
     const task = this.handle(assignment).catch((error) => {
       this.lastError = error.message
@@ -57,11 +58,27 @@ export class CoordinatorLoop {
     return task
   }
   async handle(assignment) {
+    if (this.executor.immutableInput) {
+      try { assignment = this.executor.immutableInput(assignment) } catch {
+        await this.runner.rejectAssignment(assignment, 'invalid_immutable_model_request')
+        return
+      }
+    }
     const existing = this.pending.get(assignment.id) || (assignment.cancel_requested ? null : this.pending.get(`${assignment.id}:cancellation`))
+    const durable = this.runner?.state?.data?.assignments?.[assignment.id]
+    const activeAssignment = this.runner?.activeAssignments?.get(assignment.id) || this.executor.active?.get(assignment.id)?.assignment
+    const stale = assignment.cancel_requested
+      ? cancellationFence(durable, assignment, activeAssignment)
+      : admissionFence(durable, assignment)
     if (assignment.cancel_requested) {
-      await this.executor.cancel?.(assignment.id)
+      if (!durable || stale) {
+        await this.runner.rejectAssignment(assignment, stale || 'unknown_local_assignment')
+        return
+      }
+      const stopped = await this.executor.cancel?.(assignment.id)
       await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
-        leaseEpoch: assignment.lease_epoch, accepted: true, cancellation: true, reason: 'Cancellation requested; outcome awaits observed effect/report' })
+        leaseEpoch: assignment.lease_epoch, accepted: stopped === true, cancelRequested: true,
+        reason: 'Cancellation requested; outcome awaits observed effect/report' })
       if (existing) {
         await existing
         // The original in-flight Assignment is the unique Report producer; this stop branch only dispatches its evidence.
@@ -74,6 +91,11 @@ export class CoordinatorLoop {
       if (observed && ['cancelled', 'failed', 'unknown'].includes(observed.state)) await this.executor.report(assignment, observed)
       return
     }
+    const mismatched = durable && !sameAuthorizedAssignment(durable, assignment)
+    if (stale || durable?.cancel_requested || mismatched) {
+      await this.runner.rejectAssignment(assignment, stale || (durable?.cancel_requested ? 'assignment_already_cancelled' : 'assignment_input_changed'))
+      return
+    }
     if (this.workerCount >= this.config.max_active_workers || await this.executor.canExecute?.(assignment) === false) {
       await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: false, reason: 'Insufficient local capability or configured worker limit' })
@@ -84,6 +106,10 @@ export class CoordinatorLoop {
       const completed = await this.executor.executeAssignment(assignment)
       await this.executor.report(assignment, completed)
     } catch (error) {
+      if (error.fenced) {
+        await this.runner.rejectAssignment(assignment, error.message)
+        return
+      }
       await this.executor.report(assignment, { state: error.state || 'unknown', summary: error.message, effects: [], artifacts: [] })
     } finally { this.workerCount-- }
   }

@@ -7,6 +7,7 @@ import { installation, isolatedEnv, fixtureRoot, installBundles, command, redact
 import { FixtureHost } from './runtime.mjs'
 import { startRustConcierge } from '../../scripts/fixtures/rust-server.mjs'
 import { LoomHttpClient } from '../../packages/node-client/src/http.js'
+import { DatabaseSync } from 'node:sqlite'
 
 export async function runRealLifecycle({ output = process.env.LOOM_TEST_OUTPUT ? resolve(process.env.LOOM_TEST_OUTPUT) : undefined, root: requestedRoot } = {}) {
   const root = await fixtureRoot(requestedRoot)
@@ -155,6 +156,15 @@ export async function runRealLifecycle({ output = process.env.LOOM_TEST_OUTPUT ?
     await host.waitFor(() => host.sessionEvents(cancelSessionId, ['turn/end']).some((entry) => entry.event.data?.reason?.kind === 'aborted'), 15_000, 'actual user-cause aborted DSH Session event')
     assert.equal(host.sessionEvents(cancelSessionId, ['turn/end']).at(-1).event.data.reason.kind, 'aborted')
     // The terminal DSH event above is the observed cancellation source; no extra Session events are synthesized.
+    // The separate Node acknowledgement must also have used the centre's cancel_requested gate.
+    const receiptDb = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'), { readOnly: true })
+    try {
+      const row = receiptDb.prepare('SELECT id,acknowledged_at,last_report_at,lease_epoch FROM assignments WHERE id=? AND ticket_id=?')
+        .get(cancellation.assignments[0].id, cancellation.id)
+      assert.ok(row?.acknowledged_at, `The Node stop acknowledgement must reach the actual controller, not only a mocked client`)
+      assert.ok(row.last_report_at, 'A cancelled final Report remains distinct from a cancellation delivery acknowledgement')
+      assert.equal(row.lease_epoch, cancellation.assignments[0].lease_epoch)
+    } finally { receiptDb.close() }
     facts.cancellation = 'PASS'
     await log('actual Loom cancel -> Host agent.cancel + durable aborted turn + cancel_acknowledged', { ticket_id: cancellation.id, session_id: cancelSessionId, terminal_kind: 'aborted', cancel_acknowledged: true, artifacts: 0 })
     await host.stop(); host = null

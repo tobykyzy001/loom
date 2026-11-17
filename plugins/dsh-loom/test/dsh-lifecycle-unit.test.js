@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { wireCapabilities } from '../src/runner.js'
+import { LocalNodeRunner, wireCapabilities } from '../src/runner.js'
+import { NodeState } from '../src/state.js'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { ControlledFileExecutor } from '../src/executor.js'
@@ -151,16 +152,26 @@ test('fixture file-effect verification is opt-in and reads actual bounded file b
 test('a repeated completed Assignment does not execute twice, while its cancellation reaches the active Agent', async () => {
   const completion = Promise.withResolvers()
   const calls = []
-  const stored = { assignments: {}, completions: {} }
+  const root = await mkdtemp(join(tmpdir(), 'loom-coordinator-cancel-'))
+  const projectRoot = join(root, 'project'); await mkdir(projectRoot, { mode: 0o700 })
+  const node_id = createHash('sha256').update('fixture-node-identity').digest('hex')
+  const digest = createHash('sha256').update('fixture-scoped-grant').digest('hex')
+  const scope = { node_id, installation_id: 'install-cancel-fixture', worker_id: 'default', project_id: 'project-cancellation' }
+  const assignment = { id: 'asg-cancellable', ticket_id: 'tkt', lease_id: 'lease-cancel', lease_epoch: 1, attempt: 1,
+    lease_expires_at: new Date(Date.now() + 60_000).toISOString(), kind: 'read_summary', relative_path: 'input.txt',
+    objective: 'Read a controlled project for cancellation', grant_version: 1, grant_digest: digest, ...scope,
+    grant: { id: 'grant-cancellation', version: 1, digest, operations: ['read'], project_root: projectRoot, ...scope, revoked_at: null } }
+  const state = await NodeState.open(join(root, 'state'))
+  await state.mutate((data) => { data.assignments[assignment.id] = assignment })
+  const stored = state.data
   const executor = {
-    runner: { state: { data: stored } },
+    runner: { state, rejectAssignment: LocalNodeRunner.prototype.rejectAssignment },
     cancel: async () => { calls.push('actual-cancel') },
     executeAssignment: async () => { calls.push('execute'); await completion.promise; return { state: 'cancelled' } },
     report: async () => { calls.push('report') },
   }
   const client = { acknowledge: async () => {}, dispatchOutbox: async () => {}, poll: async () => ({ assignment: null }), heartbeat: async () => {} }
   const loop = new CoordinatorLoop({ max_active_workers: 1, heartbeat_ms: 2000, poll_seconds: 0 }, executor, client)
-  const assignment = { id: 'asg-cancellable', ticket_id: 'tkt', lease_epoch: 1 }
   const original = loop.startAssignment(assignment)
   await new Promise((resolve) => setImmediate(resolve)) // Let execution reach its in-flight state before delivering stop intent.
   loop.startAssignment(assignment)

@@ -80,3 +80,16 @@ pnpm --dir plugins/dsh-loom test
 运行入口只使用合成/owned 临时文件和内存 transport，无网络发现、生产 directory、OS Credential Store、真实用户身份、收费模型或修改现有桌面/DSH Profile。从公钥签名和authorization隔离到outbox持久恢复均看实际 NodeClient代码行为，而不只是断言 Rust会拒绝最后错误。
 
 Enrollment code 仅 child environment 传输；重启没有新 code，使用真正的本地持久 Node credentials。不合规 Patch 没有 literal Token，输出不含 node token/private-key/raw session transcript。原始日记仅在 fixture private/state 以 0600 留存，绝不包含用户私有目录信息；`private/host-lifecycle.jsonl` 只留 argv 名义、协议初始化和实际退出状态。
+
+## Durable Assignment admission 与回执恢复专项
+
+入口、命令和精确边界见 [tests/runner/README.md](../runner/README.md)。本轮先以真实文件状态找出 TypeScript/vendored runner 重启后丢失的 Grant fencing，再覆盖同一 dispatcher/Coordinator active promise、合法与伪造取消、无 input digest 的旧 completion 和 DSH result completion-before-report。所有结果来自真实 `NodeIdentity.open`、`NodeState.open`、actual file operation 和实际控制面，不只由语法编译或 HTTP 200推断。
+
+- 非取消执行在持久化前完成 Node/Grant/root/work Content 验证。Controller 每轮 poll 的当前 `status/purpose/operation/grants/grant_status/resource`、Lease 时间窗与有效 Grant 状态和不可变的工作输入分开。`model_binding`同时保持不可变 content 含义与 poll 表示的一致，当前Grants在每轮权限路径重验，不得刷新出另一份placement。撤销可以阻止新的执行，却不会让先前已认领工作的停止意图凭空丢失。
+- 私有 `rejections` 只保存本地拒绝/核销，不并入中心SQLite，也不从HTTP认可推出Ticket完成或permission。相同指纹不会在真实重开后反复进行已确定的拒绝核销。正常输入的活跃promise和controller相互关联；missing or mismatched completion digest 不再被通过 `duplicate_active` 或快捷branch接受。
+- Report/Artifact 的逻辑内容生成稳定的64-hex receipt identity，改变 bytes/state/evidence不得共用。实际 Rust Concierge 的 HTTP 200 已知提交却从客户端隐藏的响应，在等待真实的持久化重试退避 后，按原request body、digest与immutable bytes回放。事前和事后的中心API、owned SQLite request/receipt、Artifact/report/effect/audit数量及其关联都查看；执行器仍恰好一次，文件hash/inode/time不变，central audit chain 為 true。
+- 对真正的 pending file operation，stop 会匹配并触发该 entry，而不是只查找无关系的 runner Map。真实 gated write 随后产生所指文件、byte-backed confirmed Effect，但任务结果保持 unknown 和其无confirmed cancel acknowledgement，不冒充已取消或已成功回滚。这证明局部文件停止竞赛，不存在“generic file abort exactly-once”保证。
+- 真实 DSH 生命周期额外验证取消 acknowledgement：公开 Agent cancel 确实到达、真实 `turn/end` reason aborted、last report cancel_acknowledged=true，并在 owned centre SQLite 同一 Assignment 上看到非空 `acknowledged_at` 与 `last_report_at`。Host再次启动可以真正resume原Session。`cancel_requested` 与兼容 `cancellation` 均只在同一stop intent下设置，不编造Task完成。Live model继续 NOT RUN (zero-network Stub)。
+- 相关当前状态：Node client 22、vendored plugin 55、Vue 44 + typecheck/build；Rust workspace/严格clippy、真实scoped Credential inspect/revoke/unseeded missing、固定SDK model binding、Skill replay和原生Bare flow都分别验证。它们各自有边界，不能覆盖生产模型/provider注册激活、其他host凭证、TLS远程两机、移动锁屏/杀进程或不相关pipeline。1+3 Compose按用户明确方向继续推迟。
+
+严格保存 failed candidates 的原始原因：当首版错误对当前poll整张view做canonical比较时，实际取消使用 lease窗口变化及当前状态投影，停止发生之前就会被拒绝。已依据真实Host纠错，而非把校验删掉或者生成假的"未知effect"报告。还存在两处易判错的量具：第一层计数 spy 外又包等待用的spy会重复点算，Artifact序列化 container hash 不等于目标文件hash；均已单独修正，不把相同工具调用解释为两次工具副作用。
