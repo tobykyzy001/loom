@@ -28,6 +28,22 @@ node tests/runner/coordinator-admission.mjs
 - Report/Artifact 的 `request_id` 由其**排除 request_id 后的完整逻辑内容**决定，等于保存的 logical digest（64-hex receipt ID）。同一 immutable payload 在丢失 HTTP 响应后仍可复用原 receipt；改变 payload、字节、metadata、case 或状态不能冒充同一个 receipt。原 Artifact UUID、bytes、SHA、Effect ID/lineage 都是独立事实，不以 receipt 哈希代替。
 - DSH dispatcher 在真实 operation 返回后、完成提交**内部**归一化 Artifact ID/metadata/effects，避免先落到不完整的完成记录再补水。JSON 文件的逐一重开和 Reports 的空壳重建不等同对所有历史版本的具体效果自动恢复，也不等同精确 crashpoint 验收。
 
+## 有界 HTTP 响应流与停止唤醒
+
+```sh
+node tests/runner/http-stream.mjs
+node tests/runner/http-socket-stream.mjs
+```
+
+公共与 vendored `LoomHttpClient` 使用标准的 `response.body.getReader()` 做分块读取，在合并还原 JSON 之前按**实际收到的字节**限制响应体积（默认 1 MiB，允许显式非负安全整数）。超限所在 chunk 不被 append，reader 随即被 cancel：`Content-Length` 不参与安全判定，低报 headers 不能豁免。也涵盖恰好达到上限的消息、逐字节拆开的 UTF-8、非法 chunk，以及没有 stream 的旧 `arrayBuffer` fixture 的兼容路径。后带兜底路径仍需先取得整段再拒绝超限，不是所有响应类型都可由该 helper 提前分配限额。
+
+- **唤醒而非仅发取消信号**：每个挂起的 `reader.read()` 都与既有 AbortController 竞争，分别处理 caller stop 和总 timeout，不把 body read 的恒 pending Promise 变成永活请求。外部取消原因统一优先；普通网络/JSON/status error不被错转成取消或未知副作用。没有每个 chunk 重置 deadline。
+- `reader.cancel()` 失败或永不完成时，不能覆盖主要错误或再次永久挂住 cleanup。内部 Abort 亦向底层 fetch 传播，但没有将已经产生的网络请求/副作用说成取消完成或回滚。每个失败尝试只发起一次 reader cancel，绝不宣称全局 exactly-once delivery。
+- 连续零字节 chunk 不计入 JSON payload，但步骤会让出事件循环，避免总 timeout 的微任务饥饿。前置中止不会把整段文档再读出来；多字节字符只在受限合并后统一 UTF-8 decode。
+- **实例范围的 socket 证明**：`http-socket-stream` 在 owned 的 `127.0.0.1` 随机端口上，实际接收 Node fetch 的 HTTP response。起点缺失的 JSON 与多次分叉的partial payload不会被接收；正常 JSON、cap 拒绝、caller cancel 和超时均分别等待真正 server close，而不仅观察一个返回 error。该 fixture 独占各自 server 并在换用下一个 probe 前清理旧 listener；`server.listening` 必须为 false，自有 sockets 必须清空，CLI 应自然退出。
+
+这些测试不证明远端有序取消得到保证，也不证明对所有上游都有绝对最大分配或停机保证、物理远程、TLS、多 Host 或 Live LLM。真实 Agent 调用、取消和恢复、receipt replay 与固定 SDK 模型测试仍分别实测，不由本地 synthetic socket 证明替代。
+
 ## 实际 Rust 中心的丢失响应回放
 
 ```sh

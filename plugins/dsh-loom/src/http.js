@@ -1,5 +1,67 @@
 import { assertObject } from './util.js'
 
+/** Read only the configured JSON bytes. Never use a claimed content-length as proof of size. */
+async function readJsonBytes(response, { limit, callerSignal, controller }) {
+  if (typeof response.body?.getReader !== 'function') return response.arrayBuffer()
+  const reader = response.body.getReader()
+  const cancelled = () => {
+    if (callerSignal?.aborted) throw callerSignal.reason instanceof Error
+      ? callerSignal.reason : new Error('Loom HTTP response body read aborted')
+    if (controller.signal.aborted) throw controller.signal.reason
+  }
+  cancelled()
+  const stop = async (reason) => {
+    try { cancelled() } catch (cause) { reason = cause }
+    if (!controller.signal.aborted) controller.abort(reason)
+    try { void Promise.resolve(reader.cancel(reason)).catch(() => {}) } catch { /* Cleanup failure never masks the actual primary reason. */ }
+    throw reason
+  }
+  const read = async () => {
+    cancelled()
+    let aborted
+    const whenAborted = new Promise((_, reject) => {
+      aborted = () => reject(callerSignal?.aborted ? (callerSignal.reason instanceof Error
+        ? callerSignal.reason : new Error('Loom HTTP response body read aborted')) : controller.signal.reason)
+      controller.signal.addEventListener('abort', aborted, { once: true })
+    })
+    try { return await Promise.race([whenAborted, reader.read()]) }
+    finally { controller.signal.removeEventListener('abort', aborted) }
+  }
+  const chunks = []
+  let length = 0
+  try {
+    for (;;) {
+      let step
+      try { step = await read() } catch (error) { await stop(error) }
+      if (!step || typeof step !== 'object' || typeof step.done !== 'boolean') await stop(new Error('Loom HTTP response stream returned an invalid chunk frame'))
+      cancelled()
+      if (step.done) break
+      const value = step.value
+      if (!ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) {
+        await stop(new Error('Loom HTTP response stream must contain binary chunks'))
+      }
+      const chunk = value instanceof ArrayBuffer ? new Uint8Array(value)
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+      if (chunk.byteLength > limit - length) await stop(new Error('Loom HTTP response exceeds configured limit'))
+      if (chunk.byteLength === 0) {
+        // Empty frames are not payload and must not starve the total timeout in a resolved-promise loop.
+        await new Promise(resolve => setTimeout(resolve, 0))
+        cancelled()
+        continue
+      }
+      chunks.push(chunk)
+      length += chunk.byteLength
+    }
+    cancelled()
+  } finally {
+    try { reader.releaseLock() } catch { /* Lock release is best effort after abort/stop, never a delivery outcome. */ }
+  }
+  const bytes = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+  return bytes
+}
+
 export class LoomHttpError extends Error {
   constructor(status, body, requestId) {
     const detail = body?.error
@@ -23,6 +85,9 @@ export class LoomHttpClient {
     if (typeof this.fetch !== 'function') throw new TypeError('A fetch implementation is required')
     this.timeoutMs = timeoutMs
     this.maxResponseBytes = maxResponseBytes
+    if (!Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes < 0) {
+      throw new TypeError('maxResponseBytes must be a non-negative safe integer')
+    }
   }
   async request(method, route, body, { token, noAuth = false, signal, timeoutMs = this.timeoutMs } = {}) {
     if (noAuth && token) throw new TypeError('noAuth cannot be combined with token')
@@ -51,7 +116,7 @@ export class LoomHttpClient {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
       if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Loom HTTP request aborted after fetch')
-      const content = await response.arrayBuffer()
+      const content = await readJsonBytes(response, { limit: this.maxResponseBytes, callerSignal: signal, controller })
       if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Loom HTTP request aborted while reading the response body')
       if (content.byteLength > this.maxResponseBytes) throw new Error('Loom HTTP response exceeds configured limit')
       const source = new TextDecoder().decode(content)
@@ -59,6 +124,10 @@ export class LoomHttpClient {
       if (source) { try { data = JSON.parse(source) } catch { throw new Error('Loom HTTP response is not JSON') } }
       if (!response.ok) throw new LoomHttpError(response.status, data, body?.request_id)
       return data
+    } catch (error) {
+      // A caller stop remains authoritative even if a reader, custom fetch or cleanup reports another reason.
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Loom HTTP request aborted')
+      throw error
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
   }
   get(route, options) { return this.request('GET', route, undefined, options) }

@@ -93,3 +93,13 @@ Enrollment code 仅 child environment 传输；重启没有新 code，使用真�
 - 相关当前状态：Node client 22、vendored plugin 55、Vue 44 + typecheck/build；Rust workspace/严格clippy、真实scoped Credential inspect/revoke/unseeded missing、固定SDK model binding、Skill replay和原生Bare flow都分别验证。它们各自有边界，不能覆盖生产模型/provider注册激活、其他host凭证、TLS远程两机、移动锁屏/杀进程或不相关pipeline。1+3 Compose按用户明确方向继续推迟。
 
 严格保存 failed candidates 的原始原因：当首版错误对当前poll整张view做canonical比较时，实际取消使用 lease窗口变化及当前状态投影，停止发生之前就会被拒绝。已依据真实Host纠错，而非把校验删掉或者生成假的"未知effect"报告。还存在两处易判错的量具：第一层计数 spy 外又包等待用的spy会重复点算，Artifact序列化 container hash 不等于目标文件hash；均已单独修正，不把相同工具调用解释为两次工具副作用。
+
+## HTTP流式读取与可挂断输入专项
+
+[`tests/runner/http-stream.mjs`](../runner/http-stream.mjs) 与 [`tests/runner/http-socket-stream.mjs`](../runner/http-socket-stream.mjs) 在一主一副的真实 `LoomHttpClient` 上分别执行，不散布于桌面Profile、全局Agent或真实用户凭据。主/vendored helper现已逐字一致，原Node 22/插件55个单测及实际SDK、模型、凭据、文件效应、replay 回归均分别通过。
+
+- 对标准stream 使用 `getReader()` 按实际chunk bytes限额，非依赖`Content-Length`。不追加首个超限chunk，随即取消本次reader；接口不为不支持的fallback shape 承诺提前分配限制。空响应、老arrayBuffer fixture与409结构status分别被验证。
+- caller stop 是最终取消原因；reader.read与既有内部AbortController竞争，所以pending Promise 不自行发结果也能在总超时挂断。微任务等待不被读取取消拖成下一轮清理死锁；cleanup cancellation error 不会覆盖原read/abort错误。这不能证明物理远端任务已取消或server Rollback。连续零字节帧还必须允许total timeout被调度。
+- 真正`127.0.0.1` 临时HTTP server 分成独立 owned 场景：合法JSON、逐块超限、partial JSON + caller cancel、partial JSON + deadline。数据不包含真实token/prompt。日志显示oversize时还剩16个未发送片段，partial JSON始终无效；不会把普通HTTP响应当成任务终态。各探测等待真实response close，而非仅等到 Assertion 返回true。
+- 曾经因为probe每次覆盖全局server引用，最早的listener没有被close，打印PASS而进程不退。改为**启动新server前先await关闭旧实例**，关闭所有自行持续跟踪的 sockets，最后逐一断言`server.listening===false`、sockets为空；现在CLI可自然退出。这是discovery of resource ownership，而不是把普通client limit判读误写成网络类型支持或服务端取消证明。
+- 两个NodeFamily构造器各自接收对应的NodeIdentity/NodeState及HTTP实例；主`NodeClient`的instanceof屏障不被绕过。对于测试自创reader、总deadline和错误原因保持各有独立断言，不因为错误显示HTTP200、partial chunk或cancelled而说完整工作成功。构建网络读写没有使用真实远程路由、外网服务、收费provider或任意数据发现。
