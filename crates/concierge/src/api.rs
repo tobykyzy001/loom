@@ -287,6 +287,239 @@ mod tests {
             assert_eq!(response.status(), 404, "{url}");
         }
     }
+
+    #[test]
+    fn public_remote_drops_credentials_and_rejects_exotic_values() {
+        for (raw, expected) in [
+            (
+                "https://user:super-secret@example.invalid/team/repo.git",
+                "https://example.invalid/team/repo.git",
+            ),
+            (
+                "https://user@EXAMPLE.invalid/team/Repo.git?private_access=arbitrary#credential",
+                "https://example.invalid/team/Repo.git",
+            ),
+            ("http://host.invalid/path", "http://host.invalid/path"),
+            (
+                "ssh://git@example.invalid:2222/team/repo.git",
+                "ssh://git@example.invalid:2222/team/repo.git",
+            ),
+            (
+                "ssh://example.invalid/team/repo.git",
+                "ssh://git@example.invalid/team/repo.git",
+            ),
+            (
+                "git@github.com:team/repo.git?token=discarded#also_discarded",
+                "ssh://git@github.com/team/repo.git",
+            ),
+            (
+                "git://example.invalid/team/repo.git",
+                "git://example.invalid/team/repo.git",
+            ),
+            ("https://host.invalid", "https://host.invalid/"),
+            (
+                "https://user:pass@host.invalid/team/repo?%zz",
+                "https://host.invalid/team/repo",
+            ),
+        ] {
+            assert_eq!(public_remote(raw).as_deref(), Some(expected), "{raw}");
+        }
+        for raw in [
+            "javascript:alert(1)",
+            "file:///tmp/repo.git",
+            "/absolute/local/path",
+            "user@example.invalid:team/repo.git",
+            "git:password@example.invalid:team/repo.git",
+            "ssh://private-login@example.invalid/team/repo.git",
+            "ssh://git:password@example.invalid/team/repo.git",
+            "ssh://git@example.invalid:0/team/repo.git",
+            "ssh://git@example.invalid:65536/team/repo.git",
+            "ssh://git@example.invalid:abc/team/repo.git",
+            "https://example.invalid:443/team/repo.git",
+            "https://example.invalid/team/repo name.git",
+            "https://example.invalid/team/../private.git",
+            "https://example.invalid/team/./repo.git",
+            "https://example.invalid//team/repo.git",
+            "https://example.invalid/team/repo\\evil.git",
+            "https://example.invalid/team/repo;rm.git",
+            "https://example.invalid/team/repo*.git",
+            "https://example.invalid/team/~user/repo.git",
+            "https://example.invalid/team/repo%00.git",
+            "https://example.invalid/team/-c.git",
+            "https://example.invalid/team/repo[abc].git",
+            "https://example.invalid/team/repo\nwhoami.git",
+            "https://例子.invalid/team/repo.git",
+            "https://example.invalid/team/répo.git",
+            "git@host.invalid:repo;command",
+            "git@host.invalid:repo:command",
+            "git@host.invalid/repo",
+        ] {
+            assert_eq!(public_remote(raw), None);
+        }
+        assert_eq!(
+            public_remote(&format!("https://example.invalid/{}", "a".repeat(513))),
+            None
+        );
+        assert!(public_remote(&format!("https://example.invalid/{}", "a".repeat(512))).is_some());
+    }
+
+    #[test]
+    fn actual_git_project_probe_omits_remote_secrets_and_observes_dirty_state() {
+        if !git_fixture_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        let home = directory.path().join("private-empty-home");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        fixture_git(&root, &home, &["init", "--quiet", "."]);
+        std::fs::write(root.join("input.txt"), "bounded fixture\n").unwrap();
+        fixture_git(&root, &home, &["add", "--", "input.txt"]);
+        fixture_git(
+            &root,
+            &home,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        fixture_git(
+            &root,
+            &home,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://user:super-secret@example.invalid/team/repo.git",
+            ],
+        );
+        // No raw stderr is captured in the project inventory or diagnostics.
+        let value = project_probe(&root).unwrap();
+        let serialized = value.to_string();
+        for private in ["super-secret", "https://user:", "user:super-secret"] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(
+            value["canonical_remote"],
+            "https://example.invalid/team/repo.git"
+        );
+        assert_eq!(value["canonical_remote_status"], "public");
+        assert_eq!(value["redacted_remote"], false);
+        assert_eq!(value["needs_review"], false);
+        assert_eq!(value["dirty"], false);
+        assert_eq!(value["credential_location"], Value::Null);
+        assert_eq!(value["credential_available"], "unknown");
+        assert_eq!(value["credential_lookup_performed"], false);
+        assert_eq!(value["source"], "controller_probe");
+        assert_eq!(value["location_kind"], "local_working_tree");
+        assert!(value["revision"]
+            .as_str()
+            .is_some_and(|revision| revision.len() == 40
+                && revision.bytes().all(|byte| byte.is_ascii_hexdigit())));
+        std::fs::write(root.join("input.txt"), "bounded fixture modified\n").unwrap();
+        assert_eq!(project_probe(&root).unwrap()["dirty"], true);
+        assert!(!root.join(".git/.loom-probe-empty-home").exists());
+
+        fixture_git(
+            &root,
+            &home,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://example.invalid/team/repo.git?access_token=private#also-private",
+            ],
+        );
+        let stripped = project_probe(&root).unwrap();
+        assert_eq!(
+            stripped["canonical_remote"],
+            "https://example.invalid/team/repo.git"
+        );
+        assert!(!stripped.to_string().contains("private"));
+        fixture_git(
+            &root,
+            &home,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "ssh://private-user@example.invalid/team/repo.git",
+            ],
+        );
+        let redacted = project_probe(&root).unwrap();
+        assert_eq!(redacted["canonical_remote"], Value::Null);
+        assert_eq!(
+            redacted["canonical_remote_status"],
+            "unsupported_or_redacted"
+        );
+        assert_eq!(redacted["redacted_remote"], true);
+        assert_eq!(redacted["needs_review"], true);
+        assert!(!redacted.to_string().contains("private-user"));
+    }
+
+    #[test]
+    fn non_git_project_probe_is_documents_without_revision_or_remote() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = project_probe(directory.path()).unwrap();
+        assert_eq!(value["form"], "documents");
+        assert_eq!(value["git_available"], false);
+        assert_eq!(value["revision"], Value::Null);
+        assert_eq!(value["dirty"], Value::Null);
+        assert_eq!(value["canonical_remote"], Value::Null);
+        assert_eq!(value["canonical_remote_status"], Value::Null);
+        assert_eq!(value["redacted_remote"], false);
+        assert_eq!(value["needs_review"], false);
+    }
+
+    fn git_fixture_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn fixture_git(root: &Path, home: &Path, args: &[&str]) {
+        let hooks_path = if cfg!(windows) {
+            "core.hooksPath=NUL"
+        } else {
+            "core.hooksPath=/dev/null"
+        };
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=never",
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                hooks_path,
+                "-c",
+                "credential.helper=",
+                "-c",
+                "init.defaultBranch=fixture",
+            ])
+            .args(args)
+            .current_dir(root)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("XDG_CONFIG_HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
 }
 
 use std::{
@@ -533,6 +766,10 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
         .route("/bootstrap", get(bootstrap))
         .route("/projects", get(projects).post(create_project))
         .route("/projects/{id}/probe", post(probe_project))
+        .route(
+            "/projects/{id}/credential-action",
+            post(create_credential_action),
+        )
         .route("/project-bindings", post(create_project_binding))
         .route("/placement/evaluate", post(evaluate_placement))
         .route("/nodes/{id}/inventory", get(node_inventory))
@@ -712,19 +949,288 @@ async fn create_project(
         json!({"project":store.get("projects",&id)?.expect("inserted project")}),
     ))
 }
+const PROJECT_GIT_STDOUT_LIMIT: usize = 16 * 1024;
+const PROJECT_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run only fixed, repository-local Git inspection commands. In particular,
+/// never copy stderr into an inventory: Git diagnostics can echo remote URLs.
+fn project_git(root: &Path, args: &[&str]) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let isolated_home = root.join(".git/.loom-probe-empty-home");
+    let mut command = Command::new("git");
+    // Never derive extra configuration or credentials from this directory.
+    command
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .env("XDG_CONFIG_HOME", &isolated_home)
+        // Discovered repository config supplies revision/remote/change facts;
+        // global/system/credential configuration and hook execution do not.
+        .args([
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            if cfg!(windows) {
+                "core.hooksPath=NUL"
+            } else {
+                "core.hooksPath=/dev/null"
+            },
+            "-c",
+            "credential.helper=",
+        ])
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "C:\\Windows\\System32".into()
+                } else {
+                    "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin".into()
+                }
+            }),
+        )
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ASKPASS", if cfg!(windows) { "echo" } else { "false" })
+        .env("SSH_ASKPASS", if cfg!(windows) { "echo" } else { "false" })
+        .env(
+            "GIT_SSH_COMMAND",
+            if cfg!(windows) {
+                "C:\\Windows\\System32\\cmd.exe /c exit 1"
+            } else {
+                "/bin/false"
+            },
+        )
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_DIR", root.join(".git"))
+        .env("GIT_WORK_TREE", root)
+        .env("LANG", "C")
+        .env("LC_ALL", "C");
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", system_root);
+    }
+
+    let mut child = command.spawn().ok()?;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_overflow = overflow.clone();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => return Some(captured),
+                Ok(count) => {
+                    if captured.len() + count > PROJECT_GIT_STDOUT_LIMIT {
+                        reader_overflow.store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else if !reader_overflow.load(std::sync::atomic::Ordering::Relaxed) {
+                        captured.extend_from_slice(&buffer[..count]);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
+        }
+    });
+    let deadline = Instant::now() + PROJECT_GIT_TIMEOUT;
+    loop {
+        let timed_out = Instant::now() >= deadline;
+        let overflowed = overflow.load(std::sync::atomic::Ordering::Relaxed);
+        if timed_out || overflowed {
+            let _ = child.kill();
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() && !timed_out && !overflowed => {
+                return stdout_reader
+                    .join()
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|value| value.trim().to_owned());
+            }
+            Ok(Some(_)) => {
+                let _ = stdout_reader.join();
+                return None;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                return None;
+            }
+            Ok(None) if timed_out || overflowed => {
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+}
+
+/// Convert a raw configured remote into public metadata. It never performs I/O,
+/// resolves credentials, or returns rejected input. Query and fragment are
+/// always discarded before validation; an unrecognized value becomes unknown.
+fn public_remote(raw: &str) -> Option<String> {
+    // 512-byte path + bounded scheme/authority; cap the whole input as well so
+    // arbitrarily long discarded suffixes are not treated as public metadata.
+    if raw.is_empty() || raw.len() > 1536 || !raw.is_ascii() {
+        return None;
+    }
+    if raw.contains(char::is_whitespace) || raw.ends_with(['?', '#']) {
+        return None;
+    }
+    let separator = raw.find(['?', '#']);
+    if let Some(separator) = separator {
+        let discarded = &raw[separator + 1..];
+        // Do not attempt to classify credentials/token spellings. Anything
+        // outside a plain printable suffix is unsupported and fully redacted.
+        if discarded.is_empty() || discarded.bytes().any(|byte| !(0x20..=0x7e).contains(&byte)) {
+            return None;
+        }
+    }
+    let without_secrets = separator.map_or(raw, |index| &raw[..index]);
+    if let Some(rest) = without_secrets.strip_prefix("git@") {
+        let separator = rest.find(':')?;
+        if separator == 0 || rest[..separator].contains(['@', ':', '/']) {
+            return None;
+        }
+        let host = public_host(&rest[..separator])?;
+        let path = rest[separator + 1..]
+            .strip_prefix('/')
+            .unwrap_or(&rest[separator + 1..]);
+        return Some(format!("ssh://git@{host}/{}", safe_remote_path(path)?));
+    }
+
+    let (scheme, remainder) = without_secrets.split_once("://")?;
+    let scheme = match scheme {
+        "http" | "https" | "ssh" | "git" => scheme,
+        _ => return None,
+    };
+    if remainder.is_empty() || remainder.starts_with('/') {
+        return None;
+    }
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let raw_path = &remainder[authority_end..];
+    if authority.is_empty() || authority.contains('@') && scheme == "git" {
+        return None;
+    }
+    let userinfo = authority.rsplit_once('@').map(|(user, _)| user);
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let ssh_user = match scheme {
+        "http" | "https" => None, // Deliberately discard all HTTP userinfo.
+        "ssh" => match userinfo {
+            None | Some("git") => Some("git"),
+            _ => return None,
+        },
+        _ => None,
+    };
+    if userinfo.is_some() && scheme == "git" {
+        return None;
+    }
+    let (host, port) = public_authority(host_port, scheme == "ssh")?;
+    let path = safe_remote_path(raw_path.strip_prefix('/').unwrap_or_default())?;
+    let user = ssh_user.map_or("", |_| "git@");
+    let port = port.map_or_else(String::new, |value| format!(":{value}"));
+    Some(format!("{scheme}://{user}{host}{port}/{path}"))
+}
+
+fn public_host(host: &str) -> Option<String> {
+    if host.is_empty()
+        || host.len() > 253
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || host.starts_with('[')
+        || host.ends_with(']')
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return None;
+    }
+    (!host.split(['.', '-', '_']).any(str::is_empty)).then(|| host.to_ascii_lowercase())
+}
+
+fn public_authority(authority: &str, allow_port: bool) -> Option<(String, Option<u16>)> {
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) if !port.contains(':') => (
+            host,
+            allow_port
+                .then(|| port.parse::<u16>().ok())
+                .flatten()
+                .filter(|port| *port > 0),
+        ),
+        Some(_) => return None,
+        None => (authority, None),
+    };
+    if authority.contains(':') && port.is_none() {
+        return None;
+    }
+    Some((public_host(host)?, port))
+}
+
+fn safe_remote_path(path: &str) -> Option<&str> {
+    if path.is_empty() {
+        return Some(path);
+    }
+    if path.len() > 512 {
+        return None;
+    }
+    if !path.is_ascii()
+        || path.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+        || path.contains("..")
+        || path.contains("/./")
+        || path.contains("//")
+        || path.starts_with("./")
+        || path.ends_with("/.")
+        || path.starts_with('/')
+        || path.ends_with('/')
+    {
+        return None;
+    }
+    for component in path.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component.starts_with('-')
+            || !component.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
+            })
+        {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 fn project_probe(root: &Path) -> Result<Value> {
     let git = root.join(".git").exists();
-    let run = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-    };
+    let run = |args: &[&str]| project_git(root, args);
     let revision = if git {
-        run(&["rev-parse", "HEAD"])
+        run(&["rev-parse", "HEAD"]).filter(|revision| {
+            matches!(revision.len(), 40 | 64)
+                && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
     } else {
         None
     };
@@ -733,9 +1239,43 @@ fn project_probe(root: &Path) -> Result<Value> {
     } else {
         None
     };
-    Ok(
-        json!({"form":if git{"working_tree"}else{"documents"},"project_kind":"project","canonical_remote":if git{run(&["remote","get-url","origin"])}else{None},"revision":revision,"dirty":dirty,"git_available":git,"location_kind":"local_working_tree","credential_location":null,"source":"controller_probe","probed_at":now(),"pending":"No implicit Clone, credentials or access grant created."}),
-    )
+    let raw_remote = if git {
+        run(&["--no-optional-locks", "remote", "get-url", "origin"])
+    } else {
+        None
+    };
+    let canonical_remote = raw_remote.as_deref().and_then(public_remote);
+    let remote_redacted = raw_remote.is_some() && canonical_remote.is_none();
+    let canonical_remote_status = canonical_remote
+        .as_ref()
+        .map(|_| "public")
+        .or(remote_redacted.then_some("unsupported_or_redacted"));
+    Ok(json!({
+        "form": if git { "working_tree" } else { "documents" },
+        "project_kind": "project",
+        "canonical_remote": canonical_remote,
+        "canonical_remote_status": canonical_remote_status,
+        "redacted_remote": remote_redacted,
+        "needs_review": remote_redacted,
+        "revision": revision,
+        "dirty": dirty,
+        "git_available": git,
+        "location_kind": "local_working_tree",
+        "credential_location": null,
+        "credential_available": "unknown",
+        "credential_lookup_performed": false,
+        "source": "controller_probe",
+        "probed_at": now(),
+        "pending": "No implicit Clone, credentials or access grant created."
+    }))
+}
+async fn create_credential_action(
+    AppState(state): AppState<Arc<State>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let store = state.lock()?;
+    Ok(Json(crate::credential_ref::create(&store, &id, &body)?))
 }
 async fn probe_project(
     AppState(state): AppState<Arc<State>>,
@@ -782,6 +1322,8 @@ fn explicit_permissions(body: &Value) -> ApiResult<Vec<&'static str>> {
                 if !permissions.contains(&"write"){permissions.push("write");}},
             "invoke_text"=>if !permissions.contains(&"invoke_text"){permissions.push("invoke_text")},
             "place_model"=>if !permissions.contains(&"place_model"){permissions.push("place_model")},
+            "credential_inspect" => if !permissions.contains(&"credential_inspect") { permissions.push("credential_inspect") },
+            "credential_revoke" => if !permissions.contains(&"credential_revoke") { permissions.push("credential_revoke") },
             _=>return Err(ApiError::bad("Operations require explicit read/read_summary, write/edit_file, read_write, separately granted invoke_text or separate place_model.")),
         }
     }
@@ -1345,6 +1887,52 @@ pub(crate) async fn poll(
     }
     Ok(Json(json!({"assignment":null})))
 }
+pub(crate) async fn credential_authorize(
+    AppState(state): AppState<Arc<State>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let (node, installation) = node(&state, &headers, &body)?;
+    let store = state.lock()?;
+    let (ticket, _, _) = valid_lease(&store, &body, &node, false)?;
+    let record = store
+        .get("tickets", &ticket)?
+        .ok_or_else(|| ApiError::missing("Credential task Ticket not found"))?;
+    if record["kind"] != "credential_ref" || record["installation_id"] != installation {
+        return Err(ApiError::denied(
+            "credential_scope",
+            "Credential authorization belongs to the enrolled Installation",
+        ));
+    }
+    let rows = store.query(
+        "SELECT * FROM assignments WHERE id=?1 AND ticket_id=?2 AND node_id=?3",
+        params![
+            body["assignment_id"].as_str().unwrap_or_default(),
+            ticket,
+            node
+        ],
+    )?;
+    if rows.len() != 1 {
+        return Err(ApiError::denied(
+            "assignment_owner",
+            "Credential authorization requires one current Assignment",
+        ));
+    }
+    let assignment = rows.into_iter().next().unwrap();
+    let authority = crate::credential_ref::authority(&store, &ticket, &assignment)?;
+    let response = json!({"authorization":authority});
+    store.audit(
+        Some(&ticket),
+        "node",
+        "credential.authorization_checked",
+        &json!({
+            "assignment_id":body["assignment_id"], "action":authority["action"],
+            "grant_version":authority["grant"]["version"], "always_short_lived":true
+        }),
+    )?;
+    Ok(Json(response))
+}
+
 pub(crate) async fn acknowledge(
     AppState(state): AppState<Arc<State>>,
     headers: HeaderMap,
@@ -1871,6 +2459,9 @@ pub(crate) async fn report(
                 ));
             }
         }
+    }
+    if ticket_record["kind"] == "credential_ref" {
+        crate::credential_ref::validate_outcome(&store, &ticket, &body)?;
     }
     let authority_status = if requested_state == "unknown" {
         "reconciling"

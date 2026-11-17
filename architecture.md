@@ -294,7 +294,15 @@ DSH host也会在 **每次实际 SDK prepare/stream前** 再审同样的13个固
 
 本小步已由 `tests/harness/real-model-binding.mjs` 的真正同源worker读取源→注册→place→独立invoke→实际SDK→新Artifact/Session通过；`real-model-text.mjs --browser` 以同样前置raw-source/place许可旧路径完成且读取已发生于前次任务的授权历史回调。源Descriptor读取并不产生模型Agent会话，另一次调用才有此次Assignment、`request`和文本Artifact。它**只支持固定的fixture-local-text/v1描述和loom-stub适配器绑定**，不是生产模型注册/安装器、通用Provider连接器、任意模型权重/activate/invocation、图像生成或跨物理机模型生命周期；Raw Grant/CredentialStore/current Profile 未使用，也未下载任何真实模型。可验证脚本与边界见[tests/harness/MODEL_BINDING.md](tests/harness/MODEL_BINDING.md)。
 
-### 3.7 受限技能候选与具体重放证明
+### 3.7 受限凭据引用操作与会前再授权
+
+本机在固定隔离 DSH CredentialProvider fixture 上实现了受限 `credential_ref`：**控制器派生的、与 ProjectBinding 对应的 record key** 与 `CredentialReference` 单独存在，不能把用户提供的 recordName/secret value 当 Ticket 输入。`credential_inspect`、`credential_revoke` 是两笔各自单一操作的 Grant，与文件 read/write 及模型 `place_model`/`invoke_text` 分开。
+
+每次执行前，DSH Host 用原 Node 凭据请求 `/api/v1/nodes/credential-authorize`；中心读取当前 Assignment/Lease、原 Grant、精确 Binding 和已完成检查的 Artifact 字节/SHA，不能只相信 poll 缓存的 `revoked_at:null`。破坏性 `deleteRecord` 前还要再次复验同一 authority snapshot，否则拒绝副作用。凭证 API 使用宿主公开 `credentialKey`、`describeRecord` 和 `deleteRecord`；生产 broker 不提供 secret resolve、内容读取、枚举或创建记录。普通 LocalNode 不强制注入 credential service，显式挂载 provider 也不自动产生 Task Grant。
+
+检查 Artifact 只记录安全的 `present`/`missing` metadata，明确 `value_exposed:false`、`grant_created:false`、`permission_granted:false`。`record.kind='grant'` 是 SDK record 分类，不是 Loom 自动授权。旧 presence 不证明同一 Secret 版本、远程身份认证或通用 Clone/调用权限。撤销 Report 需要复查实际未配置状态；单一 Effect 的输入摘要、原 Grant identity 与结果 immutable Artifact 必须一致，而非接受任意 `succeeded` 标签。完整 fixture 与缺口见 [tests/harness/CREDENTIAL_REF.md](tests/harness/CREDENTIAL_REF.md)。
+
+### 3.8 受限技能候选与具体重放证明
 
 当前 `SkillCandidate` 与 `Memory` 不共用验收语义。只有**已真实执行过的一个确定性 `read_summary` 样本**可用于当前受限技能重放，不支持任意命令、脚本、HTTP connector、模型学成的通用技能或代理执行。`source_refs` 必须实际含该 source ticket，候选 project、原 Node/Installation/Worker、Grant digest/version、ProjectBinding及其声明 Root都要对应。
 
@@ -477,6 +485,8 @@ permissions:
 - Clone 是独立操作，不是“知道有 Git URL”就自动执行；
 - Git 或登录凭据留在本机 Broker，不进入模型上下文；
 - 不把某机器的本地绝对路径当作全局 Artifact URI。
+
+当前本机 Git 探测只读取已批准项目根中的 Git 事实与 dirty state；不能把它隐式扩展成 Clone/Fetch/联网或访问凭据。HTTPS remote 的 username/password/token userinfo 会被剥离，query/fragment 不进入 Inventory；不安全 scheme 只显示 `unsupported_or_redacted` 或空值。即使可以观察远端地址，仍不等于宿主持有凭据或远端可达。测试实际验证此清洗与入库，见 [tests/projects/README.md](tests/projects/README.md)。
 
 ### 6.3 模型的注册、批准与放置
 

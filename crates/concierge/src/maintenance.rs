@@ -208,7 +208,7 @@ pub fn create_ticket(
 
 pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>> {
     crate::pipeline::advance_all(store)?;
-    let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at, g.operations as grant_operations FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND g.revoked_at IS NULL ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
+    let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at, g.operations as grant_operations FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND g.revoked_at IS NULL AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling') ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
     if let Some(mut assignment) = assignment {
         let current = assignment["lease_epoch"].as_i64().unwrap_or(0);
         let id = assignment["assignment_id"]
@@ -257,6 +257,26 @@ pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>
                 bail!("A registered model binding is required for every text-model Assignment");
             }
         }
+        if assignment["kind"] == "credential_ref" {
+            let ticket = store
+                .get(
+                    "tickets",
+                    assignment["ticket_id"].as_str().unwrap_or_default(),
+                )?
+                .ok_or_else(|| anyhow::anyhow!("Credential task Ticket is absent"))?;
+            let verified = crate::credential_ref::authority(
+                store,
+                assignment["ticket_id"].as_str().unwrap_or_default(),
+                &assignment,
+            )?;
+            assignment["project_id"] = ticket["project_id"].clone();
+            assignment["installation_id"] = ticket["installation_id"].clone();
+            assignment["credential_ref"] = verified["credential_ref"].clone();
+            assignment["grant_credential_ref"] = verified["grant_credential_ref"].clone();
+            assignment["credential_revoke_expected"] =
+                verified["credential_revoke_expected"].clone();
+            assignment["credential_action"] = verified["action"].clone();
+        }
         assignment["grant"] = json!(store
             .query(
                 "SELECT * FROM grants WHERE id=(SELECT grant_id FROM tickets WHERE id=?1)",
@@ -286,7 +306,9 @@ pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>
             "SELECT root_scope,project_id,node_id,installation_id,worker_id FROM project_bindings WHERE id=?1 AND revoked_at IS NULL",
             [assignment["grant"]["project_binding_id"].as_str().unwrap_or_default()],
         )?.into_iter().next().ok_or_else(|| anyhow::anyhow!("The assignment's exact project binding is gone"))?;
-        assignment["grant"]["project_root"] = binding["root_scope"].clone();
+        if assignment["kind"] != "credential_ref" {
+            assignment["grant"]["project_root"] = binding["root_scope"].clone();
+        }
         assignment["resource"] = binding;
         if let Some(source) = crate::pipeline::input_for_assignment(
             store,

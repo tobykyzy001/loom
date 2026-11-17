@@ -73,6 +73,12 @@ export class LoomNodeClient {
     const response = await this.http.post('/api/v1/nodes/acknowledge', body, { token: this.identity.token })
     return { request: body, response }
   }
+  async authorizeCredential({ ticketId, assignmentId, leaseEpoch, snapshot }) {
+    const body = { ...envelope({ protocol: 'loom.node.v1', node_id: this.nodeId, installation_id: this.installationId }, id()),
+      ticket_id: ticketId, assignment_id: assignmentId, lease_epoch: leaseEpoch,
+      authorization_snapshot: sha256(canonical(snapshot)) }
+    return this.http.post('/api/v1/nodes/credential-authorize', body, { token: this.identity.token })
+  }
   async dispatchOutbox({ signal } = {}) {
     const results = []
     for (const item of this.state.outbox) {

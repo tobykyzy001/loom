@@ -25,6 +25,7 @@ export class FixtureHost extends EventEmitter {
     this.child.stderr.setEncoding('utf8'); this.child.stderr.on('data', (chunk) => {
       const text = redact(String(chunk), this.secrets)
       this.stderr.push(text.slice(-12000)); if (this.stderr.length > 30) this.stderr.shift()
+      // stderr is retained in diagnostics; one expected negative assertion must not drown independent checks.
     })
     const onExit = (value) => {
       this.earlyExit ||= value
@@ -40,7 +41,7 @@ export class FixtureHost extends EventEmitter {
   }
   async writePatch() {
     const { writeFile } = await import('node:fs/promises')
-    await writeFile(join(this.root, 'patch', 'fixture.yml'), profilePatch(), { mode: 0o600 })
+    await writeFile(join(this.root, 'patch', 'fixture.yml'), profilePatch(this.env), { mode: 0o600 })
   }
   accept(chunk) {
     this.text += chunk

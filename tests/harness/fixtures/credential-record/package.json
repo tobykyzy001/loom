@@ -1,0 +1,23 @@
+{
+  "name": "@loom-test/credential-record",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "cordis": {
+    "id": "loom-credential-seed"
+  },
+  "engines": {
+    "dsh": "0.2.2-rc.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,20 +1,25 @@
-import { validateAssignment } from '../src/validation.js'
+import { validateAssignment, validateCredentialAssignment } from '../src/validation.js'
 import { canonical, sha256 } from '../src/util.js'
 import { stableArtifactId as stableUUID } from './ids.js'
 import { verifiedDelegation } from './verified-delegation.js'
 import { exactTextRoute, inspectTextRoute, validTextGrant } from './model-policy.js'
 import { loadTextRequest, modelBindingSnapshot, validateModelBinding } from './model-binding.js'
 import { inspectModelCatalog, mergeModelCatalogFacts, emptyModelCatalog } from './model-inventory.js'
+import { credentialSnapshot } from './credential-broker.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
-  constructor(runner, adapter, config, fileDispatcher = null) {
+  constructor(runner, adapter, config, fileDispatcher = null, { broker } = {}) {
     this.runner = runner; this.adapter = adapter; this.config = config; this.fileDispatcher = fileDispatcher; this.active = new Map()
-    // Capabilities describe Agent work; they are not a silent filesystem allowance.
-    // Descriptor bytes may only be read by the separately opted-in local file route.
+    // Never discover Host credentials unless the explicit dsh_records mode is active.
+    this.broker = config.credential_broker_tasks === 'dsh_records' && broker ? broker : null
+    // A broker is deliberately supplied through the scoped public credential
+    // mount, never by reading ctx.credentials ad hoc in this dispatcher.
+    // Capabilities describe possible work only; exact current Grants remain separate.
     this.capabilities = ['dsh_agent_turn', 'read_summary', 'edit_file',
       ...(config.model_text_tasks ? ['model_text'] : []),
-      ...(config.model_descriptor_tasks === true && fileDispatcher !== null ? ['model_descriptor'] : [])] // Grant remains separately enforced.
+      ...(config.model_descriptor_tasks === true && fileDispatcher !== null ? ['model_descriptor'] : []),
+      ...(config.credential_broker_tasks === 'dsh_records' ? ['credential_ref'] : [])]
   }
   async initializeModelCatalog() {
     try {
@@ -47,6 +52,21 @@ export class DshDispatcher {
   }
   sessionRefs() { return [...this.adapter.sequence.entries()].map(([assignment_id, record]) => ({ assignment_id, ...this.adapter.sessionRef(record.agent.session) })) }
   async canExecute(assignment) {
+    if (assignment.kind === 'credential_ref') {
+      if (this.config.credential_broker_tasks !== 'dsh_records' || !(await this.credentialBroker())?.available) {
+        process.stderr.write(`[loom-local-node] credential preflight refused ${assignment.id}: unavailable_broker\n`)
+        return false
+      }
+      try {
+        const snapshot = credentialSnapshot(assignment)
+        this.active.set(assignment.id, { assignment: structuredClone(assignment), credentialSnapshot: snapshot })
+        return true
+      } catch (error) {
+        const reason = typeof error.code === 'string' ? error.code : String(error.message).slice(0, 256)
+        process.stderr.write(`[loom-local-node] credential preflight refused ${assignment.id}: ${reason}\n`)
+          return false
+      }
+    }
     if (assignment.kind === 'model_descriptor') {
       if (this.config.model_descriptor_tasks !== true || this.fileDispatcher === null) return false
       try { return await this.fileDispatcher.canExecute(assignment) === true } catch { return false }
@@ -84,6 +104,35 @@ export class DshDispatcher {
     }
   }
   async executeAssignment(assignment) {
+    if (assignment.kind === 'credential_ref') {
+      if (this.config.credential_broker_tasks !== 'dsh_records' || !(await this.credentialBroker())?.available) {
+        const error = new Error('Host credential broker unavailable or record mismatch'); error.code = 'credential_unavailable'; error.state = 'unknown'; throw error
+      }
+      const previous = this.active.get(assignment.id)
+      let snapshot = previous?.credentialSnapshot
+      if (!snapshot) {
+        try {
+          validateCredentialAssignment(assignment, assignment.grant, this.runner.identity)
+          snapshot = credentialSnapshot(assignment)
+        } catch (error) {
+          if (!error.code) error.code = 'credential_wrong_scope'
+          error.state = 'failed'
+          throw error
+        }
+      }
+      if (previous) {
+        try {
+          if (credentialSnapshot(assignment) !== snapshot) {
+            const error = new Error('Credential reference changed after preflight'); error.code = 'credential_wrong_scope'; error.state = 'failed'; throw error
+          }
+        } catch (error) {
+          this.active.delete(assignment.id)
+          error.state = 'failed'
+          throw error
+        }
+      }
+      return this.executeCredential(assignment, snapshot)
+    }
     if (assignment.kind === 'model_descriptor') {
       if (this.config.model_descriptor_tasks !== true || this.fileDispatcher === null) {
         throw new Error('Descriptor reads require the explicitly enabled local file dispatcher')
@@ -143,6 +192,61 @@ export class DshDispatcher {
         result.artifacts = [...(result.artifacts || []), metadata]
       }
       return result
+    } finally { this.active.delete(assignment.id) }
+  }
+  async credentialBroker() {
+    if (this.config.credential_broker_tasks !== 'dsh_records') return null
+    return this.broker?.available === true ? this.broker : null
+  }
+  async authorizeCredentialOperation(assignment, snapshot) {
+    const response = await this.runner.client.authorizeCredential({
+      ticketId: assignment.ticket_id, assignmentId: assignment.id, leaseEpoch: assignment.lease_epoch,
+      snapshot: { action: snapshot, assignment_id: assignment.id, lease_epoch: assignment.lease_epoch },
+    })
+    const authorized = response?.authorization
+    if (!authorized || authorized.assignment_id !== assignment.id || authorized.ticket_id !== assignment.ticket_id
+      || authorized.lease_epoch !== assignment.lease_epoch) {
+      const error = new Error('Controller did not authorize this exact credential Assignment')
+      error.code = 'credential_wrong_scope'; throw error
+    }
+    if (authorized.protocol !== 'loom.node.v1' || authorized.action !== assignment.credential_action) {
+      const error = new Error('Credential action authorization is malformed')
+      error.code = 'credential_wrong_scope'; throw error
+    }
+    const current = structuredClone(assignment)
+    current.grant = authorized.grant
+    current.grant_version = authorized.grant.version
+    current.grant_digest = authorized.grant.digest
+    current.credential_ref = authorized.credential_ref
+    current.grant_credential_ref = authorized.grant_credential_ref
+    if (authorized.credential_revoke_expected) current.credential_revoke_expected = authorized.credential_revoke_expected
+    validateCredentialAssignment(current, current.grant, this.runner.identity)
+    if (credentialSnapshot(current) !== snapshot) {
+      const error = new Error('Credential authorization differs from the immutable preflight')
+      error.code = 'credential_wrong_scope'; throw error
+    }
+    return current
+  }
+  async executeCredential(assignment, snapshot) {
+    try {
+      const current = await this.authorizeCredentialOperation(assignment, snapshot)
+      this.runner.state.data.assignments[assignment.id] = current
+      await this.runner.state.flush()
+      await this.runner.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
+        leaseEpoch: assignment.lease_epoch, accepted: true })
+      const digest = sha256(canonical({ credential_snapshot: snapshot }))
+      const broker = await this.credentialBroker()
+      if (!broker?.available) {
+        const error = new Error('Host credential broker unavailable'); error.code = 'credential_unavailable'; throw error
+      }
+      const operation = () => broker.execute(current, this.runner.identity, {
+        authorizeDelete: async () => { await this.authorizeCredentialOperation(current, snapshot) },
+      })
+      return await this.runner.state.once(assignment.id, digest, operation)
+    } catch (error) {
+      if (['credential_missing', 'credential_wrong_scope'].includes(error.code)) error.state = 'failed'
+      else { error.code = 'credential_unavailable'; error.state = 'unknown' }
+      throw error
     } finally { this.active.delete(assignment.id) }
   }
   preserveLinkRequests() { /* Shared Node outbox is the one coordinator transport. */ }

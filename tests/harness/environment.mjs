@@ -88,15 +88,15 @@ export async function installBundles({ env, root, cli, executable, bundles }) {
   commands.push({ args: shimArgs, code: shimResult.code, stderr: shimResult.stderr })
   await mkdir(join(root, 'fixture-packages'), { mode: 0o700 })
   // Only the exact Schemastery version shipped by this Host needs an offline forwarding fixture.
-  for (const name of ['stub-provider', 'dsh-loom']) {
-    const source = join(repository, name === 'dsh-loom' ? 'plugins/dsh-loom' : 'tests/harness/fixtures/stub-provider')
+  for (const name of ['stub-provider', 'dsh-loom', 'credential-record']) {
+    const source = join(repository, name === 'dsh-loom' ? 'plugins/dsh-loom' : join('tests/harness/fixtures', name))
     const destination = join(root, 'fixture-packages', name)
     await cp(source, destination, { recursive: true, filter: (path) => !path.includes('/test/') && !path.endsWith('/test') })
   }
   for (const bundle of bundles) {
     const args = ['plugin', '--profile', PROFILE, 'add', `file:${bundle}`, '--ignore-scripts', '--store-dir', join(root, 'pnpm-store') ]
     const result = await command(executable, [cli, ...args], { cwd: root, env })
-    commands.push({ args, code: result.code, stderr: redact(result.stderr) })
+      commands.push({ args, code: result.code, stderr: redact(result.stderr) })
   }
   // Initialization occurs under the explicit fixture HOME, never the invoking Desktop Profile.
   const configArgs = ['--profile', PROFILE, '--dump-config']
@@ -110,7 +110,9 @@ export async function installBundles({ env, root, cli, executable, bundles }) {
   await chmod(prepared, 0o700)
   const manifest = JSON.parse(await readFile(join(prepared, 'package.json'), 'utf8'))
   const dependencies = Object.keys(manifest.dependencies || {})
-  assert.deepEqual(new Set(dependencies), new Set(['@deepseek-ai/schemastery', '@loom/dsh-fixture-stub-provider', '@loom/dsh-loom']))
+  const credentialBundles = bundles.filter(bundle => bundle.endsWith('/credential-record')).length
+  assert.deepEqual(new Set(dependencies), new Set(['@deepseek-ai/schemastery', '@loom/dsh-fixture-stub-provider', '@loom/dsh-loom',
+    ...(credentialBundles > 0 ? ['@loom-test/credential-record'] : [])]))
   return { commands, profile: PROFILE, dependencies, root_mode: (await stat(join(root, 'dsh-test-state'))).mode & 0o777 }
 }
 
@@ -121,7 +123,7 @@ export async function appendEvidence(root, value) {
 
 export function syntheticToken() { return randomBytes(24).toString('base64url') }
 
-export function profilePatch() {
+export function profilePatch(runtime = process.env) {
   return `- id: llm-deepseek
   disabled: true
 - id: sandbox-policy
@@ -141,7 +143,11 @@ export function profilePatch() {
   config:
     control_path: !!js process.env.LOOM_FIXTURE_CONTROL_PATH
     project_root: !!js process.env.LOOM_FIXTURE_PROJECT_ROOT
-- id: loom-local-node
+${runtime.LOOM_FIXTURE_CREDENTIAL_RECORD_KEY ? `- id: loom-credential-seed
+  config:
+    enabled: !!js process.env.LOOM_FIXTURE_CREDENTIAL_SEED === 'true'
+    record_key: !!js process.env.LOOM_FIXTURE_CREDENTIAL_RECORD_KEY
+` : ''}- id: loom-local-node
   config:
     enabled: true
     allow_workers: true
@@ -154,6 +160,7 @@ export function profilePatch() {
     bounded_fixture_effects: true
     model_text_tasks: !!js process.env.LOOM_FIXTURE_MODEL_TEXT_TASKS === 'true'
     model_descriptor_tasks: !!js process.env.LOOM_FIXTURE_MODEL_DESCRIPTOR_TASKS === 'true'
+    credential_broker_tasks: !!js process.env.LOOM_FIXTURE_CREDENTIAL_BROKER || 'unsupported'
     delegation_tools: !!js process.env.LOOM_FIXTURE_DELEGATION_TOOLS || 'unsupported'
     delegation_project_root: !!js process.env.LOOM_FIXTURE_PROJECT_ROOT
     agent_session_id: !!js process.env.LOOM_FIXTURE_AGENT_SESSION_ID || ''

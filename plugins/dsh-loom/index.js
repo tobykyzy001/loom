@@ -6,6 +6,7 @@ import { CoordinatorLoop, runLocalDshPlugin } from './lib/coordinator.js'
 import { LocalFileDispatcher } from './lib/file-dispatcher.js'
 import { DshAdapter } from './lib/dsh-adapter.js'
 import { DshDispatcher } from './lib/dsh-dispatcher.js'
+import { HostCredentialBroker, loadCredentialKey } from './lib/credential-broker.js'
 
 export const name = 'loom-local-node'
 export const inject = ['agents', 'sessionPersistence', 'tools', 'llm']
@@ -19,6 +20,7 @@ export const Config = z.object({
   enrollment_code: z.string().description('One-use enrollment code, obtained by an administrator; leave empty for fixed-token testing only.'),
   model_text_tasks: z.boolean().default(false).description('Opt in to one explicit provider/model text route using public ctx.llm and invoke_text Grants. Default false; read/write access is not model authority.'),
   model_descriptor_tasks: z.boolean().default(false).description('Opt in to the separately granted read-only model.json descriptor proof task. Uses the controlled file executor, not an Agent or model invocation; defaults false.'),
+  credential_broker_tasks: z.union(['unsupported', 'dsh_records']).default('unsupported').description('Opt in to exact controller-bound Host credential metadata inspection and separately granted revoke; never secret extraction.'),
   allow_dsh_agent_creation: z.boolean().default(false).description('Allow creation of an owned Agent; otherwise use existing agent_session_id and never dispose it.'),
   bounded_fixture_effects: z.boolean().default(false).description('Test-only: verify a registered synthetic fixture write, never general provider side effects. Disabled by default.'),
   delegation_tools: z.union(['unsupported', 'scoped_fixture']).default('unsupported').description('Test-only child Agent with independently verified immutable source. Default refuses delegated ArtifactInput.'),
@@ -76,11 +78,25 @@ export async function apply(ctx, config) {
         sessionMapPath: `${config.state_dir}/dsh-session-map.json`,
         allowBoundedFixtureEffects: config.bounded_fixture_effects,
         delegationAgentSetup })
-      // Project roots are explicitly host declarations, never implicit execution Grants.
-      loop = await runLocalDshPlugin(config, {
-        createClient: undefined,
-        localDispatcher: (conf, runner) => new DshDispatcher(runner, adapter, conf, new LocalFileDispatcher(runner)),
-      })
+      const startWorker = async (credentials) => {
+        let broker
+        if (config.credential_broker_tasks === 'dsh_records') {
+          const keyFn = await loadCredentialKey()
+          broker = new HostCredentialBroker(credentials, keyFn)
+          if (!broker.available) throw new Error('dsh_records requires the active public credentials describeRecord/deleteRecord service')
+        }
+        // Project roots are explicitly host declarations, never implicit execution Grants.
+        loop = await runLocalDshPlugin(config, {
+          createClient: undefined,
+          localDispatcher: (conf, runner) => new DshDispatcher(runner, adapter, conf, new LocalFileDispatcher(runner), { broker }),
+        })
+      }
+      if (config.credential_broker_tasks === 'dsh_records') {
+        // The optional injection is scoped to the broker. Other normal Local
+        // Node modes never require, discover, or inspect the Host credential service.
+        ctx.inject(['credentials'], (credentialContext) => credentialContext.effect(() => startWorker(credentialContext.credentials)))
+      } else await startWorker()
+      return async () => { if (loop) await loop.dispose() }
     } else throw new Error('executor must remain unsupported or select local/dsh explicitly')
     return async () => { if (loop) await loop.dispose() }
   })

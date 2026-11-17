@@ -16,6 +16,10 @@ pub(crate) fn routes() -> Router<Arc<api::State>> {
         .route("/api/v1/nodes/heartbeat", post(api::heartbeat))
         .route("/api/v1/nodes/assignments/poll", post(api::poll))
         .route("/api/v1/nodes/acknowledge", post(api::acknowledge))
+        .route(
+            "/api/v1/nodes/credential-authorize",
+            post(api::credential_authorize),
+        )
         .route("/api/v1/nodes/events", post(api::event))
         .route("/api/v1/nodes/assignments/source", post(api::source_input))
         .route("/api/v1/nodes/direct-offers", post(direct_offer))

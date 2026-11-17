@@ -1,4 +1,5 @@
-import { appendFile, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { appendFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -19,20 +20,24 @@ class DeterministicAdapter extends LlmAdapter {
   }
   providerInfo(provider) { return { id: provider, name: 'Loom isolated fixture (no live LLM)' } }
   async listModels(provider) {
-    await this.record({ type: 'models-listed', provider })
-    return [{ provider, id: 'loom-stub-v1', name: 'Loom deterministic stub', inputModalities: ['text'] }]
+      await this.record({ type: 'models-listed', provider })
+      return [{ provider, id: 'loom-stub-v1', name: 'Loom deterministic stub', inputModalities: ['text'] }]
   }
   async resolveModel(provider, model) {
-    await this.record({ type: 'model-resolved', provider, model })
-    return { provider, id: model, name: 'Loom deterministic stub', inputModalities: ['text'], context: { contextWindow: 131072 } }
+      await this.record({ type: 'model-resolved', provider, model })
+      return { provider, id: model, name: 'Loom deterministic stub', inputModalities: ['text'], context: { contextWindow: 131072 } }
   }
   async prepareCall(provider, model, signal) {
     await this.record({ type: 'model-prepared', provider, model })
     return super.prepareCall(provider, model, signal)
   }
-  async record(value) {
+  record(value) {
     const file = this.config.control_path
-    await appendFile(file, JSON.stringify({ ...value, provider: 'loom-stub', live_llm: false }) + '\n', { mode: 0o600 })
+    // Strictly bounded synthetic control log only. Awaiting fs.promises during
+    // this Electron SDK's startup could leave SDK initialize shutdown-sensitive;
+    // direct completion of this test write ensures response scheduling never
+    // depends on an extra event-loop turn. This is not model/network I/O.
+    appendFileSync(file, JSON.stringify({ ...value, provider: 'loom-stub', live_llm: false }) + '\n', { mode: 0o600 })
   }
   async *stream(options) {
     const id = `loom-stub-${++this.serial}`
@@ -162,13 +167,12 @@ export function apply(ctx, config) {
   if (!isAbsolute(config.control_path || '') || !controlPath.startsWith(sep) || controlPath === sep || !controlPath.includes('loom-dsh-')) {
     throw new Error('The disposable Stub requires a control_path inside a test-owned /tmp/loom-dsh-* root')
   }
-  const prepared = mkdir(dirname(controlPath), { recursive: true, mode: 0o700 })
-  ctx.effect(async () => {
-    await prepared
-    const registration = ctx.llm.registerAdapter(['loom-stub'], new DeterministicAdapter({ ...config, control_path: controlPath }))
-    return () => registration()
-  }, 'register zero-network fixture provider')
-  const registration = ctx.tools.register({
+  // Synchronous test setup: SDK initialize can be observed before an async
+  // effect or an awaited directory operation. Publish adapters now, with one
+  // owner and disposer, never during a later loader promotion step.
+  mkdirSync(dirname(controlPath), { recursive: true, mode: 0o700 })
+  const registration = ctx.llm.registerAdapter(['loom-stub'], new DeterministicAdapter({ ...config, control_path: controlPath }))
+  const inspectRegistration = ctx.tools.register({
     name: 'loom_fixture_inspect',
     description: 'Read only the synthetic fixture token ORBITAL-731. No filesystem, network, model or side effect.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -226,5 +230,5 @@ export function apply(ctx, config) {
       return result
     },
   })
-  return () => { registration(); writeRegistration() }
+  return () => { registration(); inspectRegistration(); writeRegistration() }
 }

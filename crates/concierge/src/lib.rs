@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 pub mod api;
 mod command;
+mod credential_ref;
 mod direct_offer;
 mod install_plan;
 pub mod inventory;

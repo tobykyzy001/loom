@@ -1,0 +1,12 @@
+- insert:
+    - id: loom-credential-provider
+      name: '@deepseek-ai/dsh-credentials-local'
+      config:
+        path: !!js process.env.LOOM_FIXTURE_ROOT + '/node-state/credential-store/records.yaml'
+        dshHome: !!js process.env.LOOM_FIXTURE_ROOT + '/node-state/credential-store'
+        watch: true
+        debounceMs: 100
+    - id: loom-credential-seed
+      name: '@loom-test/credential-record'
+      config:
+        enabled: false

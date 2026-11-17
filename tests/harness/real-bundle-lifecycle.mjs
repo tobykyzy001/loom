@@ -66,7 +66,7 @@ async function launchNoWorkerSdk({ root, executable, cli }) {
   })
   try {
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
-      params: { cwd: join(root, 'project'), provider: 'deepseek-official', model: 'deepseek-flash', approvalRequests: true } }) + '\n')
+      params: { cwd: join(root, 'project'), provider: 'loom-stub', model: 'loom-stub-v1', approvalRequests: true } }) + '\n')
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'shutdown', params: {} }) + '\n')
     child.stdin.end()
     const exit = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 20000))])
@@ -74,7 +74,7 @@ async function launchNoWorkerSdk({ root, executable, cli }) {
     assert.equal(exit.code, 0, `SDK startup failed: ${output.join('\n')}\n${errors.join('').slice(0, 5000)}`)
     const stdout = output.join('')
     const info = stdout.split('\n').filter(Boolean).map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
-    assert.ok(info.some((frame) => frame.id === 1 && frame.result?.serverInfo?.name === 'deepseek-harness-sdk-runtime'), 'Actual SDK initialize response required')
+    assert.ok(info.some((frame) => frame.id === 1 && frame.result?.serverInfo?.name === 'deepseek-harness-sdk-runtime'), `Actual SDK initialize response required: ${stdout.slice(0, 7000)}\nSTDERR: ${errors.join('').slice(0, 7000)}`)
     assert.ok(info.some((frame) => frame.id === 2 && frame.result), 'Actual SDK shutdown must be acknowledged')
     assert.ok(stdout.includes(disabledLog) || errors.join('').includes(disabledLog), 'The disabled apply message must actually occur in SDK logs')
     return { initialized: true, shutdown: exit, plugin_apply_disabled_observed: true }

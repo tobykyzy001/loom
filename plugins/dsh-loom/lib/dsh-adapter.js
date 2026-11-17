@@ -115,6 +115,9 @@ export class DshAdapter {
     if (!evidenceScope) {
       const outside = toolRecords.find((entry) => entry.possible_effect)
       if (outside) return { state: 'unknown', summary: 'A tool reported a possible file effect outside the authorized operation kind; neither success nor automatic rollback is inferred.', effects: [], artifacts: [], evidence: [outside] }
+      const rejected = toolRecords.find((entry) => entry.is_error && entry.possible_effect !== true && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))
+      if (rejected) return { state: 'failed', summary: `DSH ToolResult rejected an out-of-scope operation: ${rejected.text || rejected.invalid_error || 'invalid bounded tool result'}`,
+        effects: [], artifacts: [] }
       return { effects: [], artifacts: [] }
     }
     const uncertain = toolRecords.find((entry) => entry.is_error && entry.possible_effect && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(entry.call?.name))
@@ -272,10 +275,12 @@ export class DshAdapter {
         // Source is the ordinary committed DSH message in this assignment, not a fabricated parent Artifact UUID.
         parents: [], evidence: [{ source: 'dsh-session-log', session_id: agent.session.id, observed_seq: agent.session.seq }] }
       if (this.snapshotDir) await writeFile(join(this.snapshotDir, `${assignment.id}.json`), bytes, { mode: 0o600, flag: 'wx' })
-      return { state: 'succeeded', summary: 'DSH Agent completed an observed turn; report text is collected from ordinary Session messages.',
+      const outcome = fileEvidence.state === 'failed' ? 'failed' : 'succeeded'
+      return { state: outcome, summary: outcome === 'failed' ? fileEvidence.summary : 'DSH Agent completed an observed turn; report text is collected from ordinary Session messages.',
         content: bytes, metadata: { ...metadata, size_bytes: bytes.length, sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex') }, session_ref: this.sessionRef(agent.session), effects: [] }
     } catch (error) {
-      // A known observer cancellation is not "unknown" merely because SessionRef was reported.
+      // Preserve the original cancellation acknowledgement and observed result.
+      // A cancelled/aborted Session is not repackaged as a tool rejection.
       error.session_ref ||= this.sequence.get(assignment.id)?.session_ref
       if (!['cancelled', 'failed'].includes(error.state) && this.sequence.get(assignment.id)?.refReported) error.state = 'unknown'
       process.stderr.write(`[loom-local-node] DSH execution error ${assignment.id}: ${error.message}\n`)
