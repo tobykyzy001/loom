@@ -37,10 +37,11 @@ export class NodeIdentity {
   get token() { return this.data.token || '' }
   async setToken(token) {
     assertObject(token, 'token')
-    this.data.token = token.token || token.access_token || token.node_token
-    if (typeof this.data.token !== 'string' || !this.data.token) throw new Error('Registration response has no node token')
-    this.data.enrolled_at = new Date().toISOString()
-    await writeJsonAtomic(this.file, this.data)
+    const candidate = token.token || token.access_token || token.node_token
+    if (typeof candidate !== 'string' || !candidate.trim()) throw new Error('Registration response has no node token')
+    const enrolled_at = new Date().toISOString()
+    await writeJsonAtomic(this.file, { ...this.data, token: candidate, enrolled_at })
+    Object.assign(this.data, { token: candidate, enrolled_at })
   }
   get token() { return this.data.token || '' }
   sign(nonce) {

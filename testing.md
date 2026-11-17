@@ -48,6 +48,7 @@ deploy/
 
 ## 2.1 当前实际高层验证入口
 
+- `pnpm --dir packages/node-client test` / `pnpm --dir plugins/dsh-loom test`：真实节点HTTP和持久 outbox边界。缺/空白Node token**不得**被client token代替；匿名仅challenge与初始注册，旧Node token可重注册。预取消请求绝不先`fetch`，迟到响应不得重解释为没有任务；caller shutdown保持原pending/attempt/backoff，不取下一entry、不创建交付回执，后续普通可达的同一request body才能交付。正常离线/timeout仍有独立延迟重试。各自分别导入公共Node与vendored源，外加隔离DSH完整SDK流程，不用Rust拒绝来掩盖前端出局错误。见[transport专项](tests/harness/EVIDENCE.md)。
 - `node tests/harness/real-lifecycle.mjs`：隔离profile中真实安装、注册、Agent工具任务、取消与恢复；具体按脚本最后报告判断。
 - `node tests/harness/real-delegation.mjs`：同一隔离 DSH Host 的实际父/子 Session、current Assignment Source 验证、原父产物到新 scoped Tool/File/Artifact 与实际父子关系、错误来源拒绝、重开无重复效果。详见 [harness/DELEGATION.md](harness/DELEGATION.md)。默认生产`unsupported`，此例零网络 Stub，不代表自然语言模型质量、物理第二机或任意 Harness。
 - `node tests/direct/loopback-handoff.mjs`：两台同机逻辑 Node之间的真实direct Artifact取源/签名/Grant与nonce不可复用。比较字节hash和父节点谱系，加入取消/stale grant/offline等负例，实测14个断言。见[direct/README.md](direct/README.md)。是同机回环的基础传输证明，不是物理第二机、任意路由、公网/TLS或大文件对账保证。

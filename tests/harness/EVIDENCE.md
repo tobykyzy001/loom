@@ -61,4 +61,22 @@ LOOM_TEST_OUTPUT=/tmp/loom-dsh-file-effect-result.json node scripts/dsh-fixture-
 
 其他 Rust/应用改动由 concurrent owner 完成，本目录的 runner 的默认来源仍是项目的真实 `scripts/fixtures/rust-server.mjs`，不替换为 SyntheticCoordinator。以往失败 probe 不作为本次 PASS 证据；不可复现的环境 blocker 必须单独报告，不能换为 mock 假装执行过。
 
+## HTTP/Node transport 边界专项
+
+```sh
+pnpm --dir packages/node-client test
+pnpm --dir plugins/dsh-loom test
+```
+
+本专项验证 `packages/node-client` 及 vendored plugin 自己的 HTTP/NodeState 实现，不用受信方拒绝来掩盖客户端先泄露凭据：
+
+- `/nodes/*` 除了明确的 `nodes/challenge` 和 `nodes/register` 匿名路径外，必须带非空、非空白的 Node credential；缺少或用 whitespace 时**根本不构造fetch并抛出注册/授权错误**，不能拿同实例的 client/admin token 回退。重复注册可以带合法旧 Node token，后续心跳仍使用注册获得的 Node token。挑战匿名请求本身无 Authorization，admin 调用自己独立路由时才可以用 admin credential。
+- 已有abort在fetch之前停止；fetch之后/读取body之前再次检查，避免返回一个 `{}` 或 `assignment:null` 把取消误当成没有任务。Configurable timeout仍按普通可以延迟的网络错误处理，不是停止宿主或已经取消外部副作用的代名词。
+- 调用者给 `dispatchOutbox` 的自身signal触发时，立即传播取消原因：不调用下一条entry、不改attempts/backoff，不把shutdown改写成`deferred`的普通网络错误，不把entry标为已交付。持久pending与原始request ID/unknown summary需要保留，后续另一次普通可达dispatch才能交付。这一步不保证已发出的远端副作用被取消，也不允许伪造 exactly-once。
+- Normal offline / network timeout保留相同原文body和logical digest，并把next attempt手动推到due以确定测试可重试语义，不必真实等待退避或准许远端执行。旧`401/403/409/410/422`隔离行为与normal backoff 保留，不因局部 caller stop全局静默放弃正在解决的工作。
+- Whitespace enrollment result先在临时变量验证，在写入候选前不改变活动身份。有效 candidate 用原子文件更新后才更新 `this.data`；非法输入或文件替换失败都不会提前丢掉旧、合格token或其可用后续请求。公共 Node client与 vendored plugin均断言**内存中的旧 token还能发出后续有效的heartbeat**，不只读磁盘。另有body消费中取消承载非空Assignment的硬负例，不能把一次可作业响应加入活跃任务。测试只对比预期fixture值/用法，不把任何真实token或身份私钥纳入证据、HTML或 System Credential Store。
+- DSH plugin test 直接导入 vendored源码，有两个 HTTP/Caller-Signal case，避免只claim形状相同的副本文档被验证。实际 isolated DSH install/register/task/cancel/resume 和Credential（未知结果、真实delete/restart）也再次 PASS；这不能代替多个平台、多客户端、通用幂等或任意外部Failure proof。HTTP 与 NodeIdentity 两份公共 helper 逐字同版；plugin 原有 Worker 默认策略未被这项 transport 边界修改。
+
+运行入口只使用合成/owned 临时文件和内存 transport，无网络发现、生产 directory、OS Credential Store、真实用户身份、收费模型或修改现有桌面/DSH Profile。从公钥签名和authorization隔离到outbox持久恢复均看实际 NodeClient代码行为，而不只是断言 Rust会拒绝最后错误。
+
 Enrollment code 仅 child environment 传输；重启没有新 code，使用真正的本地持久 Node credentials。不合规 Patch 没有 literal Token，输出不含 node token/private-key/raw session transcript。原始日记仅在 fixture private/state 以 0600 留存，绝不包含用户私有目录信息；`private/host-lifecycle.jsonl` 只留 argv 名义、协议初始化和实际退出状态。

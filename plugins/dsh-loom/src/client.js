@@ -93,6 +93,7 @@ export class LoomNodeClient {
         })
         results.push({ status: item.kind === 'report' ? 'replay_delivered' : 'delivered', kind: item.kind, requestId: item.body.request_id, response })
       } catch (error) {
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error
         await this.state.mutate((data) => {
           const current = data.outbox.find((other) => other.kind === item.kind && other.digest === item.digest)
           if (!current) return

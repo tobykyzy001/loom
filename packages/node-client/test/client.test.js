@@ -62,6 +62,55 @@ test('PATCH follows the same bounded client route/auth policy without manufactur
   await assert.rejects(() => http.patch('/api/v1/nodes/credential-authorize', {}, { token: http.clientToken }), /Client credential/)
 })
 
+test('already-aborted HTTP never calls fetch, even when the adapter ignores cancellation', async () => {
+  let calls = 0
+  const http = new LoomHttpClient({ baseUrl: 'http://127.0.0.1:65535', clientToken: 'admin-is-not-a-node-token', fetch: async() => { calls++; return response({ assignment: null }) } })
+  const aborted = new AbortController()
+  aborted.abort()
+  await assert.rejects(() => http.post('/api/v1/nodes/challenge', {}, { noAuth: true, signal: aborted.signal }), error => error.name === 'AbortError')
+  assert.equal(calls, 0, 'Pre-cancelled request must not touch the transport, emit a credential or read a body')
+})
+
+test('HTTP timeout and cancellation do not accept an assignment as if nothing was happening', async () => {
+  const root = await fixture(); const identity = await NodeIdentity.open(root); await identity.setToken({ token: 'fixture-node-token' }); const state = await NodeState.open(root)
+  let timedPath
+  const timeoutFetch = async (url, options) => new Promise((resolve, reject) => {
+    timedPath = String(url)
+    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })
+  })
+  const timeoutHttp = new LoomHttpClient({ baseUrl: 'http://127.0.0.1:65535', fetch: timeoutFetch })
+  await assert.rejects(() => timeoutHttp.post('/api/v1/nodes/heartbeat', { request_id: 'fixture-time-limit' }, { token: identity.token, timeoutMs: 25 }), /timed out/)
+  assert.match(timedPath, /nodes\/heartbeat$/)
+
+  const cancel = new AbortController()
+  const lateFetch = async (_url, options) => {
+    cancel.abort(new Error('Fixture cancelled before the response is consumed'))
+    return new Response(JSON.stringify({ assignment: null, ignored_token_probe: false }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  const lateState = await NodeState.open(root)
+  const late = new LoomNodeClient({ http: new LoomHttpClient({ baseUrl: 'http://example.invalid', fetch: lateFetch }), identity, state: lateState })
+  await assert.rejects(() => late.poll({ waitSeconds: 1, signal: cancel.signal }), /cancel/)
+  assert.deepEqual(lateState.data.assignments, {}, 'A cancel raced response must not become a new task or a false idle result')
+  assert.deepEqual(lateState.outbox, [], 'Cancellation is not a successful delivery acknowledgement')
+})
+
+test('abort during a non-null Assignment response body cannot admit that assignment to the active poll', async () => {
+  const directory = await fixture(); const identity = await NodeIdentity.open(directory); const state = await NodeState.open(directory)
+  const controller = new AbortController()
+  let bodyReads = 0
+  const fetch = async () => ({ ok: true, status: 200, arrayBuffer: async() => {
+    bodyReads++
+    controller.abort(new Error('Cancelled while reading the late response body'))
+    return new TextEncoder().encode(JSON.stringify({ assignment: { id: 'asg-must-not-start', ticket_id: 'tkt-must-not-start', lease_epoch: 1 } })).buffer
+  } })
+  await identity.setToken({ token: 'fixture-node-token' })
+  const client = new LoomNodeClient({ http: new LoomHttpClient({ baseUrl: 'http://example.invalid', fetch }), identity, state })
+  await assert.rejects(() => client.poll({ waitSeconds: 1, signal: controller.signal }), /Cancelled while reading/)
+  assert.equal(bodyReads, 1, 'Must exercise the body-consumption stage, not only an already-cancelled input')
+  assert.deepEqual(state.data.assignments, {})
+  assert.deepEqual(state.outbox, [])
+})
+
 test('outbox dedupes same body, persists exact request ID and requeues after network failure', async () => {
   const root = await fixture(); const identity = await NodeIdentity.open(root); await identity.setToken({ token: 'node-token' }); const state = await NodeState.open(root)
   let online = false; let requests = []
