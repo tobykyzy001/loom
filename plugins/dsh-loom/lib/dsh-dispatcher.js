@@ -2,15 +2,19 @@ import { validateAssignment } from '../src/validation.js'
 import { canonical, sha256 } from '../src/util.js'
 import { stableArtifactId as stableUUID } from './ids.js'
 import { verifiedDelegation } from './verified-delegation.js'
-import { exactTextRoute, inspectTextRoute, validTextGrant, modelRef } from './model-policy.js'
+import { exactTextRoute, inspectTextRoute, validTextGrant } from './model-policy.js'
+import { loadTextRequest, modelBindingSnapshot, validateModelBinding } from './model-binding.js'
 import { inspectModelCatalog, mergeModelCatalogFacts, emptyModelCatalog } from './model-inventory.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
-  constructor(runner, adapter, config) {
-    this.runner = runner; this.adapter = adapter; this.config = config; this.active = new Map()
+  constructor(runner, adapter, config, fileDispatcher = null) {
+    this.runner = runner; this.adapter = adapter; this.config = config; this.fileDispatcher = fileDispatcher; this.active = new Map()
     // Capabilities describe Agent work; they are not a silent filesystem allowance.
-    this.capabilities = ['dsh_agent_turn', 'read_summary', 'edit_file', ...(config.model_text_tasks ? ['model_text'] : [])] // Agent-presented operations; Grant remains separately enforced.
+    // Descriptor bytes may only be read by the separately opted-in local file route.
+    this.capabilities = ['dsh_agent_turn', 'read_summary', 'edit_file',
+      ...(config.model_text_tasks ? ['model_text'] : []),
+      ...(config.model_descriptor_tasks === true && fileDispatcher !== null ? ['model_descriptor'] : [])] // Grant remains separately enforced.
   }
   async initializeModelCatalog() {
     try {
@@ -43,14 +47,21 @@ export class DshDispatcher {
   }
   sessionRefs() { return [...this.adapter.sequence.entries()].map(([assignment_id, record]) => ({ assignment_id, ...this.adapter.sessionRef(record.agent.session) })) }
   async canExecute(assignment) {
+    if (assignment.kind === 'model_descriptor') {
+      if (this.config.model_descriptor_tasks !== true || this.fileDispatcher === null) return false
+      try { return await this.fileDispatcher.canExecute(assignment) === true } catch { return false }
+    }
     if (assignment.kind === 'model_text') {
       if (this.config.model_text_tasks !== true) return false
       try {
         validateAssignment(assignment, assignment.grant, this.runner.identity)
         if (!validTextGrant(assignment) || Object.hasOwn(assignment, 'artifact_input')) return false
-        const route = exactTextRoute(this.config, assignment)
+        const binding = await validateModelBinding(assignment, this.runner.identity)
+        const route = exactTextRoute(this.config, loadTextRequest(assignment))
         const observation = await inspectTextRoute(this.adapter.ctx, route)
-        this.active.set(assignment.id, { assignment, modelObservation: observation, textRoute: route })
+        // Preserve only pinned public proof and the exact immutable request view.
+        // The center-supplied mutable Assignment object is not execution authority.
+        this.active.set(assignment.id, { assignment: structuredClone(assignment), binding, modelBindingSnapshot: modelBindingSnapshot(assignment), modelObservation: observation, textRoute: route })
         return true
       } catch { return false }
     }
@@ -73,11 +84,28 @@ export class DshDispatcher {
     }
   }
   async executeAssignment(assignment) {
+    if (assignment.kind === 'model_descriptor') {
+      if (this.config.model_descriptor_tasks !== true || this.fileDispatcher === null) {
+        throw new Error('Descriptor reads require the explicitly enabled local file dispatcher')
+      }
+      if (await this.fileDispatcher.canExecute(assignment) !== true) throw new Error('Descriptor Grant/root validation failed')
+      // The ControlledFileExecutor's own once/ack/report path reads real bytes.
+      // Never route this through an Agent, model observation, or SDK prepareCall.
+      return this.fileDispatcher.executeAssignment(assignment)
+    }
     if (this.active.get(assignment.id)?.executing) throw new Error('Assignment is already active')
     this.active.set(assignment.id, { ...(this.active.get(assignment.id) || {}), assignment, executing: true })
     this.runner.state.data.assignments[assignment.id] = assignment
     await this.runner.state.flush()
     try {
+      if (assignment.kind === 'model_text') {
+        // Re-check the freshly polled Grant records AND prove the Assignment was
+        // not mutated between approval and execution. No new prepareCall occurs.
+        if (modelBindingSnapshot(assignment) !== this.active.get(assignment.id)?.modelBindingSnapshot) {
+          throw new Error('Immutable text model binding changed after preflight')
+        }
+        await validateModelBinding(assignment, this.runner.identity)
+      }
       await this.runner.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: true })
       const { provenance, modelObservation, textRoute } = this.active.get(assignment.id) || {}
@@ -94,7 +122,9 @@ export class DshDispatcher {
             ...(provenance ? { delegated_from: { ...provenance.ref, session: provenance.parent_session } } : {}),
             session_seq: session_ref.observed_seq }, kind: 'session_link', summary: 'Loom linked to the existing DSH Session log.' }),
       })
-      const digest = sha256(canonical({ assignment_id: assignment.id, kind: assignment.kind, objective: assignment.objective }))
+      const digest = sha256(canonical({ assignment_id: assignment.id, kind: assignment.kind, objective: assignment.objective,
+        ...(assignment.kind === 'model_text' ? { model_binding: JSON.parse(assignment.content).model_binding,
+          grant_digest: assignment.grant_digest, lease_epoch: assignment.lease_epoch } : {}) }))
       const result = await this.runner.state.once(assignment.id, digest, operation)
       // Effects and artifact bytes must originate from committed tool/session facts, not narrative assertions.
       if (result.state === 'unknown' && result.content) {

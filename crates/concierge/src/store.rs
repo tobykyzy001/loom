@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 9 {
+        if current > 10 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 9)"
+                "database schema is from a newer Loom release (found {current}, supported 10)"
             )
         }
         if current == 0 {
@@ -212,6 +212,29 @@ impl Store {
                  );
                  PRAGMA user_version=9;",
             )?;
+        }
+        if current < 10 {
+            // Schema 9 was experimental; inspect first so upgrading it (or an
+            // already-columned prototype) is additive, idempotent and lossless.
+            let present: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('models') WHERE name='assignment_digest'",
+                [],
+                |row| row.get(0),
+            )?;
+            if present == 0 {
+                self.connection
+                    .execute_batch("ALTER TABLE models ADD COLUMN assignment_digest TEXT")?;
+            }
+            let source_id_present: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('models') WHERE name='source_assignment_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            if source_id_present == 0 {
+                self.connection
+                    .execute_batch("ALTER TABLE models ADD COLUMN source_assignment_id TEXT")?;
+            }
+            self.connection.execute_batch("PRAGMA user_version=10")?;
         }
         Ok(())
     }
@@ -483,6 +506,37 @@ mod tests {
     }
 
     #[test]
+    fn experimental_v9_upgrade_adds_nullable_assignment_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(tmp.path()).unwrap();
+            store.conn().execute("INSERT INTO models(id,name,revision,location,placement_policy,status,created_at,updated_at) VALUES('legacy','fixture','v1','local_only','place_model','registered','old','old')", []).unwrap();
+            store
+                .conn()
+                .execute("ALTER TABLE models DROP COLUMN source_assignment_id", [])
+                .unwrap();
+            store.conn().execute("PRAGMA user_version=9", []).unwrap();
+            drop(store);
+        }
+        let store = Store::open(tmp.path()).unwrap();
+        let version: i64 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        let models = store
+            .query(
+                "SELECT id,assignment_digest,source_assignment_id FROM models",
+                [],
+            )
+            .unwrap();
+        assert_eq!(models[0]["id"], "legacy");
+        assert_eq!(models[0]["assignment_digest"], Value::Null);
+        assert_eq!(models[0]["source_assignment_id"], Value::Null);
+        assert!(Store::open(tmp.path()).is_ok());
+    }
+
+    #[test]
     fn upgrades_existing_v3_records_without_replacing_authority() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_id = uuid::Uuid::new_v4().to_string();
@@ -527,7 +581,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);

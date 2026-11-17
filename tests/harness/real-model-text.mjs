@@ -25,7 +25,7 @@ try {
   const enrollment = await admin.post('/api/v1/enrollment-codes', {})
   secrets.push(enrollment.code)
   const env = isolatedEnv(root, { LOOM_FIXTURE_COORDINATOR_URL: server.baseUrl, LOOM_FIXTURE_ENROLLMENT_CODE: enrollment.code,
-    LOOM_FIXTURE_PROJECT_MAPPING: JSON.stringify({ [projectId]: join(root, 'project') }), LOOM_FIXTURE_MODEL_TEXT_TASKS: 'true' })
+    LOOM_FIXTURE_PROJECT_MAPPING: JSON.stringify({ [projectId]: join(root, 'project') }), LOOM_FIXTURE_MODEL_TEXT_TASKS: 'true', LOOM_FIXTURE_MODEL_DESCRIPTOR_TASKS: 'true' })
   await installBundles({ env, root, cli, executable, bundles: [join(root, 'fixture-packages/stub-provider'), join(root, 'fixture-packages/dsh-loom')] })
   host = new FixtureHost(root, env, secrets)
   await host.writePatch()
@@ -43,8 +43,24 @@ try {
   const invoke = await grantPermission(['invoke_text'])
   const grantOnlyReading = await grantPermission(['read'])
   const grantOnlyWriting = await grantPermission(['write'])
+  const descriptor = JSON.stringify({ schema: 'loom.model-descriptor.v1', provider: 'fixture-local-text', revision: 'v1', input_modalities: ['text'], local_only: true }) + '\n'
+  await writeFile(join(root, 'project/model.json'), descriptor, { mode: 0o600 })
+  const localProof = await admin.post('/api/v1/tickets', { project_id: projectId, node_id: node.id, worker_id: 'default', grant_id: grantOnlyReading.id,
+    kind: 'model_descriptor', relative_path: 'model.json', objective: 'Read the bounded source without invoking an agent or model.' })
+  const provenSource = await waitTicket(admin, localProof.id, ['succeeded', 'failed', 'reconciling', 'cancelled'], 75_000)
+  assert.equal(provenSource.status, 'succeeded', JSON.stringify(provenSource.reports))
+  const proofArtifact = provenSource.artifacts[0]
+  assert.ok(proofArtifact)
+  const proofDocument = JSON.parse((await admin.get(`/api/v1/tickets/${localProof.id}/artifacts/${proofArtifact.id}`)).content)
+  assert.equal(proofDocument.source_sha256, createHash('sha256').update(descriptor).digest('hex'))
+  const { model } = await admin.post('/api/v1/models', { schema: 'loom.model-registry.v1', source_ticket_id: localProof.id,
+    source_artifact_id: proofArtifact.id, worker_id: 'default', reviewed_sha256: proofArtifact.sha256 })
+  const placeGrant = await grantPermission(['place_model'])
+  const placeScope = { grant_id: placeGrant.id, worker_id: 'default', node_id: node.id, installation_id: node.installation_id, reviewed_sha256: proofArtifact.sha256 }
+  await admin.post(`/api/v1/models/${model.id}/placement-approvals`, placeScope)
+  const placement = (await admin.post(`/api/v1/models/${model.id}/place`, placeScope)).placement
   const request = (grant_id, override = {}) => admin.post('/api/v1/tickets', { project_id: projectId, node_id: node.id, worker_id: 'default',
-    grant_id, kind: 'model_text', provider: 'loom-stub', model: 'loom-stub-v1', objective: 'Use one bounded text operation for a synthetic flow.', ...override })
+    grant_id, kind: 'model_text', provider: 'loom-stub', model: 'loom-stub-v1', model_id: model.id, placement_id: placement.id, objective: 'Use one bounded text operation for a synthetic flow.', ...override })
   for (const grant of [grantOnlyReading, grantOnlyWriting]) {
     await assert.rejects(() => request(grant.id), (error) => error.status === 403 && error.code === 'operation_scope')
   }
@@ -159,9 +175,10 @@ try {
     task_id: taskId, assignment_id: completed.assignments[0].id, artifact_id: supplied.id, sha256: supplied.sha256,
     session_id: sessionId, model: 'loom-stub-v1', provider: 'loom-stub', operation: 'invoke_text',
     no_file_effects: true, no_actual_llm: true, software_invocation_observed: true,
-    model_registry: 'NOT IMPLEMENTED (this proof does not silently enable it)',
+    model_registry: 'BOUNDED DESCRIPTOR/PLACEMENT PROVENANCE (no general registry or production model deployment)',
+    source_ticket_id: localProof.id, source_model_id: model.id, placement_id: placement.id,
   })
-  console.log(JSON.stringify({ overall: 'PASS', checks, facts: { model_text_invocation: 'PASS', permission_fencing: 'PASS', actual_dsh_llm_adapter: true, live_llm: 'NOT RUN', image_generation: 'NOT RUN', registry_lifecycle: 'NOT RUN' }, root }, null, 2))
+  console.log(JSON.stringify({ overall: 'PASS', checks, facts: { model_text_invocation: 'PASS', permission_fencing: 'PASS', actual_dsh_llm_adapter: true, live_llm: 'NOT RUN', image_generation: 'NOT RUN', registry_lifecycle: 'BOUNDED LOCAL SOURCE + PLACEMENT + INVOKE (fixture only)' }, root }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: redact(error.stack, secrets), host_diagnostics: redact(host?.diagnostics() || 'No host launched', secrets), checks, root }, null, 2))
   process.exitCode = 1

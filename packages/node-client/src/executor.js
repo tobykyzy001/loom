@@ -168,7 +168,8 @@ export class ControlledFileExecutor {
       metadata.parents = [sourceRef.artifact_id]
       metadata.artifact_ref = sourceRef
     }
-    const effect = { effect_id: effectId, status: finalStatus(readOnly), evidence }
+    const effect = { effect_id: effectId, status: finalStatus(readOnly),
+      input_digest: evidence.input_digest, artifacts: [artifactId], evidence }
     await writeJsonAtomic(join(this.artifactDir, `${effectId}.effect.json`), { ...evidence, status: 'confirmed', read_only: readOnly })
     return { state: 'succeeded', summary: `${assignment.kind} completed without calling a model.`,
       artifact: { artifact_id: artifactId, metadata, bytes: content }, effect }

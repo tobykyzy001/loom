@@ -32,6 +32,15 @@ export function validateAssignment(assignment, grant, identity, { now = Date.now
   const permission = assignment.kind === 'edit_file' ? 'write' : assignment.kind === 'model_text' ? 'invoke_text' : 'read'
   if (!allowed.includes(assignment.kind) && !allowed.includes(permission)) throw new Error('Grant does not authorize assignment kind')
   if (assignment.project_id && grant.project_id && grant.project_id !== assignment.project_id) throw new Error('Grant project mismatch')
+  if (assignment.kind === 'model_text') {
+    if (assignment.worker_id !== grant.worker_id || !identity.installation_id
+      || assignment.installation_id !== identity.installation_id) throw new Error('Text invocation requires the exact enrolled Worker/Installation')
+    // Text-only work has no file path or implicit ProjectRoot authority. The
+    // separately validated placement binding, not project_root, scopes it.
+  } else if (['read_summary', 'edit_file', 'model_descriptor'].includes(assignment.kind)) {
+    if (typeof grant.project_root !== 'string' || !grant.project_root) throw new Error('File work requires the exact current ProjectBinding root')
+    if (typeof assignment.relative_path !== 'string' || !assignment.relative_path) throw new Error('File work requires an explicit relative path')
+  }
   if (grant.expires_at && Date.parse(grant.expires_at) <= now) throw new Error('Grant is expired')
   return { ...assignment, grant_id: gid, ... (!assignment.grant_digest ? { grant_digest: expected } : {}) }
 }

@@ -7,13 +7,21 @@ import { exactTextRoute, validTextGrant, inspectTextRoute } from '../lib/model-p
 const nodeId = 'a'.repeat(64)
 const digest = 'b'.repeat(64)
 function assignment(operations = ['invoke_text'], model = 'loom-stub-v1') {
+  const scope = { node_id: nodeId, installation_id: 'install-text-test', worker_id: 'default', project_id: 'project-test' }
+  const grant = { id: 'grant_text_test', version: 1, operations, digest, revoked_at: null, ...scope }
+  const placementGrant = { id: 'grant_place_test', version: 1, operations: ['place_model'], digest: 'c'.repeat(64), revoked_at: null, ...scope }
+  const model_binding = { schema: 'loom.model-binding.v1', model_id: 'source-model', placement_id: 'placement-test',
+    placement_sha256: 'd'.repeat(64), source_artifact_id: 'source-artifact', source_ticket_id: 'source-ticket',
+    source_assignment_digest: 'e'.repeat(64), placement_grant_id: placementGrant.id, placement_grant_digest: placementGrant.digest, ...scope }
+  const objective = 'Bounded text fixture.'
   return {
     id: 'asg_text_test', ticket_id: 'tkt_text_test', lease_id: 'lease_text_test',
-    node_id: nodeId, installation_id: 'install-text-test', attempt: 1, lease_epoch: 1,
+    attempt: 1, lease_epoch: 1, objective,
     lease_expires_at: new Date(Date.now() + 60_000).toISOString(), grant_digest: digest,
     kind: 'model_text', provider: 'loom-stub', model,
-    grant: { id: 'grant_text_test', version: 1, node_id: nodeId, project_id: 'project-test',
-      operations, digest },
+    grant, grants: [grant, placementGrant],
+    content: JSON.stringify({ schema: 'loom.model-text.v1', objective, provider: 'loom-stub', model, model_binding }),
+    ...scope,
   }
 }
 function publicSurface() {
@@ -27,7 +35,7 @@ function publicSurface() {
   }
 }
 function subject(config = {}, llm = publicSurface()) {
-  const runner = { identity: { node_id: nodeId }, state: { data: { assignments: {} }, flush: async () => {} },
+  const runner = { identity: { node_id: nodeId, installation_id: 'install-text-test' }, state: { data: { assignments: {} }, flush: async () => {} },
     client: { acknowledge: async () => {} } }
   return new DshDispatcher(runner, new DshAdapter({ on: () => {}, llm }), config)
 }

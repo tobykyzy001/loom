@@ -9,7 +9,7 @@ export const EXPECTED = Object.freeze({ name: '@loom/dsh-loom', version: '0.0.0'
 export const LIMITS = Object.freeze({ manifest: 64 * 1024, patch: 64 * 1024, readme: 1024 * 1024, locale: 1024 * 1024, icon: 256 * 1024, source: 256 * 1024, files: 512, total: 8 * 1024 * 1024 })
 const REQUIRED_EXPORTS = ['.', './lib/*', './locale/*.json', './icon']
 const SAFE_CONFIG = Object.freeze({ enabled: false, allow_workers: false, executor: 'unsupported' })
-const PATCH_CONFIG_KEYS = new Set(['enabled', 'allow_workers', 'executor', 'base_url', 'state_dir', 'artifact_dir', 'enrollment_code', 'model_text_tasks', 'allow_dsh_agent_creation', 'bounded_fixture_effects', 'delegation_tools', 'delegation_project_root', 'agent_session_id', 'profile_id', 'project_roots', 'provider', 'model', 'reasoning_effort', 'max_tokens', 'max_active_workers', 'heartbeat_ms', 'poll_seconds', 'request_timeout_ms'])
+const PATCH_CONFIG_KEYS = new Set(['enabled', 'allow_workers', 'executor', 'base_url', 'state_dir', 'artifact_dir', 'enrollment_code', 'model_text_tasks', 'model_descriptor_tasks', 'allow_dsh_agent_creation', 'bounded_fixture_effects', 'delegation_tools', 'delegation_project_root', 'agent_session_id', 'profile_id', 'project_roots', 'provider', 'model', 'reasoning_effort', 'max_tokens', 'max_active_workers', 'heartbeat_ms', 'poll_seconds', 'request_timeout_ms'])
 const SAFE_EXTENSION = new Set(['.js', '.mjs', '.cjs', '.json', '.md', '.markdown', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.txt'])
 const SECRET_FILE = /^(?:credentials?|\.env(?:\..*)?|id_(?:rsa|ed25519))(?:\.[^/]*)?$|\.(?:pem|key|p12|pfx|keystore)$/i
 const FORBIDDEN_ROOT_PART = /^(?:\.dsh|dsh|profiles?|cordis|credentials?|\.config|application support|appdata)$/i
@@ -135,7 +135,7 @@ export function parseFixedPatch(text, expectedName) {
   if (rows.length !== 1) fail('patch_must_insert_exactly_one_plugin')
   const row = rows[0]
   for (const [key, value] of Object.entries(SAFE_CONFIG)) if (row.config[key] !== value) fail(`unsafe_default:${key}`)
-  for (const key of ['enabled', 'allow_workers', 'allow_dsh_agent_creation', 'model_text_tasks', 'bounded_fixture_effects']) if (row.config[key] !== undefined && typeof row.config[key] !== 'boolean') fail(`non_boolean_config:${key}`)
+  for (const key of ['enabled', 'allow_workers', 'allow_dsh_agent_creation', 'model_text_tasks', 'model_descriptor_tasks', 'bounded_fixture_effects']) if (row.config[key] !== undefined && typeof row.config[key] !== 'boolean') fail(`non_boolean_config:${key}`)
   return rows
 }
 function parseYamlScalar(value) {

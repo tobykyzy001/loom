@@ -1979,6 +1979,10 @@ struct TicketRequest {
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    placement_id: Option<String>,
 }
 #[allow(clippy::too_many_arguments)]
 async fn create_ticket(
@@ -2053,6 +2057,11 @@ async fn create_ticket(
         }
         Some((provider, model))
     } else {
+        if body.model_id.is_some() || body.placement_id.is_some() {
+            return Err(ApiError::bad(
+                "model_id/placement_id apply only to a separately authorized model_text task",
+            ));
+        }
         if body.provider.is_some() || body.model.is_some() {
             return Err(ApiError::bad(
                 "provider/model fields are only valid on a separately granted model_text task",
@@ -2060,13 +2069,18 @@ async fn create_ticket(
         }
         None
     };
-    let goal = body.objective.or(body.goal).unwrap_or_default();
+    let goal = body
+        .objective
+        .as_ref()
+        .or(body.goal.as_ref())
+        .cloned()
+        .unwrap_or_default();
     if goal.is_empty() || goal.len() > 16000 {
         return Err(ApiError::bad("Explicit objective required"));
     } // Grant permission `read|write` is separately checked against Ticket kind below;
       // the stored operation list is not a TicketKind string alias.
-    let grant_id = if let Some(grant) = body.grant_id {
-        grant
+    let grant_id = if let Some(grant) = body.grant_id.as_ref() {
+        grant.clone()
     } else {
         let permission = match kind {
             "read_summary" | "model_descriptor" => "read",
@@ -2113,6 +2127,12 @@ async fn create_ticket(
             "Grant does not permit this operation",
         ));
     }
+    let model_resource = if let Some((provider, model)) = model_resource {
+        let binding = model_binding_for(&store, &body, &grant)?;
+        Some((provider, model, Some(binding)))
+    } else {
+        None
+    };
     if project["mode"] == "read_only" && kind == "edit_file" {
         return Err(ApiError::denied(
             "read_only",
@@ -2177,6 +2197,137 @@ async fn create_ticket(
         model_resource,
     )?;
     Ok(Json(request))
+}
+fn model_binding_for(
+    store: &store::Store,
+    request: &TicketRequest,
+    invocation: &Value,
+) -> Result<Value, ApiError> {
+    let model_id = request.model_id.as_deref().ok_or_else(|| {
+        ApiError::denied(
+            "model_binding_required",
+            "A registered model and its current placement are required",
+        )
+    })?;
+    let placement_id = request.placement_id.as_deref().ok_or_else(|| {
+        ApiError::denied(
+            "model_binding_required",
+            "A registered model and its current placement are required",
+        )
+    })?;
+    let model = store
+        .query("SELECT * FROM models WHERE id=?1", [model_id])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ApiError::denied(
+                "model_binding_required",
+                "The registered model reference is unknown",
+            )
+        })?;
+    if model["status"] != "registered" {
+        return Err(ApiError::denied(
+            "model_retired",
+            "Only a registered model can bind a new invocation",
+        ));
+    }
+    let field = |key: &str| -> Result<&str, ApiError> {
+        let value = model[key].as_str().unwrap_or_default();
+        if !value.is_empty()
+            && value.len() <= 128
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        {
+            Ok(value)
+        } else {
+            Err(ApiError::denied(
+                "model_binding_scope",
+                "Model source identity must be bounded and present",
+            ))
+        }
+    };
+    let (node_id, installation_id, worker_id) = (
+        field("node_id")?,
+        field("installation_id")?,
+        field("worker_id")?,
+    );
+    let project_id = field("project_id")?;
+    let source_ticket_id = field("source_ticket_id")?;
+    let source_artifact_id = field("source_artifact_id")?;
+    let placement_sha256 = field("descriptor_sha256")?;
+    let source_assignment_digest = field("assignment_digest")?;
+    let project = field("project_id")?.to_owned();
+    if request.project_id != project
+        || invocation["project_id"] != project
+        || invocation["node_id"] != node_id
+        || invocation["installation_id"] != installation_id
+        || invocation["worker_id"] != worker_id
+        || request
+            .node_id
+            .as_deref()
+            .is_some_and(|node| node != node_id)
+        || request
+            .worker_id
+            .as_deref()
+            .is_some_and(|worker| worker != worker_id)
+    {
+        return Err(ApiError::denied(
+            "model_binding_scope",
+            "Invocation must use the exact registered node, installation, Worker and project",
+        ));
+    }
+    let approval = store.query(
+        "SELECT * FROM model_placement_authorizations WHERE model_id=?1 AND project_id=?2 AND node_id=?3 AND installation_id=?4 AND worker_id=?5 AND reviewed_model_digest=?6",
+        params![model_id, project_id, node_id, installation_id, worker_id, placement_sha256],
+    )?.into_iter().next().ok_or_else(|| ApiError::denied("current_placement_approval", "No current approval matches this immutable registered model"))?;
+    let placement_grant = store
+        .get("grants", approval["grant_id"].as_str().unwrap_or_default())?
+        .ok_or_else(|| {
+            ApiError::denied(
+                "current_placement_approval",
+                "Placement Grant no longer exists",
+            )
+        })?;
+    let place_grant_id = placement_grant["id"].as_str().unwrap_or_default();
+    if approval["grant_digest"] != placement_grant["digest"]
+        || approval["binding_id"] != placement_grant["project_binding_id"]
+        || placement_grant["revoked_at"] != Value::Null
+        || placement_grant["project_id"] != project_id
+        || placement_grant["node_id"] != node_id
+        || placement_grant["installation_id"] != installation_id
+        || placement_grant["worker_id"] != worker_id
+        || place_grant_id == invocation["id"].as_str().unwrap_or_default()
+        || !placement_grant["operations"]
+            .as_array()
+            .is_some_and(|ops| ops.contains(&json!("place_model")))
+        || approval["accepted_state"] != "approved_for_placement"
+        || !invocation["revoked_at"].is_null()
+        || !invocation["operations"]
+            .as_array()
+            .is_some_and(|ops| ops.len() == 1 && ops[0] == "invoke_text")
+    {
+        return Err(ApiError::denied("current_placement_approval", "A distinct current place_model Grant and matching root approval must accompany invoke_text authority"));
+    }
+    let placement = store.query(
+        "SELECT id,model_id,node_id,location,status FROM model_placements WHERE id=?1 AND model_id=?2 AND grant_id=?3 AND binding_id=?4 AND node_id=?5 AND status='approved_for_placement'",
+        params![placement_id, model_id, place_grant_id, approval["binding_id"].as_str().unwrap_or_default(), node_id],
+    )?.into_iter().next().ok_or_else(|| ApiError::denied("current_placement", "A matching existing placement receipt is required"))?;
+    if placement["location"] != "local_only" {
+        return Err(ApiError::denied(
+            "model_placement_scope",
+            "Only the exact local placement receipt can bind this fixture",
+        ));
+    }
+    Ok(json!({
+        "schema":"loom.model-binding.v1",
+        "model_id":model_id, "placement_id":placement_id, "placement_sha256":placement_sha256,
+        "source_artifact_id":source_artifact_id, "source_ticket_id":source_ticket_id,
+        "source_assignment_digest":source_assignment_digest,
+        "placement_grant_id":place_grant_id, "placement_grant_digest":placement_grant["digest"],
+        "node_id":node_id, "project_id":project_id, "worker_id":worker_id,
+        "installation_id":installation_id
+    }))
 }
 async fn cancel(
     AppState(state): AppState<Arc<State>>,

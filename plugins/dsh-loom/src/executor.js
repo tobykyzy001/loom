@@ -117,7 +117,8 @@ export class ControlledFileExecutor {
     await writeFile(location, content, { mode: 0o600, flag: 'wx' })
     const metadata = { name: `${assignment.kind}-${artifactId}.json`, media_type: mediaType, size_bytes: content.length,
       sha256: createHash('sha256').update(content).digest('hex'), origin_node_id: assignment.node_id }
-    const effect = { effect_id: effectId, status: finalStatus(readOnly), evidence }
+    const effect = { effect_id: effectId, status: finalStatus(readOnly),
+      input_digest: evidence.input_digest, artifacts: [artifactId], evidence }
     await writeJsonAtomic(join(this.artifactDir, `${effectId}.effect.json`), { ...evidence, status: 'confirmed', read_only: readOnly })
     return { state: 'succeeded', summary: `${assignment.kind} completed without calling a model.`,
       artifact: { artifact_id: artifactId, metadata, bytes: content }, effect }

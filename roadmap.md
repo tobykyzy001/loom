@@ -63,6 +63,7 @@
 先证明这条链路，再扩展项目索引、设备感知和多机调度。
 
 M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 项针对缺失/陈旧/忙碌/未知/拒绝/权限隔离的测试，另有执行时 busy/offline/unknown 分支。`crates/concierge/src/inventory_probe.rs` 仅执行受限 canonical root、只读解析和显式 opt-in 的 `uname/system_profiler` 查询，未宣称真实 GPU/模型/图片能力。PlacementDecision 仅解释已绑定 Grant 的可用性，不另发证。接口和平台验证范围见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
+- **M3 的局部增量（`loom.model-binding.v1`）**：已在同一隔离 DSH Worker真实证明 `model_descriptor`读取原文字节及来源 Assignment → 注册 → `place_model`当前的独立批准 → **另外一笔** `invoke_text` Grant → 调用精确的`loom-stub/loom-stub-v1` SDK并产生真实文本Artifact和Session。两次中心/Worker授权验证和 fresh SDK目录source都严格，不能拿name/catalog model flag/revoked或retired source当新执行权。实际driver为[tests/harness/real-model-binding.mjs](tests/harness/real-model-binding.mjs)。没有general Provider Registry、任意模型选择/权重/下载/注册/激活/生成或第二物理机生命周期；v10只保留原始来源Assignment/digest以连接这一有限证据链，不改变其它Skill、Artifact、`invoke_text`和数据原权限。仍仅受限的一个fixture与单机单worker，未把用户首版skip的1+3 Compose测试伪称完成。
 
 `ticket.status` 额外包含 `cancel_requested` 过渡态：停止意图已持久但尚未证实取消或完成对账，不能被 UI 当成最终取消。Task unknown/reconciling 不会被盲目重试。
 

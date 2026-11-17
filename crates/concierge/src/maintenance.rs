@@ -104,7 +104,7 @@ pub fn create_ticket(
     preferred: Option<&str>,
     worker: Option<&str>,
     capability: Option<&str>,
-    model_resource: Option<(&str, &str)>,
+    model_resource: Option<(&str, &str, Option<Value>)>,
 ) -> Result<Value> {
     let node_id = matching_physical_node(
         store,
@@ -113,16 +113,34 @@ pub fn create_ticket(
         &store.get("grants", grant_id)?.context("Grant not found")?,
         worker.unwrap_or("default"),
     )?;
-    let model_content = model_resource.map(|(provider, model)| {
-        json!({"schema":"loom.model-text.v1","objective":objective,"provider":provider,"model":model}).to_string()
-    });
+    let model_content = if let Some((provider, model, ref binding)) = model_resource {
+        let binding = binding.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("A registered model binding is mandatory for model_text")
+        })?;
+        Some(json!({"schema":"loom.model-text.v1","objective":objective,"provider":provider,"model":model,"model_binding":binding}).to_string())
+    } else {
+        None
+    };
+    if kind == "model_text" {
+        let request: Value = serde_json::from_str(model_content.as_deref().unwrap_or_default())?;
+        if request["model_binding"]
+            != model_resource
+                .as_ref()
+                .map_or(Value::Null, |(_, _, binding)| {
+                    binding.clone().unwrap_or(Value::Null)
+                })
+            || !request["model_binding"].is_object()
+        {
+            bail!("A registered immutable model binding is mandatory for model_text");
+        }
+    }
     let content = model_content.as_deref().or(content);
     if (kind == "model_text") != model_resource.is_some() {
         bail!(
             "Each text-model Ticket must have its explicit resource and no other kind may carry it"
         );
     }
-    if let Some((provider, model)) = model_resource {
+    if let Some((provider, model, _)) = model_resource {
         if (provider, model) != ("loom-stub", "loom-stub-v1") {
             bail!("Only the explicitly observed text fixture is supported in this boundary");
         }
@@ -234,6 +252,10 @@ pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>
             }
             assignment["provider"] = input["provider"].clone();
             assignment["model"] = input["model"].clone();
+            assignment["model_binding"] = input["model_binding"].clone();
+            if !assignment["model_binding"].is_object() {
+                bail!("A registered model binding is required for every text-model Assignment");
+            }
         }
         assignment["grant"] = json!(store
             .query(
@@ -244,6 +266,22 @@ pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>
             .next());
         assignment["grant_version"] = assignment["grant"]["version"].clone();
         assignment["grant_digest"] = assignment["grant"]["digest"].clone();
+        assignment["grants"] = json!([assignment["grant"]]);
+        if assignment["kind"] == "model_text" {
+            let verified = crate::model_registry::bound_for_invocation(store, &assignment)?;
+            if verified["placement_auditable"] != true {
+                bail!("The invocation did not produce an auditable current placement binding");
+            }
+            let place_grant = store
+                .get(
+                    "grants",
+                    assignment["model_binding"]["placement_grant_id"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )?
+                .ok_or_else(|| anyhow::anyhow!("The current placement Grant is absent"))?;
+            assignment["grants"] = json!([assignment["grant"], place_grant]);
+        }
         let binding = store.query(
             "SELECT root_scope,project_id,node_id,installation_id,worker_id FROM project_bindings WHERE id=?1 AND revoked_at IS NULL",
             [assignment["grant"]["project_binding_id"].as_str().unwrap_or_default()],

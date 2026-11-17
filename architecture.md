@@ -282,6 +282,18 @@ schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail�
 
 Schema v9仅在旧models/model_placements上增加null-permitting source和授权身份列，并新增`model_placement_authorizations`。已有v3/v6/v7/v8的Ticket/Grant/Artifact/audit不改写，legacy模型行缺证据也不补造。registry model永远`registered`而非installed/active，retire只标记`retired`保留Artifact/Grant/history。`place_model`是独立Grant operation，不含read/write/invoke_text插入。`POST /models/:id/placement-approvals`强制当前place_model Grant、digest、真实Node/Installation/Worker与相同ProjectBinding；重复相同范围幂等，其它Grant或修改hash拒绝。`/place`只在已有approval下记录“approved_for_placement（未运行）”，同一model+grant+binding返回旧receipt不重复写audit；它不创建Ticket/Assignment/Effect或模型执行。撤销Grant、retire后current是false，任何旧审批仍不可重新授权。没有runtime加载、模型质量、下载、激活、Provider切换、图片生成或自动Placement claim。实际文件生成、独有bytes SHA、负例、独立Grant与retire/reopen见[tests/models/README.md](tests/models/README.md)。
 
+### 3.6.3 本地来源绑定与独立的实际文本适配器调用
+
+SQLite v10额外保留**可选的原始源 Assignment** `source_assignment_id` 和 `assignment_digest`（DTO名 `source_assignment_digest`）。它们关联真实 descriptor-read Assignment 与其**逻辑输入规范**：实际Assignment ID、`model_descriptor`、`model.json`及其无正文（由持久化`NULL content`表达）的紧凑 SHA。它不是描述文件原byte SHA、Proof Artifact SHA、后续`model_text` Assignment digest或模型权重。旧v8/v9记录只能保留其现有元数据，不能补造来源Assignment证据。真实完成Effect中的`input_digest`与该Assignment字段必须一致佐证，不能再只把hash藏在`effect.evidence`而上传空的顶层字段；对应的Immutable Artifact UUID也在Effect中保留。
+
+新增新票时的`model_id + placement_id`只允许选取已注册来源。中心从实际store组装 `loom.model-binding.v1`（**不从接手body复制引来Key/token/root**），必须有对应sourceTicket/Artifact、注册SHA、精确源Assignment digest及当前**另一个**`place_model` Grant/批准/放置票据。`POST /tickets kind=model_text` 现在还需要**单独的** `invoke_text` Grant：目录/profile能力不能充当这两个权限，place授权也不能自动转义为 invocation。
+
+在每个Node poll发放这新任务时，controller重新查阅：`bound_for_invocation`核对当前Model registered/status/immutable source Ticket+Artifact、原Assignment一致性、精确Node/Installation/Worker/ProjectBinding、当前place Grant/批准与SHA；还要求**本认证Worker最新**严格 `loom-stub-v1/loom-stub` 适配器观察，`prepared_call_observed`、text-only、fresh、`generation_observed:false`、`permission_granted:false`等严格条件。任何retire、撤权、过期、缺失、错误Worker/来源或缺Scope均拒绝发放。不会由Model Registry GET或heartbeat中的flag重新探测、下载、激活模型或生成额外Ticket/Grant。
+
+DSH host也会在 **每次实际 SDK prepare/stream前** 再审同样的13个固定binding字段、两项不相同currentGrant及当前scope/digest；必须确认当前immutable request/binding及没有`artifact_input`升格。Poll中给`assignment.grant`增加ProjectBinding的派生`project_root`时，只有精确的当前`resource.root_scope`才接受这个非持久附加字段；其它真实Grant事实（身份、operations、scope、digest/version/revoked/binding）仍逐条对比，绝不因一个project_root或all-shape差异而忽略伪造Grant。
+
+本小步已由 `tests/harness/real-model-binding.mjs` 的真正同源worker读取源→注册→place→独立invoke→实际SDK→新Artifact/Session通过；`real-model-text.mjs --browser` 以同样前置raw-source/place许可旧路径完成且读取已发生于前次任务的授权历史回调。源Descriptor读取并不产生模型Agent会话，另一次调用才有此次Assignment、`request`和文本Artifact。它**只支持固定的fixture-local-text/v1描述和loom-stub适配器绑定**，不是生产模型注册/安装器、通用Provider连接器、任意模型权重/activate/invocation、图像生成或跨物理机模型生命周期；Raw Grant/CredentialStore/current Profile 未使用，也未下载任何真实模型。可验证脚本与边界见[tests/harness/MODEL_BINDING.md](tests/harness/MODEL_BINDING.md)。
+
 ### 3.7 受限技能候选与具体重放证明
 
 当前 `SkillCandidate` 与 `Memory` 不共用验收语义。只有**已真实执行过的一个确定性 `read_summary` 样本**可用于当前受限技能重放，不支持任意命令、脚本、HTTP connector、模型学成的通用技能或代理执行。`source_refs` 必须实际含该 source ticket，候选 project、原 Node/Installation/Worker、Grant digest/version、ProjectBinding及其声明 Root都要对应。
