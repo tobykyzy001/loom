@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 11 {
+        if current > 12 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 11)"
+                "database schema is from a newer Loom release (found {current}, supported 12)"
             )
         }
         if current == 0 {
@@ -245,6 +245,69 @@ impl Store {
                 created_at TEXT NOT NULL
             ); PRAGMA user_version=11",
             )?;
+        }
+        if current < 12 {
+            let tx = self.connection.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS source_instances(
+                    id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, source_key TEXT NOT NULL,
+                    kind TEXT NOT NULL, label TEXT, definition_digest TEXT NOT NULL,
+                    last_sequence INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(owner_key,source_key)
+                );
+                CREATE TABLE IF NOT EXISTS source_threads(
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES source_instances(id),
+                    client_thread_id TEXT NOT NULL, last_sequence INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(source_id,client_thread_id)
+                );
+                CREATE TABLE IF NOT EXISTS source_events(
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES source_instances(id),
+                    thread_id TEXT NOT NULL REFERENCES source_threads(id),
+                    external_event_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    content TEXT NOT NULL, payload_digest TEXT NOT NULL,
+                    ticket_id TEXT REFERENCES tickets(id), occurred_at TEXT, received_at TEXT NOT NULL,
+                    source_sequence INTEGER NOT NULL, thread_sequence INTEGER NOT NULL,
+                    UNIQUE(source_id,external_event_id),
+                    UNIQUE(source_id,source_sequence),
+                    UNIQUE(thread_id,thread_sequence)
+                );
+                CREATE INDEX IF NOT EXISTS source_events_thread_order ON source_events(thread_id,source_sequence);
+                CREATE TABLE IF NOT EXISTS source_event_cursors(
+                    id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+                    source_id TEXT NOT NULL REFERENCES source_instances(id),
+                    thread_id TEXT NOT NULL REFERENCES source_threads(id),
+                    after_sequence INTEGER NOT NULL, schema TEXT NOT NULL, created_at TEXT NOT NULL
+                );",
+            )?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS messages(
+                    id TEXT PRIMARY KEY,ticket_id TEXT,sender TEXT NOT NULL,recipient TEXT,kind TEXT NOT NULL,
+                    content TEXT NOT NULL,session_ref TEXT,visibility TEXT NOT NULL,created_at TEXT NOT NULL,
+                    request_id TEXT,source_event_id TEXT REFERENCES source_events(id),
+                    UNIQUE(ticket_id,request_id)
+                );",
+            )?;
+            let messages_present: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+                [],
+                |row| row.get(0),
+            )?;
+            let column_count: i64 = if messages_present == 1 {
+                tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='source_event_id'",
+                    [],
+                    |r| r.get(0),
+                )?
+            } else {
+                1
+            };
+            if messages_present == 1 && column_count == 0 {
+                tx.execute("ALTER TABLE messages ADD COLUMN source_event_id TEXT REFERENCES source_events(id)", [])?;
+            }
+            tx.execute("PRAGMA user_version=12", [])?;
+            tx.commit()?;
         }
         Ok(())
     }
@@ -533,7 +596,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let models = store
             .query(
                 "SELECT id,assignment_digest,source_assignment_id FROM models",
@@ -591,7 +654,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);

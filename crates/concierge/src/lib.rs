@@ -15,6 +15,7 @@ mod node_api;
 mod observation_input;
 pub mod pipeline;
 mod skill_replay;
+pub mod source_events;
 pub(crate) mod store;
 
 use anyhow::{bail, Result};
@@ -579,7 +580,7 @@ mod skill_replay_regressions {
     }
 
     #[test]
-    fn real_v6_snapshot_migrates_to_v11_without_rewriting_grant_artifact_or_audit() {
+    fn real_v6_snapshot_migrates_to_v12_without_rewriting_grant_artifact_or_audit() {
         let directory = tempfile::tempdir().unwrap();
         let db = rusqlite::Connection::open(directory.path().join("loom.sqlite3")).unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON;
@@ -603,7 +604,7 @@ mod skill_replay_regressions {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         assert!(store
             .query("SELECT * FROM skill_replays", [])
             .unwrap()

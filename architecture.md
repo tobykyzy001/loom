@@ -209,6 +209,22 @@ Host Agent
 本地硬件查看是一种显式、只读的 Controller Probe：只在进程选择 `LOOM_ENABLE_LOCAL_HARDWARE_PROBE=1` 时启用，固定使用当前OS自带命令及白名单参数（macOS 使用 `/usr/sbin/system_profiler` 和 `SPDisplaysDataType`，或同时读取 Hardware与Displays）。固定子进程超时、stdout/stderr上限和pipe结束上限均有处置；超时、超限、启动失败或无法解释的输出形成稳定error/unknown，绝不直接当成“此设备没有这个模型或 GPU”。不会保留原始报告、stderr、用户名、路径、serial/device UUID、bus或display详情。真实当前OS上的硬件来源标为 `controller_probed / local_only`；未验证 fixture 和 host-report不能冒充该来源。GPU/Metal只是一类设备事实，**没有**自动激活 Model Registry、图片生成Grant或其它主机的能力；模型未探测保持 unknown。
 
 
+### 3.1.1 受认证 SourceInstance、Thread 与 Trigger（当前受限入口）
+
+当前 `POST /sources` 接收 `loom.source-instance.v1` 的 `web` Source登记（并非Connection quality 或任意 I/O Adapter），`POST /source-events` 接收 `loom.source-event.v1` 的 `user_message`。owner 由已认证客户端决定，输入的 owner/role/Grant/policy 字段一律拒绝。Source 按 `(owner_key,source_key)` 幂等；Thread 按 `(source_id,client_thread_id)` 隔离，其内部thread_uuid与对外 `client_thread_id` 分开保存/返回，跨Source同名线程并不等同。
+
+每个 trigger 在 `source_events` 中以 `(source_id,external_event_id)` 保留原身份。typed DTO先验证字段、bounded text、kind 'user_message'、可选实际Ticket引用及严格RFC3339时间，再用规范化语义生成payload digest。内容原样保留，候选时间统一成UTC但**不决定**权威次序。服务器在同事务内建立Thread、写入event 以及这一条新消息、分配source/thread sequence和接收时间，用户不能通过cursor、received_at或priority字段伪造这些事实。再次输入相同语义返回原Trigger/digest/sequence 与 `duplicate:true`；相同key不同正文、Ticket、时间或Thread绑定返回409，不覆盖原始事件。Source和Trigger重复不会放大消息。约束错误不能一律 fallback 成重复成功，而是读真实已提交的原件重新对比digest。
+
+可选 `ticket_id` 只建立到既有真实Task的关联，**不创建Ticket/Assignment/Grant/Agent/Artifact**，也不修改该Ticket状态。`task_created:false` 与 `permission_granted:false` 是接口层面与实际语言都保留的区别，并非自动意图处理或任务收款。 全局messages在这个入口的source_event_id 只是接收关系，而不是远程DSH Session的log，不将Reception 冒充为Execution或用户已经阅读。
+
+`GET /sources` 采用 `loom.source-list.v1` 的bounded稳定ID分页：默认50、最多100。next_cursor源自真实末条source，首次就在这owner中校验通过才可继续使用；has_more和缺cursor 的失败都吻合当前namespace的表现，不返回unbounded source catalog。
+
+`GET /source-events` 必须限定明确Source和exact thread，最大200条，按source server sequence keyset分页，不按调用方的发生时间/本机壁钟排序。无cursor时需要`source_id + client_thread_id`。`loom.source-page.v1` cursor为server侧持久 `source_event_cursors`，绑定 owner、source thread、schema与offset，复制到其他Source/Thread或owner未匹配一律拒绝；获取后只使用cursor与limit，不通过重写filter删除它的实际边界。没匹配unknown thread、wildcard或不合法limit 时不会退化为 full transcript。
+
+SQLite schema 12新增 `source_instances`、`source_threads`、`source_events` 和 cursor表，以及 nullable `messages.source_event_id`。旧message保持NULL与旧幂等行为，不回填假Source。早期snapshot没有messages table时，增量迁移会**只创建符合既有消息结构、带nullable source_event_id的空表**（不是伪造历史message），从而让后续Source intake可实际接收。已有表保留原数据，只在检查column缺失后补齐。实际populated v11升级后应能再打开v12，未来未知schema仍拒绝。这里不往DSH Session里插入新的私录事件，不产生所有Harness版本都必须懂的额外字段承诺。
+
+这一基础层只确保来源身份、幂等、顺序和恢复，不承诺自动任务解释权/自动审批、真实IM/OAuth、多租户或跨进程共享锁。以后若要把来源事件转成授予Task，应携事实上的`source_event_id` 和用户显式 task_spec，重新执行完整 Ticket/worker/root/Grant 授权与原子幂等。当前契约与验证入口见 [tests/sources/README.md](tests/sources/README.md)。
+
 ### 3.2 当前受限文档工作流的授权与恢复约束
 
 控制器目前支持一种受限、版本化的两阶段 Document Workflow，而不是通用的行业 Pipeline 或任意 `Command` Graph。它复用现有 Host ProjectBinding 和已授权的 Ticket 与 Lease：

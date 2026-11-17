@@ -788,6 +788,11 @@ fn admin_routes(_state: Arc<State>) -> Router<Arc<State>> {
         .route("/memories", get(memories).post(create_memory))
         .route("/memories/{id}", patch(edit_memory).delete(delete_memory))
         .route("/messages", get(messages).post(message))
+        .route("/sources", get(list_sources).post(register_source))
+        .route(
+            "/source-events",
+            get(read_source_events).post(receive_source_event),
+        )
         .route("/audit", get(audit))
         .route("/audit/verify", get(verify_audit))
         .route("/candidates", get(candidates).post(create_candidate))
@@ -3136,6 +3141,69 @@ async fn message(
         json!({"id":id,"recorded":true,"permission_granted":false}),
     ))
 }
+async fn register_source(
+    AppState(state): AppState<Arc<State>>,
+    request: Result<
+        Json<crate::source_events::RegisterSource>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<Value>> {
+    let request = request
+        .map_err(|_| {
+            ApiError::bad("Invalid source registration schema, unknown fields or value types")
+        })?
+        .0;
+    let mut store = state.lock()?;
+    Ok(Json(crate::source_events::register(&mut store, request)?))
+}
+async fn list_sources(
+    AppState(state): AppState<Arc<State>>,
+    query: Result<
+        axum::extract::Query<crate::source_events::SourceListQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> ApiResult<Json<Value>> {
+    let query = query
+        .map_err(|_| {
+            ApiError::bad("Source listing cursor and page-size parameters must be valid and known")
+        })?
+        .0;
+    let store = state.lock()?;
+    Ok(Json(crate::source_events::list(&store, query)?))
+}
+async fn receive_source_event(
+    AppState(state): AppState<Arc<State>>,
+    request: Result<
+        Json<crate::source_events::AppendEvent>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> ApiResult<Json<Value>> {
+    let request = request
+        .map_err(|_| {
+            ApiError::bad(
+                "Invalid Source event schema, duplicate keys, unknown fields or value types",
+            )
+        })?
+        .0;
+    let mut store = state.lock()?;
+    Ok(Json(crate::source_events::ingest(&mut store, request)?))
+}
+async fn read_source_events(
+    AppState(state): AppState<Arc<State>>,
+    query: Result<
+        axum::extract::Query<crate::source_events::PreviewQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> ApiResult<Json<Value>> {
+    let query = query
+        .map_err(|_| {
+            ApiError::bad("Source preview requires known cursor/filter fields with valid types")
+        })?
+        .0;
+    let mut store = state.lock()?;
+    Ok(Json(crate::source_events::preview(&mut store, query)?))
+}
+
 async fn audit(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Query(query): axum::extract::Query<PreferenceQuery>,
