@@ -29,24 +29,36 @@ export class LocalNodeRunner {
     this.activeAssignments = new Map()
     this.capabilities = CAPABILITIES
   }
-  async start({ enrollmentCode } = {}) {
+  async start({ enrollmentCode, signal } = {}) {
+    const stopped = () => {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Loom node startup aborted')
+    }
+    stopped()
+    const enrolled = enrollmentCode || await NodeIdentity.readEnrollment(this.options.stateDir)
+    stopped()
+    if (!enrolled && !enrollmentCode) throw new Error('Persistent node token is missing; an explicit enrollment code is required')
     this.identity = await NodeIdentity.open(this.options.stateDir)
+    stopped()
     this.state = await NodeState.open(this.options.stateDir)
+    stopped()
     this.http = new LoomHttpClient({ baseUrl: this.options.baseUrl, fetch: this.options.fetch, timeoutMs: this.options.requestTimeoutMs })
     this.client = new LoomNodeClient({ http: this.http, identity: this.identity, state: this.state })
     this.executor = new ControlledFileExecutor({ artifactDir: this.options.artifactDir })
     if (enrollmentCode || !this.identity.token) {
       if (!enrollmentCode) throw new Error('Persistent node token is missing; an explicit enrollment code is required')
-      await this.client.enroll({ enrollmentCode, capabilities: wireCapabilities(this.capabilities), workerId: 'default', harnessKind: 'dsh-host', profileId: this.options.registration?.profile_id || 'isolated', ...this.options.registration })
+      stopped()
+      await this.client.enroll({ enrollmentCode, capabilities: wireCapabilities(this.capabilities), workerId: 'default', harnessKind: 'dsh-host', profileId: this.options.registration?.profile_id || 'isolated', ...this.options.registration, signal })
+      stopped()
     }
-    await this.client.heartbeat({ capabilities: wireCapabilities(this.capabilities), ...this.registrationFacts() })
+    await this.client.heartbeat({ capabilities: wireCapabilities(this.capabilities), ...this.registrationFacts(), signal })
+    stopped()
     return this.identity.public
   }
   /** New coordinator caller; no server-to-node transport or local HTTP listener is needed. */
-  static async create({ stateDir, artifactDir, baseUrl, enrollmentCode, registration, requestTimeoutMs } = {}) {
+  static async create({ stateDir, artifactDir, baseUrl, enrollmentCode, registration, requestTimeoutMs, signal, fetch } = {}) {
     const runner = new LocalNodeRunner({ stateDir: requireIsolatedRoot(stateDir), artifactDir: resolve(artifactDir),
-      baseUrl, registration, requestTimeoutMs })
-    await runner.start({ enrollmentCode })
+      baseUrl, registration, requestTimeoutMs, fetch })
+    await runner.start({ enrollmentCode, signal })
     return runner
   }
   registrationFacts(capabilities = this.capabilities) {

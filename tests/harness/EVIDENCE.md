@@ -94,6 +94,14 @@ Enrollment code 仅 child environment 传输；重启没有新 code，使用真�
 
 严格保存 failed candidates 的原始原因：当首版错误对当前poll整张view做canonical比较时，实际取消使用 lease窗口变化及当前状态投影，停止发生之前就会被拒绝。已依据真实Host纠错，而非把校验删掉或者生成假的"未知effect"报告。还存在两处易判错的量具：第一层计数 spy 外又包等待用的spy会重复点算，Artifact序列化 container hash 不等于目标文件hash；均已单独修正，不把相同工具调用解释为两次工具副作用。
 
+## 启动取消与已注册凭据的恢复
+
+公共和vendored startup均已验证：预检检查已有身份，存在损坏身份不会因少token变成fresh key或重新授权，显式中止不创建额外identity；每阶段已知取消后不继续register/heartbeat/poll。真正注册之后但若已保存token，取消不擦除该事实。两个owned真实Rust中央各接受一个签名可验证节点注册，取消后直接查询该Node仍存在，重启同一Node/Installation并由中心heartbeat变为online；这不等于撤销、unregister或新的Grant。
+
+可选startup AbortSignal贯穿 `LocalNodeRunner.start/create`、Coordinator `createClient`及`runLocalDshPlugin`的显式生命周期参数。普通插件activate不带signal仍保持原有路径，Zodconfig不含AbortSignal，未宣称Cordis全部启动effect 能来自未知API自动停止。catalog等待使用既有5秒超时，在自有约5003ms观测中将超时的expiry状态和后续caller abort区分，取消不启动Coordinator。 underlying SDK pending operation 不称已被取消或回滚。
+
+完整场景入口[`tests/runner/startup-cancellation.mjs`](../runner/startup-cancellation.mjs)，覆盖各自owned NodeIdentity/NodeState、分阶段中断、空/错身份、注册过程取消、token已持久取消、工厂布点、固定deadline与同Node重连。不改变正在执行的tool effect、SDK会话、中心Schema/Grant/Lease。此前的真实DSH安装/工作/文件效果/cancel确认/resume和全部单元仍分别执行验证，而不是采用启动小探测代替整个生命周期。
+
 ## HTTP流式读取与可挂断输入专项
 
 [`tests/runner/http-stream.mjs`](../runner/http-stream.mjs) 与 [`tests/runner/http-socket-stream.mjs`](../runner/http-socket-stream.mjs) 在一主一副的真实 `LoomHttpClient` 上分别执行，不散布于桌面Profile、全局Agent或真实用户凭据。主/vendored helper现已逐字一致，原Node 22/插件55个单测及实际SDK、模型、凭据、文件效应、replay 回归均分别通过。

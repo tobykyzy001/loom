@@ -44,6 +44,20 @@ node tests/runner/http-socket-stream.mjs
 
 这些测试不证明远端有序取消得到保证，也不证明对所有上游都有绝对最大分配或停机保证、物理远程、TLS、多 Host 或 Live LLM。真实 Agent 调用、取消和恢复、receipt replay 与固定 SDK 模型测试仍分别实测，不由本地 synthetic socket 证明替代。
 
+## 节点启动中止与凭据恢复
+
+```sh
+node tests/runner/startup-cancellation.mjs
+```
+
+- 两层 `LocalNodeRunner.start/create` 将可选 `AbortSignal` 延续至既有 enroll 和首次 heartbeat。主包的 `create` 还补齐 `fetch` 传递；vendored 的创建路径同样保留自身 profile/timeout 注入，不能因 mock 未透传而不慎回落到全局 fetch。
+- `NodeIdentity.readEnrollment` 在读取已持久 token 前，共用于原 `open` 的 public hash/PKCS#8 验证；损坏的身份不再简化为“缺少enrollment code”。如果本就不存在身份或已预先取消，启动不会擅自生成新私钥/身份文件。中途观察到取消后，阻止后续 state、注册、heartbeat 和 Coordinator；已经开始的原子文件写入不能被假装回滚。
+- 真正的注册token若已被中心接受并保存，取消只中止尚未进行的后续启动，不删除或冒称撤销该事实。原生 test 在实际 `setToken` 保存之后取消；在两个 owned Rust Concierge 上都查到其真实注册，重新启动使用相同的 Node/Installation 与凭据并成为在线 Node，不新增注册或工作。
+- vendored `createClient` 和 `runLocalDshPlugin` 的**可选 lifecycle 参数**仅用于显式 caller 的启动中止。pending model catalog 不必须支持底层取消；等待可结束但不得继续启动轮询，且真正五个第二超时仍是对应的 observation-expiry，不对任意错误统一贴取消标签。非正在启动的现成 Coordinator 仍通过 `loop.dispose()`。
+- 该可选 signal **没有**塞入配置 schema，也不伪造 DSH `ctx.effect` 的全局取消契约。完整 DS Host 的常规 install、worker task/cancel/resume仍由 [real-lifecycle 入口](../harness/real-lifecycle.mjs)独立验证。无新 Grant、Artifact、Report或主管端“注册撤销”被发明。
+
+此专项还覆盖预检/identity/state 的真实中点等待，以及 timeout和后续caller stop的区分。多次计时误导（漏传signal/fetch、raw public key缺 SPKI包装、5秒未ref定时器退出）均作为量具问题修正，不以撤销断言或删除负例试出PASS；只由自然退出与每个实际的中央响应/保存形态认证证据。
+
 ## 实际 Rust 中心的丢失响应回放
 
 ```sh

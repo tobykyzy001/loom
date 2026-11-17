@@ -588,6 +588,7 @@ Install Plugin / Bare Agent
 - 同一 immutable Report/Artifact 的逻辑内容决定其 64-hex `request_id` 和 logical digest；精确回放保留原 receipt，任何实质 body/byte/metadata 改变都不得冒充相同请求。此规则仍受 node/route/中央持久 receipt 精确 byte payload 校验；不是到其它主机或协议的 exactly-once 承诺。Detail 与运行边界见 [tests/runner/README.md](tests/runner/README.md)。
 - **HTTP response reader 只接收受限 JSON bytes**：公共/vendored `LoomHttpClient` 在标准 Web Stream 可用时按实际 chunk bytes 限额并累计，超过配置 capping 便 cancel 对应 reader；不把 `Content-Length` 当安全保证。旧 `arrayBuffer` 仅用于明确没有 stream 的兼容响应，不能据此宣称预分配上限对所有数据都成立。
 - reader.read 具有与同一总量超时/取消 controller 的竞争。caller stop 的原因最优先；单次失败只能尝试一次该 reader 的 cancel，不能把 reader 的失败时间选择变成任务结果、Grant 状态或 Effect。不会因 cleanup Promise 悬空再永久挂住请求。零字节 chunk 仍让出事件循环，保持总 timeout 可结算；正文只在受限合并后解码。未获完整 JSON 的 Assignment 不能进入 Node 的正式任务流程。原生 TCP socket 的取消仅是当前连接的处置，并非已取消或回滚 server-side Effect。明细见 [tests/runner/README.md](tests/runner/README.md)。
+- **节点启动可由持有 Signal 的显式 caller 中止**：预检与已保存身份保持只读验证；已取消后不再发起下一阶段的 registration、heartbeat 或 poll。既经接受并保存的注册token是可重开事实，不等于撤销，也不能把started/present当成ready或新的Grant。可选启动signal独立于runtime Coordinator的dispose，不把Cordis effect幻想成自动可取消。
 - 同一 DSH 的多个 Profile / Agent 可以作为独立 Worker / Tenant 命名空间。Profile 的隔离级别要如实声明，不能把安装在同一 DSH 实例的公司 / 个人工作身份混为同一 Worker。
 - 中心保留 Ticket、Grant、Lease、调度和恢复权威；插件可保留本地 Effect Ledger、会话日志和必要缓存，但不成为独立跨机任务权威。
 

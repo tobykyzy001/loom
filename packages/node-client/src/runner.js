@@ -18,26 +18,38 @@ export class LocalNodeRunner {
     this.activeAssignments = new Map()
     this.capabilities = CAPABILITIES
   }
-  async start({ enrollmentCode } = {}) {
+  async start({ enrollmentCode, signal } = {}) {
+    const stopped = () => {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Loom node startup aborted')
+    }
+    stopped()
+    const enrolled = enrollmentCode || await NodeIdentity.readEnrollment(this.options.stateDir)
+    stopped()
+    if (!enrolled && !enrollmentCode) throw new Error('Persistent node token is missing; an explicit enrollment code is required')
     this.identity = await NodeIdentity.open(this.options.stateDir)
+    stopped()
     this.state = await NodeState.open(this.options.stateDir)
+    stopped()
     this.http = new LoomHttpClient({ baseUrl: this.options.baseUrl, fetch: this.options.fetch })
     this.client = new LoomNodeClient({ http: this.http, identity: this.identity, state: this.state })
     this.executor = this.options.executor || new ControlledFileExecutor({ artifactDir: this.options.artifactDir, projectRoots: this.options.projectRoots })
     if (enrollmentCode || !this.identity.token) {
       if (!enrollmentCode) throw new Error('Persistent node token is missing; an explicit enrollment code is required')
-      await this.client.enroll({ enrollmentCode, capabilities: this.capabilities, ...this.options.registration })
+      stopped()
+      await this.client.enroll({ enrollmentCode, capabilities: this.capabilities, ...this.options.registration, signal })
+      stopped()
     }
     await this.client.heartbeat({ capabilities: this.capabilities,
       workers: [{ worker_id: this.options.registration?.workerId || 'default' }],
-      inventory: { project_roots: this.options.projectRoots || {}, source: 'explicit_local_node_configuration' } })
+      inventory: { project_roots: this.options.projectRoots || {}, source: 'explicit_local_node_configuration' }, signal })
+    stopped()
     return this.identity.public
   }
   /** New coordinator caller; no server-to-node transport or local HTTP listener is needed. */
-  static async create({ stateDir, artifactDir, baseUrl, enrollmentCode, registration, projectRoots } = {}) {
+  static async create({ stateDir, artifactDir, baseUrl, enrollmentCode, registration, projectRoots, signal, fetch } = {}) {
     const runner = new LocalNodeRunner({ stateDir: requireIsolatedRoot(stateDir), artifactDir: resolve(artifactDir),
-      baseUrl, registration, projectRoots })
-    await runner.start({ enrollmentCode })
+      baseUrl, registration, projectRoots, fetch })
+    await runner.start({ enrollmentCode, signal })
     return runner
   }
   get nodeId() { return this.identity.nodeId }

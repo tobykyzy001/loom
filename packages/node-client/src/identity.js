@@ -3,8 +3,23 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { assertObject, id, readJson, sha256, writeJsonAtomic } from './util.js'
 
+function validate(data) {
+  if (data.version !== 1 || !/^[a-f0-9]{64}$/.test(data.node_id) || data.node_id !== sha256(Buffer.from(data.public_key, 'base64url'))) {
+    throw new Error('Persistent node identity is invalid')
+  }
+  const privateKey = Buffer.from(data.private_key_pkcs8, 'base64url')
+  if (privateKey.length !== 48) throw new Error('Persistent node private key is invalid')
+}
+
 /** Creates a node-specific identity; private key stays in the isolated state directory. */
 export class NodeIdentity {
+  /** A registration preflight need not create a private key or an identity file. Read the state directory read-only. */
+  static async readEnrollment(stateDir) {
+    const data = await readJson(join(stateDir, 'identity.json'))
+    if (!data) return false
+    validate(data)
+    return typeof data.token === 'string' && data.token.trim() ? data.token : false
+  }
   static async open(stateDir) {
     const file = join(stateDir, 'identity.json')
     let data = await readJson(file)
@@ -15,11 +30,7 @@ export class NodeIdentity {
         private_key_pkcs8: privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64url') }
       await writeJsonAtomic(file, data)
     }
-    if (data.version !== 1 || !/^[a-f0-9]{64}$/.test(data.node_id) || data.node_id !== sha256(Buffer.from(data.public_key, 'base64url'))) {
-      throw new Error('Persistent node identity is invalid')
-    }
-    const privateKey = Buffer.from(data.private_key_pkcs8, 'base64url')
-    if (privateKey.length !== 48) throw new Error('Persistent node private key is invalid')
+    validate(data)
     return new NodeIdentity(file, data)
   }
   constructor(file, data) {

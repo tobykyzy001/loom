@@ -121,30 +121,47 @@ export class CoordinatorLoop {
     await this.executor.dispose?.()
   }
 }
-export async function createClient({ base_url: baseUrl, state_dir: stateDir, artifact_dir: artifactDir, baseUrl: legacyBaseUrl, stateDir: legacyStateDir, artifactDir: legacyArtifactDir, enrollment_code: enrollmentCode, enrollmentCode: legacyEnrollmentCode, fetch, registration, request_timeout_ms, project_roots: projectRoots, profile_id: profileId }) {
+export async function createClient({ base_url: baseUrl, state_dir: stateDir, artifact_dir: artifactDir, baseUrl: legacyBaseUrl, stateDir: legacyStateDir, artifactDir: legacyArtifactDir, enrollment_code: enrollmentCode, enrollmentCode: legacyEnrollmentCode, fetch, registration, request_timeout_ms, project_roots: projectRoots, profile_id: profileId }, { signal } = {}) {
   const runner = await LocalNodeRunner.create({ baseUrl: baseUrl || legacyBaseUrl, stateDir: resolve(stateDir || legacyStateDir), artifactDir: resolve(artifactDir || legacyArtifactDir),
-    enrollmentCode: enrollmentCode || legacyEnrollmentCode, fetch, registration: { profile_id: profileId, ...registration, project_roots: projectRoots }, requestTimeoutMs: request_timeout_ms })
+    enrollmentCode: enrollmentCode || legacyEnrollmentCode, fetch, registration: { profile_id: profileId, ...registration, project_roots: projectRoots }, requestTimeoutMs: request_timeout_ms, signal })
   return { runner, client: runner.client, capabilities: runner.capabilities }
 }
-export async function runLocalDshPlugin(config, dependency) {
-  const context = await (dependency.createClient || createClient)({ ...config, request_timeout_ms: config.request_timeout_ms ?? config.requestTimeoutMs })
+export async function runLocalDshPlugin(config, dependency, { signal } = {}) {
+  const stopped = () => {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Loom factory startup cancelled before Coordinator polling')
+  }
+  stopped()
+  const context = await (dependency.createClient || createClient)({ ...config, request_timeout_ms: config.request_timeout_ms ?? config.requestTimeoutMs }, { signal })
+  stopped()
   const local = dependency.localDispatcher(config, context.runner)
   const executor = dependency.executor || local
   // Exactly one bounded lookup per new executor before its first authenticated heartbeat.
-  await timeoutWithin(executor.initializeModelCatalog?.(), 5000, executor)
+  await timeoutWithin(executor.initializeModelCatalog?.(), 5000, executor, signal)
+  stopped()
   const loop = new CoordinatorLoop(config, executor, context.client)
   loop.capabilities = executor.capabilities || context.capabilities
   loop.start()
   return loop
 }
-async function timeoutWithin(promise, milliseconds, executor) {
+async function timeoutWithin(promise, milliseconds, executor, signal) {
   if (!promise) return
-  let timer
+  let timer, onAbort
+  const deadline = new Error('Model adapter observation timed out')
+  const observation = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(deadline), milliseconds)
+    timer.unref()
+    onAbort = () => reject(signal?.reason instanceof Error ? signal.reason : new Error('Loom factory startup cancelled while observing the catalog'))
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+  })
   try {
-    await Promise.race([promise, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Model adapter observation timed out')), milliseconds)
-      timer.unref()
-    })])
-  } catch { executor.modelCatalogLookupExpired?.() }
-  finally { clearTimeout(timer) }
+    await Promise.race([promise, observation])
+  } catch (error) {
+    if (error === deadline) executor.modelCatalogLookupExpired?.()
+    else if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error
+    else executor.modelCatalogLookupExpired?.()
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
+  }
 }
