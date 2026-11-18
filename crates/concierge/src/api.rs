@@ -399,40 +399,213 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn revoke_route_records_current_fence_and_audit() {
-        const TOKEN: &str = "test-client-token-123456789012345";
+    const REVOCATION_TOKEN: &str = "test-client-token-123456789012345";
+
+    fn revocation_test_state() -> (tempfile::TempDir, Arc<State>) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("owned-project");
         std::fs::create_dir(&root).unwrap();
         let store = crate::store::Store::open(directory.path().join("db")).unwrap();
         store
-            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .set_setting("client_token_hash", &crate::store::hash(REVOCATION_TOKEN))
             .unwrap();
-        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','owned',?1,'read_write',1,?2,'{}')", params![root.to_string_lossy(), crate::now()]).unwrap();
-        for statement in [
-            "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default','/owned-project','binding-proof','2026-01-01T00:00:00Z')",
-            "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"write\"]',1,'original-digest','2026-01-01T00:00:00Z','binding')",
-        ] { store.conn().execute_batch(statement).unwrap(); }
+        // These are coordinator admission fixture rows, not proof that a LocalNode,
+        // Agent, producer execution, Report, Artifact, or external Effect occurred.
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','owned',?1,'read_write',1,'2026-01-01T00:00:00Z','{}')", [root.to_string_lossy()]).unwrap();
+        store
+            .conn()
+            .execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,revoked_at,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','fixture-public-key','fixture-token-hash','registered',NULL,'{}','[]','{}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", [])
+            .unwrap();
+        store
+            .conn()
+            .execute("INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default',?1,'binding-proof','2026-01-01T00:00:00Z')", [root.to_string_lossy()])
+            .unwrap();
+        store.conn().execute_batch(
+            "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"write\"]',1,'original-digest','2026-01-01T00:00:00Z','binding');
+             INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('ticket','project','Bounded original work','edit_file','src/calc.js','original task input','running','grant','original-digest','node','installation','default',1,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,acknowledged_at,created_at,cancelled_at,last_report_at) VALUES('assignment','ticket','node','default',1,'lease',1,'2100-01-01T00:00:00+00:00',NULL,'2026-01-01T00:00:00Z',NULL,NULL);",
+        ).unwrap();
         let state = Arc::new(State {
             store: Arc::new(Mutex::new(store)),
-            bootstrap_token: TOKEN.into(),
+            bootstrap_token: REVOCATION_TOKEN.into(),
             bootstrap_token_written: false,
         });
+        (directory, state)
+    }
+
+    async fn response_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    fn revocation_audits(store: &crate::store::Store, action: &str) -> Vec<Value> {
+        store
+            .query("SELECT * FROM audits WHERE action=?1", [action])
+            .unwrap()
+    }
+
+    fn assert_node_revocation_history_unchanged(
+        store: &crate::store::Store,
+        expected: (Value, Value, Value, Value, Vec<Value>),
+    ) {
+        assert_eq!(
+            store.query("SELECT * FROM nodes", []).unwrap()[0],
+            expected.0
+        );
+        assert_eq!(
+            store.get("assignments", "assignment").unwrap().unwrap(),
+            expected.1
+        );
+        assert_eq!(store.get("grants", "grant").unwrap().unwrap(), expected.2);
+        assert_eq!(store.get("tickets", "ticket").unwrap().unwrap(), expected.3);
+        assert_eq!(revocation_audits(store, "node.revoked"), expected.4);
+    }
+
+    #[tokio::test]
+    async fn revoke_route_records_current_fence_and_audit() {
+        let (_directory, state) = revocation_test_state();
         let app = router(state.clone());
         let call = || {
-            axum::extract::Request::builder()
-                .method("POST")
-                .uri("/api/v1/grants/grant/revoke")
-                .header(axum::http::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(Body::from("{}"))
-                .unwrap()
+            post_json(
+                &app,
+                "/api/v1/grants/grant/revoke".into(),
+                REVOCATION_TOKEN,
+                json!({}),
+            )
         };
-        let response = app.clone().oneshot(call()).await.unwrap();
-        assert_eq!(response.status(), 200);
+        let initial = crate::maintenance::assignment_for_poll(&mut state.lock().unwrap(), "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial["id"], "assignment");
+        assert_eq!(initial["purpose"], "execute");
+        assert_eq!(initial["grant_status"], true);
+        assert_eq!(initial["grant_version"], 1);
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE assignments SET acknowledged_at='2026-01-01T00:01:00Z' WHERE id='assignment'",
+                [],
+            )
+            .unwrap();
+
+        let (status, first) = response_json(call().await).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(first["grant_version"], 2);
+        assert_eq!(
+            first["effects"],
+            "running_execution_outcome_unknown_until_reconciled"
+        );
+        let snapshot = {
+            let store = state.lock().unwrap();
+            (
+                store.get("grants", "grant").unwrap().unwrap(),
+                store.get("tickets", "ticket").unwrap().unwrap(),
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                revocation_audits(&store, "grant.revoked"),
+            )
+        };
+        assert_eq!(snapshot.0["revoked_at"], first["revoked_at"]);
+        assert_eq!(snapshot.0["digest"], "original-digest");
+        assert_eq!(snapshot.2["lease_expires_at"], first["revoked_at"]);
+        assert_eq!(snapshot.1["status"], "reconciling");
+        assert_eq!(snapshot.3.len(), 1);
+
+        let (status, second) = response_json(call().await).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["duplicate"], true);
+        assert_eq!(second["grant_version"], 2);
+        assert_eq!(second["revoked_at"], first["revoked_at"]);
+        assert_eq!(second["effects"], first["effects"]);
+        let stop = crate::maintenance::assignment_for_poll(&mut state.lock().unwrap(), "node")
+            .unwrap()
+            .unwrap();
         {
             let store = state.lock().unwrap();
+            assert_eq!(store.get("grants", "grant").unwrap().unwrap(), snapshot.0);
+            assert_eq!(store.get("tickets", "ticket").unwrap().unwrap(), snapshot.1);
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                snapshot.2
+            );
+            assert_eq!(revocation_audits(&store, "grant.revoked"), snapshot.3);
+            assert!(store.verify_audit().unwrap());
+            for table in ["reports", "artifacts", "effects"] {
+                assert_eq!(
+                    store.query(&format!("SELECT * FROM {table}"), []).unwrap(),
+                    Vec::<Value>::new()
+                );
+            }
+        }
+        for key in [
+            "id",
+            "ticket_id",
+            "lease_id",
+            "lease_epoch",
+            "attempt",
+            "objective",
+            "content",
+            "operation",
+            "grant_digest",
+            "grant_version",
+            "resource",
+            "grant",
+        ] {
+            if key != "grant" {
+                assert_eq!(stop[key], initial[key], "{key}");
+            }
+        }
+        let mut projected_grant = snapshot.0.clone();
+        projected_grant["project_root"] = initial["grant"]["project_root"].clone();
+        assert_eq!(stop["grant"], projected_grant);
+        assert_eq!(stop["purpose"], "reconcile");
+        assert_eq!(stop["grant_status"], false);
+        assert_eq!(stop["grant_version"], 1);
+        assert_eq!(stop["grant"]["version"], 2);
+        assert_eq!(stop["grant"]["digest"], "original-digest");
+        assert_eq!(stop["lease_expires_at"], snapshot.2["lease_expires_at"]);
+        assert_eq!(stop["cancel_requested"], false);
+        assert_eq!(
+            stop["grant"]["project_root"],
+            initial["grant"]["project_root"]
+        );
+        assert_eq!(snapshot.2["cancelled_at"], Value::Null);
+        assert_eq!(snapshot.2["last_report_at"], Value::Null);
+
+        // A persisted nonstandard version stays immutable and explicitly does not
+        // satisfy maintenance.rs's stricter creation-v1 -> revoked-v2 admission gate.
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute("UPDATE grants SET version=7 WHERE id='grant'", [])
+            .unwrap();
+        assert!(
+            crate::maintenance::assignment_for_poll(&mut state.lock().unwrap(), "node")
+                .unwrap()
+                .is_none()
+        );
+        let (status, legacy) = response_json(call().await).await;
+        assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert_eq!(legacy["duplicate"], true);
+        assert_eq!(legacy["grant_version"], 7);
+        assert_eq!(legacy["revoked_at"], first["revoked_at"]);
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(store.get("grants", "grant").unwrap().unwrap()["version"], 7);
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                snapshot.2
+            );
+            assert_eq!(revocation_audits(&store, "grant.revoked"), snapshot.3);
             for sequence in 0..28 {
                 store
                     .audit(
@@ -444,42 +617,269 @@ mod tests {
                     .unwrap();
             }
         }
+        let unknown = response_json(
+            post_json(
+                &app,
+                "/api/v1/grants/missing/revoke".into(),
+                REVOCATION_TOKEN,
+                json!({}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND, "{:?}", unknown.1);
+        assert_eq!(unknown.1["error"]["code"], "not_found");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .query("SELECT * FROM audits", [])
+                .unwrap()
+                .len(),
+            29
+        );
+
         let read = app
             .clone()
             .oneshot(
                 axum::extract::Request::builder()
                     .method("GET")
                     .uri("/api/v1/audit")
-                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {REVOCATION_TOKEN}"))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(read.status(), 200);
-        let body: Value = serde_json::from_slice(
-            &axum::body::to_bytes(read.into_body(), 1024 * 1024)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let (status, body) = response_json(read).await;
+        assert_eq!(status, StatusCode::OK);
         let audits = body["audit"].as_array().unwrap();
         assert_eq!(
             audits.len(),
             29,
             "Global audit projection must retain records beyond the oldest 24 entries"
         );
-        assert!(
+        assert_eq!(
             audits
                 .iter()
-                .any(|record| record["action"] == "grant.revoked"
-                    && record["evidence"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .contains("grant")),
-            "{}",
-            body
+                .filter(|record| record["action"] == "grant.revoked")
+                .count(),
+            1
         );
+    }
+
+    #[tokio::test]
+    async fn revoked_node_replay_preserves_timestamp_lease_and_single_audit() {
+        let (_directory, state) = revocation_test_state();
+        let app = router(state.clone());
+        let call = || {
+            post_json(
+                &app,
+                "/api/v1/nodes/node/revoke".into(),
+                REVOCATION_TOKEN,
+                json!({}),
+            )
+        };
+        let original_lease = state
+            .lock()
+            .unwrap()
+            .get("assignments", "assignment")
+            .unwrap()
+            .unwrap()["lease_expires_at"]
+            .clone();
+        let (status, first) = response_json(call().await).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(first["node_id"], "node");
+        assert_eq!(
+            first["task_outcome"],
+            "Unknown active effects enter reconciliation"
+        );
+        let snapshot = {
+            let store = state.lock().unwrap();
+            (
+                store.query("SELECT * FROM nodes", []).unwrap()[0].clone(),
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                store.get("grants", "grant").unwrap().unwrap(),
+                store.get("tickets", "ticket").unwrap().unwrap(),
+                revocation_audits(&store, "node.revoked"),
+            )
+        };
+        assert_eq!(snapshot.0["status"], "revoked");
+        assert_eq!(snapshot.0["revoked_at"], first["revoked_at"]);
+        assert_ne!(snapshot.1["lease_expires_at"], original_lease);
+        assert_eq!(snapshot.1["lease_expires_at"], first["revoked_at"]);
+        assert_eq!(snapshot.4.len(), 1);
+
+        let (status, second) = response_json(call().await).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["duplicate"], true);
+        assert_eq!(second["revoked_at"], first["revoked_at"]);
+        assert_eq!(second["task_outcome"], first["task_outcome"]);
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(
+                store.query("SELECT * FROM nodes", []).unwrap()[0],
+                snapshot.0
+            );
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                snapshot.1
+            );
+            assert_eq!(store.get("grants", "grant").unwrap().unwrap(), snapshot.2);
+            assert_eq!(store.get("tickets", "ticket").unwrap().unwrap(), snapshot.3);
+            assert_eq!(revocation_audits(&store, "node.revoked"), snapshot.4);
+        }
+
+        let (status, missing) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/missing/revoke".into(),
+                REVOCATION_TOKEN,
+                json!({}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute("UPDATE nodes SET revoked_at=NULL WHERE id='node'", [])
+            .unwrap();
+        let (status, inconsistent) = response_json(call().await).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{inconsistent}");
+        assert_eq!(
+            inconsistent["error"]["code"],
+            "revocation_state_inconsistent"
+        );
+        {
+            let store = state.lock().unwrap();
+            assert!(store.query("SELECT * FROM nodes", []).unwrap()[0]["revoked_at"].is_null());
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                snapshot.1
+            );
+            assert_eq!(revocation_audits(&store, "node.revoked"), snapshot.4);
+        }
+
+        for (status, timestamp) in [
+            ("inconsistent-reopened", json!("2026-02-01T00:00:00Z")),
+            ("inconsistent-nonstring", json!(1)),
+        ] {
+            let sqlite_timestamp = match timestamp {
+                Value::String(value) => rusqlite::types::Value::Text(value),
+                Value::Number(value) => rusqlite::types::Value::Integer(value.as_i64().unwrap()),
+                _ => unreachable!(
+                    "the mismatch fixtures only contain a text RFC3339 timestamp or integer"
+                ),
+            };
+            state
+                .lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE nodes SET status=?1,revoked_at=?2 WHERE id='node'",
+                    params![status, sqlite_timestamp],
+                )
+                .unwrap();
+            let before = {
+                let store = state.lock().unwrap();
+                (
+                    store.query("SELECT * FROM nodes", []).unwrap()[0].clone(),
+                    store.get("assignments", "assignment").unwrap().unwrap(),
+                    store.get("grants", "grant").unwrap().unwrap(),
+                    store.get("tickets", "ticket").unwrap().unwrap(),
+                    revocation_audits(&store, "node.revoked"),
+                )
+            };
+            let (response_status, response_body) = response_json(call().await).await;
+            assert_eq!(response_status, StatusCode::CONFLICT, "{response_body}");
+            assert_eq!(
+                response_body["error"]["code"],
+                "revocation_state_inconsistent"
+            );
+            {
+                // This synchronous lock scope finishes entirely before the next await,
+                // rather than moving a guard through the repeated request loop.
+                let store = state.lock().unwrap();
+                assert_node_revocation_history_unchanged(&store, before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn first_grant_revocation_rolls_back_when_its_audit_write_fails() {
+        let (_directory, state) = revocation_test_state();
+        let app = router(state.clone());
+        let before = {
+            let store = state.lock().unwrap();
+            (
+                store.get("grants", "grant").unwrap().unwrap(),
+                store.get("tickets", "ticket").unwrap().unwrap(),
+                store.get("assignments", "assignment").unwrap().unwrap(),
+            )
+        };
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER deny_grant_revocation_audit BEFORE INSERT ON audits
+             WHEN NEW.action='grant.revoked'
+             BEGIN SELECT RAISE(ABORT,'fixture denies revocation audit'); END;",
+            )
+            .unwrap();
+        let denied = response_json(
+            post_json(
+                &app,
+                "/api/v1/grants/grant/revoke".into(),
+                REVOCATION_TOKEN,
+                json!({}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            denied.0,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{:?}",
+            denied.1
+        );
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(store.get("grants", "grant").unwrap().unwrap(), before.0);
+            assert_eq!(store.get("tickets", "ticket").unwrap().unwrap(), before.1);
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                before.2
+            );
+            assert_eq!(revocation_audits(&store, "grant.revoked").len(), 0);
+        }
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute("DROP TRIGGER deny_grant_revocation_audit", [])
+            .unwrap();
+        let (status, first) = response_json(
+            post_json(
+                &app,
+                "/api/v1/grants/grant/revoke".into(),
+                REVOCATION_TOKEN,
+                json!({}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["duplicate"], false);
+        let store = state.lock().unwrap();
+        assert_eq!(store.get("grants", "grant").unwrap().unwrap()["version"], 2);
+        assert_eq!(revocation_audits(&store, "grant.revoked").len(), 1);
+        assert!(store.verify_audit().unwrap());
     }
 
     async fn post_json(app: &Router, uri: String, token: &str, body: Value) -> Response {
@@ -2617,46 +3017,117 @@ async fn revoke_node(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Path(node): axum::extract::Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let store = state.lock()?;
-    if store.get("nodes", &node)?.is_none() {
-        return Err(ApiError::missing("Node not found"));
+    let mut store = state.lock()?;
+    let current = store
+        .get("nodes", &node)?
+        .ok_or_else(|| ApiError::missing("Node not found"))?;
+    let outcome = "Unknown active effects enter reconciliation";
+    if current["revoked_at"].is_string() && current["status"] == "revoked" {
+        return Ok(Json(json!({
+            "revoked":true,"duplicate":true,"node_id":node,
+            "revoked_at":current["revoked_at"],"task_outcome":outcome
+        })));
     }
-    store.conn().execute(
-        "UPDATE nodes SET revoked_at=?1,status='revoked' WHERE id=?2",
-        params![now(), node],
-    )?;
-    store.conn().execute(
-        "UPDATE assignments SET lease_expires_at=?1 WHERE node_id=?2",
-        params![now(), node],
-    )?;
-    store.audit(None, "client", "node.revoked", &json!({"node_id":node}))?;
-    Ok(Json(
-        json!({"revoked":true,"task_outcome":"Unknown active effects enter reconciliation"}),
-    ))
+    if (current["status"] == "revoked" && !current["revoked_at"].is_string())
+        || (!current["revoked_at"].is_null()
+            && (!current["revoked_at"].is_string() || current["status"] != "revoked"))
+    {
+        return Err(ApiError::conflict(
+            "revocation_state_inconsistent",
+            "Node revocation timestamp/state is inconsistent with its durable record",
+        ));
+    }
+    let revoked_at = now();
+    let tx = store.conn_mut().transaction()?;
+    let result = (|| -> rusqlite::Result<()> {
+        tx.execute(
+            "UPDATE nodes SET revoked_at=?1,status='revoked' WHERE id=?2 AND revoked_at IS NULL AND status<>'revoked'",
+            params![revoked_at,node],
+        )?;
+        tx.execute(
+            "UPDATE assignments SET lease_expires_at=?1 WHERE node_id=?2",
+            params![revoked_at, node],
+        )?;
+        store::audit_tx(
+            &tx,
+            None,
+            "client",
+            "node.revoked",
+            &json!({"node_id":node}),
+        )
+        .map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                error.to_string(),
+            )))
+        })?;
+        Ok(())
+    })();
+    result?;
+    tx.commit()?;
+    Ok(Json(json!({
+        "revoked":true,"duplicate":false,"node_id":node,"revoked_at":revoked_at,
+        "task_outcome":outcome
+    })))
 }
 async fn revoke_grant(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Path(grant): axum::extract::Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let store = state.lock()?;
-    if store.get("grants", &grant)?.is_none() {
-        return Err(ApiError::missing("Grant not found"));
+    let mut store = state.lock()?;
+    let current = store
+        .get("grants", &grant)?
+        .ok_or_else(|| ApiError::missing("Grant not found"))?;
+    let effects = "running_execution_outcome_unknown_until_reconciled";
+    if current["revoked_at"].is_string() {
+        // Revocation is a durable fact, including legacy versions beyond v2. A
+        // replay reports that immutable row without increasing its fence or implying
+        // that any version is readmitted by the stricter assignment_for_poll rules.
+        return Ok(Json(json!({
+            "revoked":true,"duplicate":true,"grant_id":grant,
+            "grant_version":current["version"],"revoked_at":current["revoked_at"],"effects":effects
+        })));
     }
-    store.conn().execute(
-        "UPDATE grants SET revoked_at=?1,version=version+1 WHERE id=?2",
-        params![now(), grant],
-    )?;
-    store.conn().execute("UPDATE assignments SET lease_expires_at=?1 WHERE ticket_id IN(SELECT id FROM tickets WHERE grant_id=?2)",params![now(),grant])?;
-    store.conn().execute("UPDATE tickets SET status='reconciling',updated_at=?1 WHERE grant_id=?2 AND status='running'",params![now(),grant])?;
-    store.audit(
-        None,
-        "client",
-        "grant.revoked",
-        &json!({"grant_id":grant,"fencing":"old_leases_expired"}),
-    )?;
-    Ok(Json(
-        json!({"revoked":true,"grant_id":grant,"effects":"running_execution_outcome_unknown_until_reconciled"}),
-    ))
+    let revoked_at = now();
+    let tx = store.conn_mut().transaction()?;
+    let result = (|| -> rusqlite::Result<(i64, String)> {
+        tx.execute(
+            "UPDATE grants SET revoked_at=?1,version=version+1 WHERE id=?2 AND revoked_at IS NULL",
+            params![revoked_at, grant],
+        )?;
+        tx.execute(
+            "UPDATE assignments SET lease_expires_at=?1 WHERE ticket_id IN(SELECT id FROM tickets WHERE grant_id=?2)",
+            params![revoked_at,grant],
+        )?;
+        tx.execute(
+            "UPDATE tickets SET status='reconciling',updated_at=?1 WHERE grant_id=?2 AND status='running'",
+            params![revoked_at,grant],
+        )?;
+        store::audit_tx(
+            &tx,
+            None,
+            "client",
+            "grant.revoked",
+            &json!({"grant_id":grant,"fencing":"old_leases_expired"}),
+        )
+        .map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                error.to_string(),
+            )))
+        })?;
+        // Reading actual values inside this transaction prevents the response
+        // from assuming v2 if the persisted pre-revocation state was unusual.
+        tx.query_row(
+            "SELECT version,revoked_at FROM grants WHERE id=?1",
+            [&grant],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+    })();
+    let (version, persisted_revoked_at) = result?;
+    tx.commit()?;
+    Ok(Json(json!({
+        "revoked":true,"duplicate":false,"grant_id":grant,
+        "grant_version":version,"revoked_at":persisted_revoked_at,"effects":effects
+    })))
 }
 async fn enrollment(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let code = format!("enroll_{}", token());

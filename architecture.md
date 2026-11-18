@@ -802,6 +802,10 @@ Package Manifest 按构建 Target 区分 Rust Host 二进制、Harness 插件、
 对于中心已签发、但 Node 尚未 acknowledged/admit 的普通 Assignment，之后的正常和再次 poll 都不能派发该已撤 Grant 的执行。这个 Assignment 可以已经变为 `reconciling`，但它并没有因此成为已取消、成功或失败，也不等于 `cancel_requested` 或 Node acknowledgement。零执行、零新报告/Artifact/Effect 和目标文件未产生必须分开验证，而不是仅由按钮消失推断。这种Case不同于已被宿主领取后进行中的受限 edit-file 撤权停止和本地证据隔离。
 读取当前 Grant 同样应忠于持久化字段。SQL 的事实为 `revoked_at` 与版本，不提供也无须补造独立的 `status` 列。UI以该时间戳优先呈现“已撤销”，历史状态兼容但未知状态不被误当作有效。HTTP 撤销回执已被中心确认，与之后资源列表是否成功取得最新视图是两件事：刷新失败时必须把旧卡片明确标成未刷新的先前快照，不能以关闭确认框的方式暗示仍有效的快照已经是最新权限。这些状态继承/展示本身既不重授权限，也不启动工作。
 
+同一 `grants/{id}/revoke` 或 `nodes/{id}/revoke` 请求在**中心已经存在撤销事实**时，只返回该事实及 `duplicate:true`、原 `grant_version` / `revoked_at`，不会重写首次时间戳、lease 到期时间、ticket 或其他审计，也不会复活旧execution。普通Grant **v1→v2**的首次变更、lease fence、running→reconciling及audit在同一个Store事务中提交；audit或写入失败必须整体回滚，不能让客户端虚构已经撤销的状态。已受理旧edit-file Assignment的reconcile stop资格继续使用之前限定的原Grant digest、Node/身份及v2门，不能因为重复撤权升到v3而消失，也不能由此扩成任意 `version >= 2` 都获批重执行。未知效果仍须独立对账，不升级成成功或取消的事实。这里是**同一已撤销记录的可靠读取回执**，而不是所有权限/审批命令的通用幂等承诺。
+
+`status=revoked`缺少实际timestamp，或timestamp已存在但status不匹配/类型不对，是**不一致的持久状态**：node撤销必须409 `revocation_state_inconsistent`，不能出现零状态行更新却继续lease变更/审计的“首次撤销”。这不是恢复授权或接受任何字段自报，也不是普通重复请求的当然行为。节点撤权管理API与节点自身 `nodes/assignments` / `nodes/reports` 等凭据类型不同，管理调用实际使用既有客户端身份，Node上报仍旧验证自己的节点凭据，不能借保护SDK的边界造成两种身份互换。具体重复Grant/Node、原补偿交付、SQL audit回滚与旧403复核入口为 `node tests/runner/grant-revocation-fence.mjs`。
+
 ### 9.2 Assignment 的建议字段
 
 ```text

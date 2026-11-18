@@ -63,6 +63,37 @@ try {
   assert.equal(after.status, 'reconciling')
   assert.equal(after.cancel_requested, false)
   assert.equal(Number.isFinite(Date.parse(after.assignments[0].lease_expires_at)), true)
+  const beforeDuplicateAudit = (await admin.get('/api/v1/audit')).audit
+  const beforeDuplicateRevocations = beforeDuplicateAudit.filter(row => row.action === 'grant.revoked')
+  assert.equal(beforeDuplicateRevocations.length, 1)
+  const duplicate = await admin.post(`/api/v1/grants/${grant.grant.id}/revoke`, {})
+  assert.equal(duplicate.revoked, true)
+  assert.equal(duplicate.duplicate, true)
+  assert.equal(duplicate.grant_id, grant.grant.id)
+  assert.equal(duplicate.grant_version, 2)
+  assert.equal(duplicate.revoked_at, current.revoked_at)
+  const postDuplicate = (await admin.get('/api/v1/grants')).grants.find(row => row.id === grant.grant.id)
+  assert.deepEqual(postDuplicate, current)
+  const stopAfterDuplicate = await runner.client.poll({ lastAssignmentId: assignment.id, waitSeconds: 0 })
+  assert.equal(stopAfterDuplicate?.id, assignment.id, 'A duplicate must preserve the already-admitted reconcile stop instead of losing it at v3')
+  assert.equal(stopAfterDuplicate.purpose, 'reconcile')
+  assert.equal(stopAfterDuplicate.grant_status, false)
+  assert.equal(stopAfterDuplicate.grant_version, 1)
+  assert.equal(stopAfterDuplicate.grant.version, 2)
+  assert.equal(stopAfterDuplicate.lease_id, assignment.lease_id)
+  assert.equal(stopAfterDuplicate.lease_epoch, assignment.lease_epoch)
+  assert.equal(stopAfterDuplicate.lease_expires_at, after.assignments[0].lease_expires_at)
+  const afterDuplicate = await admin.get(`/api/v1/tickets/${ticket.id}`)
+  assert.deepEqual(afterDuplicate, after)
+  const duplicateAudit = (await admin.get('/api/v1/audit')).audit
+  assert.equal(duplicateAudit.filter(row => row.action === 'grant.revoked').length, beforeDuplicateRevocations.length)
+  result.idempotent_duplicate_revoke_before_stop_verified = {
+    version_preserved: postDuplicate.version,
+    original_revocation_time_preserved: duplicate.revoked_at === current.revoked_at,
+    original_assignment_still_stoppable: stopAfterDuplicate.id,
+    grant_revocation_audit_count: beforeDuplicateRevocations.length,
+    original_assignment_and_lease_unchanged: true,
+  }
   const revokedFrame = await runner.client.poll({ lastAssignmentId: assignment.id, waitSeconds: 0 })
   assert.equal(revokedFrame?.id, assignment.id, 'Only the previously admitted unreported Assignment is offered for reconciling')
   assert.equal(revokedFrame.purpose, 'reconcile')
@@ -118,6 +149,50 @@ try {
   const auditVerify = await admin.get('/api/v1/audit/verify')
   assert.equal(auditVerify.valid, true)
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
+
+  // Duplicate a real registered Node revoke only after the grant/stop/fencing
+  // path is complete. It targets the same identity, never a second Host/Worker.
+  const expiredBeforeNodeRevoke = db.prepare('SELECT lease_expires_at,acknowledged_at,last_report_at FROM assignments WHERE id=?').get(assignment.id)
+  const ticketsBeforeNodeDuplicate = db.prepare('SELECT COUNT(*) AS count FROM tickets').get().count
+  // This is an authenticated business/management route, not a Node-owned transport
+  // action. Do not force its client credential through the NodeHttpClient restrictions.
+  const revokeRegisteredNode = async () => {
+    const response = await fetch(`${center.baseUrl}/api/v1/nodes/${encodeURIComponent(runner.nodeId)}/revoke`, {
+      method: 'POST', redirect: 'error',
+      headers: { authorization: `Bearer ${clientToken}`, accept: 'application/json', 'content-type': 'application/json' },
+      body: '{}',
+    })
+    const body = await response.json()
+    assert.equal(response.status, 200, `Authenticated administrator Node revocation must succeed: ${JSON.stringify(body)}`)
+    return body
+  }
+  const firstNodeRevoke = await revokeRegisteredNode()
+  assert.equal(firstNodeRevoke.revoked, true)
+  const nodeAfterFirst = db.prepare('SELECT revoked_at FROM nodes WHERE id=?').get(runner.nodeId)
+  assert.ok(nodeAfterFirst.revoked_at)
+  const firstNodeExpired = db.prepare('SELECT lease_expires_at FROM assignments WHERE id=?').get(assignment.id).lease_expires_at
+  const duplicateNodeRevoke = await revokeRegisteredNode()
+  assert.equal(duplicateNodeRevoke.revoked, true)
+  assert.equal(duplicateNodeRevoke.duplicate, true)
+  assert.equal(duplicateNodeRevoke.node_id, runner.nodeId)
+  assert.equal(duplicateNodeRevoke.revoked_at, nodeAfterFirst.revoked_at)
+  assert.equal(db.prepare('SELECT revoked_at FROM nodes WHERE id=?').get(runner.nodeId).revoked_at, nodeAfterFirst.revoked_at)
+  assert.equal(db.prepare('SELECT lease_expires_at FROM assignments WHERE id=?').get(assignment.id).lease_expires_at, firstNodeExpired,
+    'A repeated Node revocation must leave the first expired lease unchanged rather than alter its fencing history')
+  assert.deepEqual({ ...db.prepare('SELECT acknowledged_at,last_report_at FROM assignments WHERE id=?').get(assignment.id) },
+    { acknowledged_at: expiredBeforeNodeRevoke.acknowledged_at, last_report_at: expiredBeforeNodeRevoke.last_report_at })
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM audits WHERE action=\'node.revoked\'').get().count, 1)
+  assert.deepEqual({ ...db.prepare('SELECT cancel_requested,grant_digest,status FROM tickets WHERE id=?').get(ticket.id) },
+    { cancel_requested: after.cancel_requested ? 1 : 0, grant_digest: after.grant_digest, status: after.status })
+  await assert.rejects(() => task('No revival of old authority by repeated revocation'), error => error.code === 'grant_scope')
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM tickets').get().count, ticketsBeforeNodeDuplicate)
+  assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
+  assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
+  result.duplicate_node_revoke_preserves_first_fence = {
+    node_id: runner.nodeId, first_revoked_at_preserved: true,
+    original_admission_lease_expiry_preserved: firstNodeExpired,
+    audit_count: 1, no_new_ticket_or_released_previous_grant: true,
+  }
   db.close()
   Object.assign(result, { overall: 'PASS', revoked_and_versioned: true,
     only_acknowledged_assignment_stop_offer: true, expired_old_artifact_and_report_fenced: true,
