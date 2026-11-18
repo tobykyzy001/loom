@@ -270,6 +270,13 @@
 - **持久化关系与 Ticket/Assignment/Message/Audit 是一个 SQLite savepoint。** `source_work_specs` 与 event 指向的新建 Ticket 需要恰一行、明确 created_after_intake 并受触发器双向工作 scope 检查；spec 本身不可更新/删除。这样不能仅靠填一个 `task_ticket_id` 重放工作。嵌套 pipeline / Skill outer `BEGIN IMMEDIATE` 下 inner savepoint 是 RELEASE，而非悄悄 COMMIT 外层，借用只在真正需要写 store 的调用传递。`tests/sources/authorized-ticket.mjs` 用自有 SQLite trigger 注入后段 attachment failure，比较 Ticket/Assignment/Message/Audit/spec 的完整计数，不是只看 API 错误；移除触发器后允许一次新的合法创建。**不重放不存在的旧授权，不承诺数据库失败发生在 commit 后时 Response 等价于从未发生。**
 - **量具问题也按实验修正而非软 pass。** `approval` 的真实路由不是 `approve`，简单 reject 的旧实现曾把 pending 转发成真实 Assignment，现已设为记录审核决定而不创建执行；等待后重复原 Source 请求必须依原 spec / ticket id，而不是拿后续分配 Node 重推 relation。Source 正常 source intent / undefined UI / provider workspace 没有在这个增量完成。`12 !== 11` 的旧 pipeline test 实为硬编码 schema 断言，不是新增审计；文档/单测以当前实际 schema13 或直接迁移验证为准。若补旧 v12 fixture，须按规范 digest 构造重复输入，不能写入任意 `old-digest` 后又把它称 exact replay。任何 earlier failed binary / invalid fixture 运行不能作为新版本检查点证据。
 
+### 8336b76 — 实际验证与独立审查结论
+
+- 真实 `node tests/sources/events.mjs` 与 `node tests/sources/authorized-ticket.mjs` 均 `overall:PASS`、exit 0。后者实际一次LocalNode重试与首次来源读取，dispatch Artifact/Report outbox，读取原文件hash、实际 Artifact和中心状态；再次同一 event/工作规格没有第二 Assignment/Artifact。错误Project/scope/read Grant、未知Body字段、退绑/改event信息/改Node或installation、错误grant operation 和root/current Grant审批、source attachment 后段故障都确有拒绝/回滚。隔离DSH credential inspect→independently authorized deletion→无seed restart missing 也PASS；不是生产系统凭据/远程authentication。
+- `cargo fmt --all -- --check`、`cargo test --workspace --locked` 与 `cargo clippy --workspace --all-targets --locked -- -D warnings` 在当前最终spec/canonical封闭范围全通过。`scripts/document-pipeline.mjs`、`tests/skills/read-replay.mjs` 的真实执行、lineage/实际bytes/Grant/审计/中心恢复通过。Node client **22**、DSH plugin **55**、Vue **54**、`pnpm --dir apps/web typecheck/test/build` 全通过。
+- Final independent read-only review未发现该本机Source授权闭环内的新可复现安全bug；但**该driver仅重启Concierge ，未重启LocalNode/outbox**；只有一个真实Node 与一个Installation，未覆盖真实第二Installation或mobile/多租户/remote IM/LiveLLM 。未知字段是显式负例而不是通用恶意JSON corpus。M0仍active，不实现用户明确暂缓的1+3 Compose，不把向后保持hash保存当分布式 exactly once。
+- Commit `8336b76 feat: link Source events to authorized read tasks`，本地main now 60 ahead of origin/main at this checkpoint，**不推送**。
+
 ## Open problems and resolutions
 
 - Scope is large and includes actual hardware, platform-signed distribution and mobile verification. Proceed in evidenced increments rather than marking roadmap milestones complete from mocks, compilation or unit tests.
