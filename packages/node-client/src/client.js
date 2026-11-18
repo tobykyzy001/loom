@@ -90,6 +90,14 @@ export class LoomNodeClient {
     const body = { ...envelope(this, id()), ticket_id: ticketId, assignment_id: assignmentId,
       ...(leaseEpoch === undefined ? {} : { lease_epoch: leaseEpoch }), accepted: Boolean(accepted),
       reason, cancel_requested: stop, cancellation: stop }
+    // Preserve the separate stop path. Ordinary receipt/cache replay must not
+    // suppress a stop request's current authorization check. `cancellation` is
+    // only the established client routing alias; the center reads cancel_requested.
+    // Neither flag proves cancellation was requested centre-side or completed by an SDK.
+    if (stop) {
+      const response = await this.http.post(ACK_ROUTE, body, { token: this.identity.token, signal })
+      return { request: body, response }
+    }
     const digest = this.logicalDigest(body)
     const delivered = this.state.data.deliveries?.find((item) => item.kind === 'ack' && item.digest === digest)
     if (delivered) {

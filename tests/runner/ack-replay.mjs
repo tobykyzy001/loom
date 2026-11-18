@@ -165,6 +165,56 @@ try {
   assert.equal((await admin.get('/api/v1/audit/verify')).valid, true, 'The accepted revocation and original admission keep one valid audit chain')
   const centralSchema = db.prepare('PRAGMA user_version').get().user_version
   assert.equal(centralSchema, 15)
+
+  // A direct stop is not ordinary admission replay. The center has to see
+  // this current cancellation intent again, rather than a local cache hiding it.
+  const stopGrant = await admin.post('/api/v1/grants', { project_id: projectId, project_binding_id: binding.id, node_id: replacement.nodeId, worker_id: 'default', operations: ['read'] })
+  const stopTicket = await admin.post('/api/v1/tickets', { project_id: projectId, node_id: replacement.nodeId, worker_id: 'default', grant_id: stopGrant.grant.id,
+    kind: 'read_summary', relative_path: 'ack-source.txt', objective: 'Controller-issued stop request without an additional execution' })
+  await admin.post(`/api/v1/tickets/${stopTicket.id}/cancel`, {})
+  const stopAssignment = await replacement.client.poll({ waitSeconds: 0 })
+  assert.equal(stopAssignment.id, stopTicket.assignments[0].id)
+  assert.equal(stopAssignment.cancel_requested, true, 'The controller, not a caller-only flag, requested this cancellation')
+  const stopOutboxBefore = structuredClone(replacement.state.outbox)
+  const stopDeliveryBefore = structuredClone(replacement.state.data.deliveries || [])
+  const stopInput = { ticketId: stopTicket.id, assignmentId: stopAssignment.id, leaseEpoch: stopAssignment.lease_epoch, accepted: true, cancelRequested: true, reason: 'Controller-requested direct stop' }
+  const firstStop = await replacement.client.acknowledge(stopInput)
+  const secondStop = await replacement.client.acknowledge(stopInput)
+  const stophttpCalls = tasks.filter(call => call.kind === 'ack' && call.assignment_id === stopAssignment.id)
+  assert.equal(stophttpCalls.length, 2, 'Identical stop calls must remain two actual centre authorization requests')
+  assert.notEqual(stophttpCalls[0].request_id, stophttpCalls[1].request_id)
+  assert.ok(firstStop.response.acknowledged_at)
+  assert.ok(secondStop.response.acknowledged_at)
+  assert.equal(db.prepare('SELECT acknowledged_at FROM assignments WHERE id=?').get(stopAssignment.id).acknowledged_at, secondStop.response.acknowledged_at)
+  assert.equal(secondStop.response.duplicate, undefined, 'A stop response must not be fabricated from ordinary cached replay')
+  assert.deepEqual(replacement.state.outbox, stopOutboxBefore, 'Direct stop does not append ordinary queue intent or erase older failed-Grant ACK intents')
+  assert.deepEqual(replacement.state.data.deliveries || [], stopDeliveryBefore, 'Existing ordinary ACK history is retained, without stop-cache growth')
+  const stopDetails = await admin.get(`/api/v1/tickets/${stopTicket.id}`)
+  assert.equal(stopDetails.reports.length, 0, 'An ACK receipt is not a cancelled Report or execution completion')
+  assert.equal(stopDetails.effects.length, 0)
+  assert.equal(stopDetails.artifacts.length, 0)
+  assert.equal(executions, 1, 'No further source executor is invoked by this stop-transport check')
+  const stopAudits = db.prepare("SELECT actor,evidence FROM audits WHERE ticket_id=? AND action='assignment.acknowledged'").all(stopTicket.id)
+  assert.equal(stopAudits.length, 2, 'The legacy stop path really receives both server decisions; ordinary-ACK one-audit replay is a different path')
+  assert.equal(stopAudits.every(audit => audit.actor === 'node'), true)
+  for (const audit of stopAudits) {
+    assert.equal(audit.actor, 'node')
+    const evidence = JSON.parse(audit.evidence).evidence
+    assert.equal(evidence.assignment_id, stopAssignment.id)
+    assert.equal(evidence.delivered_is_not_read, true)
+  }
+  assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
+  assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
+  const directStop = {
+    actual_stop_intent_from_controller: true,
+    stop_ack_http_calls: stophttpCalls.length,
+    distinct_request_ids: true,
+    no_ordinary_cache_or_pending_created: true,
+    prior_ordinary_delivery_and_failed_ack_intents_preserved: true,
+    server_audit_records_for_this_direct_stop: stopAudits.length,
+    reports: stopDetails.reports.length, artifacts: stopDetails.artifacts.length, effects: stopDetails.effects.length,
+    not_cancel_acknowledged_or_execution_completed: true,
+  }
   db.close()
 
   Object.assign(result, {
@@ -178,7 +228,7 @@ try {
     reports: delivered.reports.length, effects: delivered.effects.length,
     report_status: report.state ?? report.requested_state,
     other_node_rejected: true, stale_epoch_rejected: true, revoked_grant_replay_blocked: true,
-    no_second_execution: true, final_outbox_empty_before_negative_fences: true,
+    direct_stop: directStop, no_second_execution: true, final_outbox_empty_before_negative_fences: true,
     source_file: originalSource.toString('utf8'),
     direct_first_read_before_outbox: initial.status,
     endpoint_model: 'deterministic loopback LocalNode on one physical host; not multi-host or live DSH',
