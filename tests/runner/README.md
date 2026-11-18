@@ -18,6 +18,21 @@ node tests/runner/coordinator-admission.mjs
 
 这些场景使用临时 owned inputs、真实本地文件读写和受限返回数据。新进程/新 runner 重开同一 Native State 不等于 `kill -9` 发生在 DSH Tool 投入外部效果的精确时刻，也不是一中心三工作者 Compose。
 
+## 实际中心的撤权停止帧、旧证据围栏与审计
+
+```sh
+node tests/runner/grant-revocation-fence.mjs
+```
+
+此入口在真正的 Rust Concierge 上建立注册的 Node、ProjectBinding、Grant与 current Assignment。它先完成实际领取确认（`acknowledged_at`），随后撤销该 Grant，并另外创建24个未领取 Ticket 以超过24条审计记录。严格选择器只向那笔已经 ACK 且尚未 Report 的旧 `edit_file` 提供 `purpose=reconcile` 的停止帧：原始 `grant_version=1`、当前 Grant version=2/revoked_at、精确身份/root/digest及字段完整，不把 `grant_status=false` 当作用户取消。未领取、其他工作类型或不同 immutable work 不得借此开始执行。
+
+- 撤权帧只指导旧的原作业停止/对账，不延长已过期 Lease，不把新 Ticket 视为已执行。中心将 running Ticket 转为 reconciling，`cancel_requested=false` 始终独立持久存在；没有新Grant、Permission、分布新Session或私自Session event。
+- 使用真实 HTTP 客户端对原 epoch 的普通 Artifact 与 succeeded Report **实际发出**上传，二者都得到 **409 `outcome_unknown`** 并被隔离。SQL/Artifact/Report/Effect新增数为0；第二笔未领取任务未发生本地或Agent执行。这里的围栏不是检查某个`accepted:true`布尔值。
+- 实际 `grant.revoked` 持久审计在 SQL 和 `/api/v1/audit` 都存在，其外层 `evidence` JSON字符串解码后的 `evidence.grant_id` 与该Grant一致，并使用 `old_leases_expired` 表示旧Lease失效。`ticket_id=NULL` 的全局撤权记录不得被误当 ticket.cancel_requested 或 accepted Report。共同的内置Node HTTP读路径还检查33行实际数据与原始 socket响应完全相同，含最 新撤权行，不以假定的24条截断计为完整世界。
+- 复核真实grant/revoke**之后**发生的上传拒收，**没有** `report.accepted` 或 `artifact.indexed` 新审计中的另一种历史；旧有权产生的 evidence 不受回溯性销毁。审计链 `valid:true` 与SQLite `integrity_check:ok`也被实测。
+
+这个proof仅覆盖 current active assignment 的中心撤权围栏，**不证明**任意工具/版本的多路执行、真实 Agent 的Cancellation/Harness introspection、移动真机或1 Concierge+3 Worker组合。真实DSH held-verifier的停止、原字节local outbox隔离及重开的对应driver在[CODE_TASK的撤权章节](../harness/CODE_TASK.md#revoking-a-grant-during-an-admitted-edit-separate-from-cancel)分别验证。
+
 ## 边界与持久格式
 
 - Assignment 的 ID、Ticket 关联、kind、path/content 等**工作输入**保持冻结；epoch 不可倒退，Grant digest 必须精确匹配。尚未写入合法 assignment 前，不能借 `duplicate_active` 和进程内空白 map 接受任务。`sameAuthorizedAssignment` 比较所保存的 JSON 形状，显式允许的本地派生 Grant ID/version 不会制造漂移。

@@ -84,6 +84,10 @@
 
 该结果经 center与Host真实重开仍可用同一 Report/Effect/Artifact 读取，不新增工具调用。旧 reconciling Ticket 自动retry返回现有`400 invalid_request`且不生成新Assignment；随后显式创建新Ticket，沿用原有效Grant/Binding，得到新的Agent/Assignment/Session并真实测试成功。最终完整 driver 包含正常失败重试、这次中止和独立成功三组数据：3 tickets、4 assignments、4 reports、7 artifacts 和4 confirmed source effects，SQL完整性/audit chain也通过。它仍是当前 owner fixture 的**这一处前测试中止**，不是通用 pre-step/任意工具进程停止、移动真机、live LLM、多机或全M0完成。详见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。
 
+下一道受控补片已完成 **已领取、未出报告的源码编辑中的 Grant 撤权停止**：同一可由暂停查证的原作业在固定 verifier 子进程前获得真实 native `user` abort。Concierge 只对已经被 Node 实际领取且尚未出 Report 的原 `edit_file` 下发撤权对账帧，保持原始Grant/version/Grant immutable work、physical binding/assigned Node一致，查看 current revokedGrant为v2，不延长旧 Lease，也不把 `cancel_requested` 设成事实。Node在 durable/incoming/original active三方任务身份一致，且其原 wait/running/session-owner 成立后才调用 bound `agent.cancel({kind:'user'})`；`authority=false` 的本地撤权视图必须与 SDK取消原因分开。若缺真实 live claim，不会借旧Session或DB历史去取消/启动另一份 Agent。
+
+撤权后，真源diff与整体 unknown 报告在Node outbox保留。旧 Artifact实际上报被 **409 outcome_unknown** 拒绝，该Report会因引用该未接受 Artifact而被**403 artifact_lineage**拒绝，不伪装成center接受的新效果。当前 revoked Ticket无新Report/Artifact/Effect，普通用户 cancel 的严格 `cancelled_change` 例外不会被套用；重开、重复poll和新Ticket尝试均无再次原生停止或第二源码执行。此前全部正常failed/retry/cancel阶段仍过，最终只增至4 Tickets/5 Assignments维持4 Reports/7 Artifacts/4 confirmed中心 effects。原生原因仍是SDK支持的`user`而非 `revoked`。 [实际最新driver证据](/tmp/loom-code-revocation-tested-wYGIiL/result.json) 与 [CODE_TASK](tests/harness/CODE_TASK.md) 说明这一受限v1→revokedv2 file-edit闭环；`tests/runner/grant-revocation-fence.mjs`另以真实HTTP、26个未执行的受控Task和33条 socket可读审计 验证未领取不能执行、旧 artifact/report 409与grant.revoke 审计不失真。没有扩展多工作类型、新的模型/Grant或任意工具，不把物理真机/全网视为已验收。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。
