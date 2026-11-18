@@ -215,15 +215,19 @@ Host Agent
 
 每个 trigger 在 `source_events` 中以 `(source_id,external_event_id)` 保留原身份。typed DTO先验证字段、bounded text、kind 'user_message'、可选实际Ticket引用及严格RFC3339时间，再用规范化语义生成payload digest。内容原样保留，候选时间统一成UTC但**不决定**权威次序。服务器在同事务内建立Thread、写入event 以及这一条新消息、分配source/thread sequence和接收时间，用户不能通过cursor、received_at或priority字段伪造这些事实。再次输入相同语义返回原Trigger/digest/sequence 与 `duplicate:true`；相同key不同正文、Ticket、时间或Thread绑定返回409，不覆盖原始事件。Source和Trigger重复不会放大消息。约束错误不能一律 fallback 成重复成功，而是读真实已提交的原件重新对比digest。
 
-可选 `ticket_id` 只建立到既有真实Task的关联，**不创建Ticket/Assignment/Grant/Agent/Artifact**，也不修改该Ticket状态。`task_created:false` 与 `permission_granted:false` 是接口层面与实际语言都保留的区别，并非自动意图处理或任务收款。 全局messages在这个入口的source_event_id 只是接收关系，而不是远程DSH Session的log，不将Reception 冒充为Execution或用户已经阅读。
+可选 `ticket_id` 是 `unverified_intake_reference`，只关联既有真实 Task 历史，**不创建Ticket/Assignment/Grant/Agent/Artifact**，也不修改该Ticket状态。`task_created:false` 与 `permission_granted:false` 仍对接收路径成立，不能把这个旧 ticket reference 当作以后申请或重放工作的依据。全局messages在这个入口的source_event_id 是接收关系，而不是远程DSH Session的log，不将Reception 冒充为Execution或用户已经阅读。
+
+用户如需从保存的用户消息明确启动工作，可在 `POST /tickets` 提供 `source_event_id + 精确相等的 objective + 实际 read_summary/文件 + explicit Grant + 物理 Node/Worker`。中心而不是模型从当前真实 Grant 再派生 ProjectBinding、Installation/Worker/root 和它自己的冻结 `loom.source-work-spec.v1`；缺 field、kind override、inline content、自动模型/host替换或错Project/worker/digest都不会进 Ticket。事件内的旧 reference 与 `schema13` 的 `task_ticket_id/task_digest/task_spec_json/creation_kind/source_work_specs` 是不同关系。canonical object-key serialization 与原始事件 digest 是新建工作的完整性，不是新授权。
+
+同一 savepoint 保存 spec、Ticket、Assignment/Message/audit 与 Source latch；失败不留半笔 Ticket。`waiting_approval` 不是已经执行，明确 reject 不等于 rollback。 approve 和实际 poll 对 Source spec 所绑定的原Grant/Binding/root/node/installation/worker 再次校验。一旦关联，原始 Source 身份、payload、thread/time 与 task relation/spec 不能退绑重读成新job；只给真正按这一新建规格再次提交的原对象读回，不为历史普通Ticket续派 Assignment。当前只支持这一 deterministic 文件读取范围，并用已有 LocalNode executor、Grant/Lease、文件 Artifact 证实执行，不通过原文或 API 200 宣称完成。
 
 `GET /sources` 采用 `loom.source-list.v1` 的bounded稳定ID分页：默认50、最多100。next_cursor源自真实末条source，首次就在这owner中校验通过才可继续使用；has_more和缺cursor 的失败都吻合当前namespace的表现，不返回unbounded source catalog。
 
 `GET /source-events` 必须限定明确Source和exact thread，最大200条，按source server sequence keyset分页，不按调用方的发生时间/本机壁钟排序。无cursor时需要`source_id + client_thread_id`。`loom.source-page.v1` cursor为server侧持久 `source_event_cursors`，绑定 owner、source thread、schema与offset，复制到其他Source/Thread或owner未匹配一律拒绝；获取后只使用cursor与limit，不通过重写filter删除它的实际边界。没匹配unknown thread、wildcard或不合法limit 时不会退化为 full transcript。
 
-SQLite schema 12新增 `source_instances`、`source_threads`、`source_events` 和 cursor表，以及 nullable `messages.source_event_id`。旧message保持NULL与旧幂等行为，不回填假Source。早期snapshot没有messages table时，增量迁移会**只创建符合既有消息结构、带nullable source_event_id的空表**（不是伪造历史message），从而让后续Source intake可实际接收。已有表保留原数据，只在检查column缺失后补齐。实际populated v11升级后应能再打开v12，未来未知schema仍拒绝。这里不往DSH Session里插入新的私录事件，不产生所有Harness版本都必须懂的额外字段承诺。
+SQLite schema 12新增 `source_instances`、`source_threads`、`source_events` 和 cursor表，以及 nullable `messages.source_event_id`。schema13继续增加可空的 `task_ticket_id/task_digest/task_spec_json`、`creation_kind` 和 `source_work_specs`，不把旧 `ticket_id` 删除或升级为工作权限；原输入Source事件和已经提交的task规格再走 guarded latch，不得退绑篡改。旧message保持NULL与旧幂等行为，不回填假Source。早期snapshot没有messages table时，增量迁移会**只创建符合既有消息结构、带nullable source_event_id的空表**（不是伪造历史message），从而让后续Source intake可实际接收。已有表保留原数据，只在检查column缺失后补齐，辅助结构支持幂等补齐。实际populated v11/v12升级后以 v13 再打开；未来未知schema仍拒绝。这里不往DSH Session里插入新的私录事件，不产生所有Harness版本都必须懂的额外字段承诺。
 
-这一基础层只确保来源身份、幂等、顺序和恢复，不承诺自动任务解释权/自动审批、真实IM/OAuth、多租户或跨进程共享锁。以后若要把来源事件转成授予Task，应携事实上的`source_event_id` 和用户显式 task_spec，重新执行完整 Ticket/worker/root/Grant 授权与原子幂等。当前契约与验证入口见 [tests/sources/README.md](tests/sources/README.md)。
+这个切片提供 Source 身份、幂等、顺序、恢复以及用户在另一个明确受权规格下创建 `read_summary` 的小桥，不承诺自动任务解释、泛化 Source→DAG、自动模型审批、真实IM/OAuth、多租户或跨进程共享锁。`Source Work Spec` 是记录和二次核验的工作规格，不是调用方自带 Grant，也不是把原 source 消息释放成任何可执行权限。当前契约与验证入口见 [tests/sources/README.md](tests/sources/README.md)。
 
 ### 3.2 当前受限文档工作流的授权与恢复约束
 

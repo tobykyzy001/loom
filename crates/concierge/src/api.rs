@@ -1279,8 +1279,8 @@ async fn create_credential_action(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let store = state.lock()?;
-    Ok(Json(crate::credential_ref::create(&store, &id, &body)?))
+    let mut store = state.lock()?;
+    Ok(Json(crate::credential_ref::create(&mut store, &id, &body)?))
 }
 async fn probe_project(
     AppState(state): AppState<Arc<State>>,
@@ -1880,8 +1880,8 @@ pub(crate) async fn poll(
     let wait = body["wait_seconds"].as_u64().unwrap_or(0).min(20);
     for _ in 0..=wait {
         let value = {
-            let store = state.lock()?;
-            crate::maintenance::assignment_for_poll(&store, &node)?
+            let mut store = state.lock()?;
+            crate::maintenance::assignment_for_poll(&mut store, &node)?
         };
         if let Some(assignment) = value {
             return Ok(Json(json!({"assignment":assignment})));
@@ -2559,6 +2559,7 @@ async fn ticket(
     Ok(Json(detail))
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TicketRequest {
     project_id: String,
     objective: Option<String>,
@@ -2579,14 +2580,22 @@ struct TicketRequest {
     model_id: Option<String>,
     #[serde(default)]
     placement_id: Option<String>,
+    #[serde(default)]
+    source_event_id: Option<String>,
 }
 #[allow(clippy::too_many_arguments)]
 async fn create_ticket(
     AppState(state): AppState<Arc<State>>,
     _headers: HeaderMap,
-    Json(body): Json<TicketRequest>,
+    request: Result<Json<TicketRequest>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    let store = state.lock()?;
+    let Json(body) = request.map_err(|_| {
+        ApiError::bad("Ticket schema, duplicate keys, unknown fields or value types are invalid")
+    })?;
+    let mut store = state.lock()?;
+    if body.source_event_id.is_some() {
+        return create_ticket_from_source_event(&mut store, body);
+    }
     let project = store
         .get("projects", &body.project_id)?
         .ok_or_else(|| ApiError::bad("Authorized project reference required"))?;
@@ -2780,7 +2789,7 @@ async fn create_ticket(
     };
     let gid = grant_id;
     let request = crate::maintenance::create_ticket(
-        &store,
+        &mut store,
         &body.project_id,
         kind,
         &goal,
@@ -2791,9 +2800,125 @@ async fn create_ticket(
         body.worker_id.as_deref(),
         body.capability.as_deref(),
         model_resource,
+        None,
     )?;
     Ok(Json(request))
 }
+fn create_ticket_from_source_event(
+    store: &mut store::Store,
+    body: TicketRequest,
+) -> ApiResult<Json<Value>> {
+    let event_id = crate::source_events::opaque(
+        body.source_event_id.as_deref().unwrap_or_default(),
+        "source_event_id",
+    )?;
+    if body.kind.as_deref() != Some("read_summary")
+        || body.content.is_some()
+        || body.provider.is_some()
+        || body.model.is_some()
+        || body.model_id.is_some()
+        || body.placement_id.is_some()
+        || body
+            .capability
+            .as_deref()
+            .is_some_and(|capability| capability != "read_summary")
+    {
+        return Err(ApiError::denied("source_task_scope", "Only an actual project-file read_summary may be linked; no inline, model, write or capability override"));
+    }
+    let grant_id = body.grant_id.as_ref().ok_or_else(|| {
+        ApiError::denied(
+            "source_task_grant_required",
+            "An explicit existing Grant is required",
+        )
+    })?;
+    if body
+        .objective
+        .as_ref()
+        .zip(body.goal.as_ref())
+        .is_some_and(|(objective, goal)| objective != goal)
+    {
+        return Err(ApiError::denied(
+            "source_task_identity_conflict",
+            "Objective and goal must not contradict one another when provenance matters",
+        ));
+    }
+    let objective = body
+        .objective
+        .as_ref()
+        .or(body.goal.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let path = safe_relative(body.relative_path.as_deref().ok_or_else(|| {
+        ApiError::denied(
+            "source_task_path_required",
+            "The user must explicitly choose the authorized file; no implicit README selection",
+        )
+    })?)?;
+    let event = crate::source_events::lookup_client_event(store, &event_id)?;
+    if event["kind"] != "user_message" || event["content"] != objective {
+        return Err(ApiError::conflict(
+            "source_task_identity_conflict",
+            "The requested objective must exactly match the immutable recorded user message",
+        ));
+    }
+    let Some(node_id) = body.node_id.filter(|node| !node.is_empty()) else {
+        return Err(ApiError::denied(
+            "source_task_node_required",
+            "Explicit physical Node selection is required; automatic placement cannot substitute",
+        ));
+    };
+    let worker = body.worker_id.as_deref().unwrap_or("default");
+    let event_digest = event["payload_digest"].as_str().ok_or_else(|| {
+        ApiError::conflict(
+            "source_task_identity_conflict",
+            "Recorded event digest is missing",
+        )
+    })?;
+    if event["task_ticket_id"].is_null() {
+        let ticket_id = crate::id("tkt");
+        let spec = crate::source_work::for_ticket(
+            store, &body.project_id, "read_summary", &objective, &path.to_string_lossy(),
+            &event_id, event_digest, &ticket_id,
+            grant_id, &node_id, worker,
+        ).map_err(|error| ApiError::denied("grant_scope", format!("Requires an exact current read Grant/Binding/Project/Node/Installation/Worker: {}", error)))?;
+        let work = crate::maintenance::SourceWork {
+            event_id: event_id.clone(),
+            project: body.project_id.clone(),
+            event_digest: event_digest.to_owned(),
+            objective: objective.clone(),
+            path: path.to_string_lossy().into_owned(),
+            spec,
+        };
+        let task_digest = work.spec.digest.clone();
+        let ticket = crate::maintenance::create_ticket(
+            &mut *store, &body.project_id, "read_summary", &objective,
+            &path.to_string_lossy(), None, grant_id, Some(&node_id), Some(worker), Some("read_summary"), None, Some(work),
+        ).map_err(|_| ApiError::denied("source_task_scope", "The frozen spec, physical capability or root authorization is unavailable or incompatible"))?;
+        let ticket_id = ticket["id"].as_str().ok_or_else(|| {
+            ApiError::conflict("source_task_identity_conflict", "New Ticket ID missing")
+        })?;
+        return Ok(Json(
+            json!({"ticket":store.detail(ticket_id)?,"source_event_id":event["id"],"task_digest":task_digest,"duplicate":false,"task_created":true,"linked_existing_authorized_ticket":false}),
+        ));
+    }
+    let spec = crate::source_events::validated_replay_spec(store, &event)?;
+    if spec["grant_id"] != *grant_id
+        || spec["node_id"] != node_id
+        || spec["worker_id"] != worker
+        || spec["project_id"] != body.project_id
+        || spec["relative_path"] != json!(path.to_string_lossy())
+    {
+        return Err(ApiError::conflict("source_task_rebind", "The event and its immutable work specification cannot be rebound to a different Ticket"));
+    }
+    let existing =
+        store.detail(event["task_ticket_id"].as_str().ok_or_else(|| {
+            ApiError::conflict("source_task_rebind", "Created Ticket ID missing")
+        })?)?;
+    Ok(Json(
+        json!({"ticket":existing,"source_event_id":event["id"],"task_digest":spec["digest"],"duplicate":true,"task_created":false,"linked_existing_authorized_ticket":true}),
+    ))
+}
+
 fn model_binding_for(
     store: &store::Store,
     request: &TicketRequest,
@@ -2972,6 +3097,11 @@ async fn approval(
             "Task is not awaiting approval",
         ));
     }
+    if decision == "reject" {
+        store.audit(Some(&ticket),"client","task.approval_rejected",&json!({"approval_id":required(&body,"approval_id",160)?,"assignment_created":false,"remains":"waiting_approval"}))?;
+        return Ok(Json(store.detail(&ticket)?));
+    }
+    crate::source_events::ensure_source_work_approval(&store, &ticket)?;
     crate::maintenance::retry(&store, &ticket)?;
     Ok(Json(store.detail(&ticket)?))
 }
@@ -3251,8 +3381,8 @@ async fn run_pipeline(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<Json<Value>> {
     uuid::Uuid::parse_str(&id).map_err(|_| ApiError::bad("Pipeline ID must be UUID"))?;
-    let store = state.lock()?;
-    crate::pipeline::advance_all(&store)?;
+    let mut store = state.lock()?;
+    crate::pipeline::advance_all(&mut store)?;
     Ok(Json(
         json!({"pipeline":crate::pipeline::detail(&store, &id)?}),
     ))
@@ -3358,9 +3488,9 @@ async fn skill_replay_start(
     axum::extract::Path(candidate): axum::extract::Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let store = state.lock()?;
+    let mut store = state.lock()?;
     Ok(Json(crate::skill_replay::create_or_get(
-        &store, &candidate, &body,
+        &mut store, &candidate, &body,
     )?))
 }
 

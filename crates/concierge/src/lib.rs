@@ -16,6 +16,7 @@ mod observation_input;
 pub mod pipeline;
 mod skill_replay;
 pub mod source_events;
+mod source_work;
 pub(crate) mod store;
 
 use anyhow::{bail, Result};
@@ -317,7 +318,7 @@ mod skill_replay_regressions {
 
     #[test]
     fn skill_suppression_never_deletes_or_reclassifies_original_evidence() {
-        let fixture = fixture();
+        let mut fixture = fixture();
         assert!(crate::maintenance::review_candidate(
             &fixture.store,
             &fixture.candidate,
@@ -407,7 +408,7 @@ mod skill_replay_regressions {
         )
         .is_err());
         assert!(crate::skill_replay::create_or_get(
-            &fixture.store,
+            &mut fixture.store,
             "empty-skill",
             &json!({"source_ticket_id":fixture.source_ticket})
         )
@@ -442,7 +443,7 @@ mod skill_replay_regressions {
 
     #[test]
     fn wrong_root_worker_scope_rejects_new_replay_and_rolls_back_ticket() {
-        let fixture = fixture();
+        let mut fixture = fixture();
         fixture
             .store
             .conn()
@@ -453,7 +454,7 @@ mod skill_replay_regressions {
             .unwrap();
         fixture.store.conn().execute("UPDATE project_bindings SET root_scope='/synthetic/other' WHERE id='binding-project-a'",[]).unwrap();
         assert!(crate::skill_replay::create_or_get(
-            &fixture.store,
+            &mut fixture.store,
             &fixture.candidate,
             &json!({"source_ticket_id":fixture.source_ticket})
         )
@@ -508,7 +509,7 @@ mod skill_replay_regressions {
 
     #[test]
     fn revoked_start_cannot_create_extra_ticket() {
-        let fixture = fixture();
+        let mut fixture = fixture();
         fixture
             .store
             .conn()
@@ -526,7 +527,7 @@ mod skill_replay_regressions {
             )
             .unwrap();
         assert!(crate::skill_replay::create_or_get(
-            &fixture.store,
+            &mut fixture.store,
             &fixture.candidate,
             &json!({"source_ticket_id":fixture.source_ticket})
         )
@@ -580,7 +581,7 @@ mod skill_replay_regressions {
     }
 
     #[test]
-    fn real_v6_snapshot_migrates_to_v12_without_rewriting_grant_artifact_or_audit() {
+    fn real_v6_snapshot_migrates_to_v13_without_rewriting_grant_artifact_or_audit() {
         let directory = tempfile::tempdir().unwrap();
         let db = rusqlite::Connection::open(directory.path().join("loom.sqlite3")).unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON;
@@ -604,7 +605,7 @@ mod skill_replay_regressions {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         assert!(store
             .query("SELECT * FROM skill_replays", [])
             .unwrap()
@@ -630,7 +631,7 @@ mod skill_replay_regressions {
 
     #[test]
     fn every_bad_source_link_is_rejected_before_querying_worker() {
-        let fixture = fixture();
+        let mut fixture = fixture();
         fixture
             .store
             .conn()
@@ -663,7 +664,7 @@ mod skill_replay_regressions {
                 }
             }
             assert!(crate::skill_replay::create_or_get(
-                &fixture.store,
+                &mut fixture.store,
                 &fixture.candidate,
                 &json!({"source_ticket_id":source})
             )
@@ -676,7 +677,7 @@ mod skill_replay_regressions {
             .execute("UPDATE tickets SET status='running' WHERE id='tkt-a'", [])
             .unwrap();
         assert!(crate::skill_replay::create_or_get(
-            &fixture.store,
+            &mut fixture.store,
             &fixture.candidate,
             &json!({"source_ticket_id":fixture.source_ticket})
         )
@@ -699,7 +700,7 @@ mod skill_replay_regressions {
             )
             .unwrap();
         assert!(crate::skill_replay::create_or_get(
-            &fixture.store,
+            &mut fixture.store,
             &fixture.candidate,
             &json!({"source_ticket_id":fixture.source_ticket})
         )
@@ -714,7 +715,7 @@ mod skill_replay_regressions {
             )
             .unwrap();
         assert!(crate::skill_replay::create_or_get(
-            &fixture.store,
+            &mut fixture.store,
             &fixture.candidate,
             &json!({"source_ticket_id":fixture.source_ticket})
         )

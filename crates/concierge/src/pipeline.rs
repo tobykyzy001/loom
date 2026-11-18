@@ -253,7 +253,7 @@ fn stage_row(store: &Store, pipeline: &Uuid, stage: &Phase) -> Result<Option<Val
 
 /// The single coordinator connection owns a real SQLite transaction while both
 /// its task and its pipeline mapping are created. A failure commits neither.
-fn with_transaction<T>(store: &Store, work: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+fn with_transaction<T>(store: &mut Store, work: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
     store.conn().execute("BEGIN IMMEDIATE", [])?;
     let result = work(store);
     match result {
@@ -290,7 +290,7 @@ pub fn create(store: &mut Store, body: &Value) -> Result<Value> {
     let (node, worker) = scope(store, &definition.read, &definition.project_id)?;
     with_transaction(store, |store| {
         let ticket = maintenance::create_ticket(
-            store,
+            &mut *store,
             &definition.project_id,
             "read_summary",
             &format!("{}: {}", name(&definition), definition.read.stage_id),
@@ -300,6 +300,7 @@ pub fn create(store: &mut Store, body: &Value) -> Result<Value> {
             Some(&node),
             Some(&worker),
             Some("read_summary"),
+            None,
             None,
         )?;
         let ticket_id = ticket["id"].as_str().context("First stage has no Ticket")?;
@@ -477,7 +478,7 @@ fn artifact_input_for_task(store: &Store, ticket_id: &str) -> Result<Value> {
 
 /// The edit Ticket embeds only the immutable, controller-produced source payload.
 /// It does not become a license to read the producer's local filesystem.
-fn descend(store: &Store, definition: &Definition) -> Result<()> {
+fn descend(store: &mut Store, definition: &Definition) -> Result<()> {
     let pipeline_id = definition.pipeline_id.to_string();
     let parent_row = stage_row(store, &definition.pipeline_id, &definition.read)?
         .context("Source stage is missing")?;
@@ -512,7 +513,7 @@ fn descend(store: &Store, definition: &Definition) -> Result<()> {
     if definition.edit.direct {
         return with_transaction(store, |store| {
             let ticket = maintenance::create_ticket(
-                store,
+                &mut *store,
                 &definition.project_id,
                 "edit_file",
                 &format!("{}: direct trim handoff", name(definition)),
@@ -522,6 +523,7 @@ fn descend(store: &Store, definition: &Definition) -> Result<()> {
                 Some(&node),
                 Some(&worker),
                 Some("edit_file"),
+                None,
                 None,
             )?;
             let child_id = ticket["id"]
@@ -542,7 +544,7 @@ fn descend(store: &Store, definition: &Definition) -> Result<()> {
     }
     with_transaction(store, |store| {
         let ticket = maintenance::create_ticket(
-            store,
+            &mut *store,
             &definition.project_id,
             "edit_file",
             &format!("{}: {}", name(definition), definition.edit.stage_id),
@@ -552,6 +554,7 @@ fn descend(store: &Store, definition: &Definition) -> Result<()> {
             Some(&node),
             Some(&worker),
             Some("edit_file"),
+            None,
             None,
         )?;
         let child_id = ticket["id"]
@@ -576,7 +579,7 @@ fn descend(store: &Store, definition: &Definition) -> Result<()> {
     Ok(())
 }
 /// Bounded polling hook. Pipelines only advance from actual successful Task reports.
-pub fn advance_all(store: &Store) -> Result<()> {
+pub fn advance_all(store: &mut Store) -> Result<()> {
     let runs = store.query(
         "SELECT id,cancel_requested_at,definition_json FROM document_pipeline_runs ORDER BY created_at LIMIT 128",
         [],

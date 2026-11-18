@@ -110,7 +110,7 @@ try {
   await expectReject(observe('fixture-healthy', 'rollback', 'healthy'), e => e.status === 501)
   const doctor = await promisify(execFile)('cargo', ['run', '-q', '-p', 'loom-concierge', '--bin', 'loom', '--', '--data-dir', server.dataDir, 'doctor'], { env: { ...process.env, LOOM_CLIENT_TOKEN: server.clientToken }, timeout: 120000 })
   const persistence = JSON.parse(doctor.stdout)
-  assert.equal(persistence.schema_version, 11)
+  assert.equal(persistence.schema_version, 13)
   assert.equal(persistence.integrity[0].integrity_check, 'ok')
   assert.equal(persistence.audit_valid, true)
   assert.equal((await client.get('/api/v1/audit/verify')).valid, true)

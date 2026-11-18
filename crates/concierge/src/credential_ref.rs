@@ -43,7 +43,7 @@ struct Target {
     inspection_proof: Value,
 }
 
-pub(crate) fn create(store: &Store, project_id: &str, body: &Value) -> Result<Value, ApiError> {
+pub(crate) fn create(store: &mut Store, project_id: &str, body: &Value) -> Result<Value, ApiError> {
     let input: ActionInput = deserialize(body)?;
     let project = store
         .get("projects", project_id)?
@@ -106,7 +106,7 @@ pub(crate) fn create(store: &Store, project_id: &str, body: &Value) -> Result<Va
         "Inspect the explicitly scoped host record only; no secret extraction, Clone or arbitrary provider action."
     };
     let request = maintenance::create_ticket(
-        store,
+        &mut *store,
         project_id,
         "credential_ref",
         objective,
@@ -116,6 +116,7 @@ pub(crate) fn create(store: &Store, project_id: &str, body: &Value) -> Result<Va
         Some(grant["node_id"].as_str().unwrap_or_default()),
         Some(grant["worker_id"].as_str().unwrap_or_default()),
         Some("credential_ref"),
+        None,
         None,
     )?;
     Ok(json!({"ticket":request, "credential_ref":reference, "lookup_performed":false}))
@@ -773,7 +774,7 @@ mod tests {
     #[test]
     fn credential_metadata_needs_precise_scope_and_separate_actions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
         let at = crate::now();
         store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','fixture','/fixture','read_write',1,?1,'{}')", [&at]).unwrap();
         let roots = json!({"project_roots":{"project":"/fixture"}});
@@ -787,7 +788,7 @@ mod tests {
             store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,revoked_at,digest,created_at,project_binding_id) VALUES(?1,'project','node','default','installation',?2,1,NULL,?3,?4,'root-binding')", params![id,operations,crate::sha256(id.as_bytes()),at]).unwrap();
         }
         let inspected = create(
-            &store,
+            &mut store,
             "project",
             &json!({"action":"inspect","grant_id":"inspect-grant"}),
         )
@@ -813,7 +814,7 @@ mod tests {
             ("inspect", "revoke-grant"),
         ] {
             assert!(create(
-                &store,
+                &mut store,
                 "project",
                 &json!({"action":wrong.0,"grant_id":wrong.1})
             )
@@ -828,7 +829,7 @@ mod tests {
             .unwrap();
         assert!(delivery(&store, &inspected["ticket"], &asg).is_err());
         assert!(create(
-            &store,
+            &mut store,
             "project",
             &json!({"action":"inspect","grant_id":"inspect-grant"})
         )

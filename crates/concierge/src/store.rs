@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 12 {
+        if current > 13 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 12)"
+                "database schema is from a newer Loom release (found {current}, supported 13)"
             )
         }
         if current == 0 {
@@ -307,6 +307,69 @@ impl Store {
                 tx.execute("ALTER TABLE messages ADD COLUMN source_event_id TEXT REFERENCES source_events(id)", [])?;
             }
             tx.execute("PRAGMA user_version=12", [])?;
+            tx.commit()?;
+        }
+        if current < 13 {
+            let tx = self.connection.unchecked_transaction()?;
+            for (column, definition) in [
+                ("task_ticket_id", "TEXT"),
+                ("task_digest", "TEXT"),
+                ("creation_kind", "TEXT NOT NULL DEFAULT 'unbound'"),
+                ("task_spec_json", "TEXT"),
+            ] {
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('source_events') WHERE name=?1",
+                    [column],
+                    |r| r.get(0),
+                )?;
+                if exists == 0 {
+                    tx.execute(
+                        &format!("ALTER TABLE source_events ADD COLUMN {column} {definition}"),
+                        [],
+                    )?;
+                }
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS source_work_specs(
+                   event_id TEXT PRIMARY KEY REFERENCES source_events(id),
+                   task_ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id),
+                   spec_json TEXT NOT NULL UNIQUE, digest TEXT NOT NULL UNIQUE,
+                   created_at TEXT NOT NULL
+                 );
+                 CREATE UNIQUE INDEX IF NOT EXISTS source_events_one_task ON source_events(task_ticket_id) WHERE task_ticket_id IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS source_task_valid
+BEFORE UPDATE OF task_ticket_id,task_digest,task_spec_json,creation_kind ON source_events
+FOR EACH ROW WHEN NOT (NEW.task_ticket_id IS NULL AND NEW.creation_kind='unbound' AND NEW.task_digest IS NULL AND NEW.task_spec_json IS NULL) BEGIN
+ SELECT RAISE(ABORT,'source_task_fields_required') WHERE NEW.task_ticket_id IS NULL OR NEW.task_digest IS NULL OR NEW.task_spec_json IS NULL OR NEW.creation_kind<>'explicit_task_created_after_intake';
+ SELECT RAISE(ABORT,'source_task_ticket_mismatch') WHERE NOT EXISTS(
+  SELECT 1 FROM tickets WHERE id=NEW.task_ticket_id AND kind='read_summary' AND content IS NULL
+  AND grant_id=json_extract(NEW.task_spec_json,'$.grant_id') AND grant_digest=json_extract(NEW.task_spec_json,'$.grant_digest')
+  AND node_id=json_extract(NEW.task_spec_json,'$.node_id') AND installation_id=json_extract(NEW.task_spec_json,'$.installation_id')
+  AND project_id=json_extract(NEW.task_spec_json,'$.project_id') AND worker_id=json_extract(NEW.task_spec_json,'$.worker_id')
+  AND objective=json_extract(NEW.task_spec_json,'$.objective') AND relative_path=json_extract(NEW.task_spec_json,'$.relative_path'));
+ SELECT RAISE(ABORT,'source_event_spec_mismatch') WHERE NEW.kind<>'user_message'
+  OR NEW.id<>json_extract(NEW.task_spec_json,'$.source_event_id') OR NEW.content<>json_extract(NEW.task_spec_json,'$.objective')
+  OR NEW.payload_digest<>json_extract(NEW.task_spec_json,'$.event_request_digest') OR NEW.task_digest<>json_extract(NEW.task_spec_json,'$.digest');
+ SELECT RAISE(ABORT,'source_work_spec_missing') WHERE NOT EXISTS(
+  SELECT 1 FROM source_work_specs WHERE event_id=NEW.id AND task_ticket_id=NEW.task_ticket_id AND spec_json=NEW.task_spec_json AND digest=NEW.task_digest);
+END;
+CREATE TRIGGER IF NOT EXISTS source_task_no_rebind
+BEFORE UPDATE OF task_ticket_id,task_digest,task_spec_json,creation_kind ON source_events
+FOR EACH ROW WHEN OLD.task_ticket_id IS NOT NULL OR OLD.task_digest IS NOT NULL OR OLD.task_spec_json IS NOT NULL OR OLD.creation_kind<>'unbound' BEGIN
+ SELECT RAISE(ABORT,'bound_source_task_is_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS source_event_identity_immutable
+BEFORE UPDATE OF source_id,thread_id,external_event_id,kind,ticket_id,content,payload_digest,occurred_at,received_at,source_sequence,thread_sequence ON source_events BEGIN
+ SELECT RAISE(ABORT,'source_event_identity_is_immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS source_work_specs_no_update BEFORE UPDATE ON source_work_specs BEGIN
+                   SELECT RAISE(ABORT,'source_work_spec_immutable');
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS source_work_specs_no_delete BEFORE DELETE ON source_work_specs BEGIN
+                   SELECT RAISE(ABORT,'source_work_spec_immutable');
+                 END;",
+            )?;
+            tx.execute("PRAGMA user_version=13", [])?;
             tx.commit()?;
         }
         Ok(())
@@ -596,7 +659,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let models = store
             .query(
                 "SELECT id,assignment_digest,source_assignment_id FROM models",
@@ -654,7 +717,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);

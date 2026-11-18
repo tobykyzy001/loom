@@ -59,7 +59,7 @@ struct SourceProof {
 /// Only a pending candidate may issue a new replay. An accepted or pending
 /// candidate may reread existing proof; undo does not revive an execution or
 /// create a different normal task assignment.
-pub fn create_or_get(store: &Store, candidate_id: &str, body: &Value) -> Result<Value> {
+pub fn create_or_get(store: &mut Store, candidate_id: &str, body: &Value) -> Result<Value> {
     if candidate_id.len() > 160
         || body
             .as_object()
@@ -129,7 +129,7 @@ pub fn create_or_get(store: &Store, candidate_id: &str, body: &Value) -> Result<
             source_ticket_id
         );
         let replay_ticket = maintenance::create_ticket(
-            store,
+            &mut *store,
             &definition.project_id,
             "read_summary",
             &objective,
@@ -139,6 +139,7 @@ pub fn create_or_get(store: &Store, candidate_id: &str, body: &Value) -> Result<
             Some(&definition.node_id),
             Some(&definition.worker_id),
             Some("read_summary"),
+            None,
             None,
         )?;
         if replay_ticket["kind"] != "read_summary"
@@ -742,7 +743,7 @@ enum ArtifactState {
 
 /// BEGIN IMMEDIATE remains on the existing single Store connection. It never
 /// recursively requests State::lock or starts a second SQLite transaction.
-fn with_transaction<T>(store: &Store, work: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+fn with_transaction<T>(store: &mut Store, work: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
     store.conn().execute("BEGIN IMMEDIATE", [])?;
     match work(store) {
         Ok(value) => {

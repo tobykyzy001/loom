@@ -1186,7 +1186,7 @@ mod tests {
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(view["source_assignment_digest"], Value::Null);
     }

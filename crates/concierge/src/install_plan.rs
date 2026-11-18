@@ -598,7 +598,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 12);
+        assert_eq!(schema, 13);
         assert_eq!(
             store
                 .query("SELECT * FROM skill_replays", [])
@@ -620,7 +620,7 @@ mod tests {
         );
     }
     #[test]
-    fn v7_legacy_grant_and_skill_survive_schema_twelve() {
+    fn v7_legacy_grant_and_skill_survive_schema_thirteen() {
         let directory = tempfile::tempdir().unwrap();
         {
             let store = Store::open(directory.path()).unwrap();
@@ -648,7 +648,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 12);
+        assert_eq!(schema, 13);
         assert_eq!(
             store.get("grants", "legacy-grant").unwrap().unwrap()["digest"],
             "original-digest"

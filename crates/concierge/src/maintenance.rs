@@ -4,6 +4,15 @@ use anyhow::{bail, Context, Result};
 use rusqlite::params;
 use serde_json::{json, Value};
 
+pub(crate) struct SourceWork {
+    pub event_id: String,
+    pub project: String,
+    pub event_digest: String,
+    pub objective: String,
+    pub path: String,
+    pub spec: crate::source_work::TaskSpec,
+}
+
 pub fn grant_binding_for_placement(store: &Store, grant_id: &str) -> Result<Option<String>> {
     let Some(grant) = store.get("grants", grant_id)? else {
         return Ok(None);
@@ -94,7 +103,7 @@ pub fn matching_physical_node(
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_ticket(
-    store: &Store,
+    store: &mut Store,
     project_id: &str,
     kind: &str,
     objective: &str,
@@ -105,7 +114,27 @@ pub fn create_ticket(
     worker: Option<&str>,
     capability: Option<&str>,
     model_resource: Option<(&str, &str, Option<Value>)>,
+    source_work: Option<SourceWork>,
 ) -> Result<Value> {
+    if let Some(work) = &source_work {
+        if kind != "read_summary"
+            || content.is_some()
+            || model_resource.is_some()
+            || preferred != Some(work.spec.value["node_id"].as_str().unwrap_or_default())
+            || capability != Some("read_summary")
+            || worker != Some(work.spec.value["worker_id"].as_str().unwrap_or_default())
+            || work.project != project_id
+            || work.objective != objective
+            || work.path != path
+            || work.event_digest
+                != work.spec.value["event_request_digest"]
+                    .as_str()
+                    .unwrap_or_default()
+            || work.spec.value["grant_id"] != grant_id
+        {
+            bail!("The frozen Source task specification does not match this Ticket request");
+        }
+    }
     let node_id = matching_physical_node(
         store,
         capability.unwrap_or(kind),
@@ -146,7 +175,10 @@ pub fn create_ticket(
         }
     }
     let now = crate::now();
-    let ticket = id("tkt");
+    let ticket = source_work
+        .as_ref()
+        .and_then(|work| work.spec.value["ticket_id"].as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| id("tkt"));
     let binding = grant_binding_for_placement(store, grant_id)?;
     let mut placement = if let Some(binding_id) = &binding {
         crate::inventory::decide_placement(
@@ -180,8 +212,44 @@ pub fn create_ticket(
     let Some(node_id) = node_id else {
         let worker = worker.unwrap_or("default");
         let node = preferred.unwrap_or("waiting_for_host");
-        store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'waiting_approval',?7,'',?8,'',?9,?10,?10)",params![ticket,project_id,objective,kind,path,content,grant_id,node,worker,now])?;
-        store.audit(Some(&ticket),"controller","assignment.waiting",&json!({"required_capability":capability.unwrap_or(kind),"grant_id":grant_id,"hint":"Wait for a covered node or explicitly reassign with a new Grant.","placement":&placement}))?;
+        let placement_node = if let Some(work) = &source_work {
+            if work.event_digest
+                != work.spec.value["event_request_digest"]
+                    .as_str()
+                    .unwrap_or_default()
+                || work.spec.value["grant_digest"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+                || work.spec.value["installation_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+                || work.spec.value["grant_id"] != grant_id
+                || work.spec.value["project_id"] != project_id
+                || work.spec.value["node_id"] != node
+                || work.spec.value["worker_id"] != worker
+            {
+                bail!("The actual Node cannot mutate the frozen Source work specification");
+            }
+            work.spec.value["node_id"].as_str().unwrap_or_default()
+        } else {
+            node
+        };
+        let tx = store.conn_mut().savepoint()?;
+        tx.execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'waiting_approval',?7,?8,?9,?10,?11,?12,?12)",params![ticket,project_id,objective,kind,path,content,grant_id,source_work.as_ref().map(|work| work.spec.value["grant_digest"].as_str().unwrap_or_default()).unwrap_or_default(),placement_node,source_work.as_ref().map(|work| work.spec.value["installation_id"].as_str().unwrap_or_default()).unwrap_or_default(),worker,now])?;
+        crate::store::audit_tx(
+            &tx,
+            Some(&ticket),
+            "controller",
+            "assignment.waiting",
+            &json!({"required_capability":capability.unwrap_or(kind),"grant_id":grant_id,"hint":"Wait for a covered node or explicitly reassign with a new Grant.","placement":&placement}),
+        )?;
+        if let Some(work) = source_work {
+            crate::source_events::attach_event_to_ticket(&tx, &work)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+        }
+        tx.commit()?;
         return store.detail(&ticket).context("new queued ticket");
     };
     let grant = store.get("grants", grant_id)?.context("Grant not found")?;
@@ -194,22 +262,49 @@ pub fn create_ticket(
     let assignment = id("asg");
     let at = now;
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(75)).to_rfc3339();
-    store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,(SELECT digest FROM grants WHERE id=?7),?8,?9,?10,1,?11,?11)",params![ticket,project_id,objective,kind,path,content,grant_id,node_id["id"].as_str(),node_id["installation_id"].as_str(),worker,at])?;
-    store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES(?1,?2,?3,?4,1,?5,1,?6,?7)",params![assignment,ticket,node_id["id"].as_str(),worker,id("lease"),expires,at])?;
-    store.conn().execute("INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,visibility,created_at) VALUES(?1,?2,'user','concierge','activity',?3,'summary',?4)",params![crate::id("msg"),ticket,"Ticket saved; an authorized assignment and lease were issued.",at])?;
-    store.audit(
+    let tx = store.conn_mut().savepoint()?;
+    tx.execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,(SELECT digest FROM grants WHERE id=?7),?8,?9,?10,1,?11,?11)",params![ticket,project_id,objective,kind,path,content,grant_id,node_id["id"].as_str(),node_id["installation_id"].as_str(),worker,at])?;
+    tx.execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES(?1,?2,?3,?4,1,?5,1,?6,?7)",params![assignment,ticket,node_id["id"].as_str(),worker,id("lease"),expires,at])?;
+    tx.execute("INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,visibility,created_at) VALUES(?1,?2,'user','concierge','activity',?3,'summary',?4)",params![crate::id("msg"),ticket,"Ticket saved; an authorized assignment and lease were issued.",at])?;
+    crate::store::audit_tx(
+        &tx,
         Some(&ticket),
         "controller",
         "assignment.leased",
         &json!({"assignment_id":assignment,"node_id":node_id["id"],"grant_id":grant_id,"placement":&placement}),
     )?;
+    if let Some(work) = source_work {
+        if work.event_digest
+            != work.spec.value["event_request_digest"]
+                .as_str()
+                .unwrap_or_default()
+            || work.spec.value["node_id"] != node_id["id"]
+            || work.spec.value["installation_id"] != node_id["installation_id"]
+        {
+            bail!("The selected host or event no longer matches the immutable Source spec");
+        }
+        crate::source_events::attach_event_to_ticket(&tx, &work)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        crate::store::audit_tx(
+            &tx,
+            Some(&ticket),
+            "client",
+            "source.ticket.linked",
+            &json!({"source_event_id":work.event_id,"ticket_id":ticket,"task_digest":work.spec.digest,"binding":"independently_authorized_new_task"}),
+        )?;
+    }
+    tx.commit()?;
     store.detail(&ticket)
 }
 
-pub fn assignment_for_poll(store: &Store, node_id: &str) -> Result<Option<Value>> {
+pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Value>> {
     crate::pipeline::advance_all(store)?;
     let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at, g.operations as grant_operations FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND g.revoked_at IS NULL AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling') ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
     if let Some(mut assignment) = assignment {
+        crate::source_events::ensure_source_work_approval(
+            store,
+            assignment["ticket_id"].as_str().unwrap_or_default(),
+        )?;
         let current = assignment["lease_epoch"].as_i64().unwrap_or(0);
         let id = assignment["assignment_id"]
             .as_str()

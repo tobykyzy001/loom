@@ -47,7 +47,7 @@ pub struct PreviewQuery {
     after_sequence: Option<i64>,
     limit: Option<usize>,
 }
-fn opaque(raw: &str, label: &'static str) -> ApiResult<String> {
+pub(crate) fn opaque(raw: &str, label: &'static str) -> ApiResult<String> {
     if raw.is_empty()
         || raw.len() > 160
         || !raw
@@ -201,10 +201,17 @@ fn event_value(query: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "payload_digest":query.get::<_,String>(6)?, "ticket_id":query.get::<_,Option<String>>(7)?, "occurred_at":query.get::<_,Option<String>>(8)?,
         "received_at":query.get::<_,String>(9)?, "source_sequence":query.get::<_,i64>(10)?, "thread_sequence":query.get::<_,i64>(11)?,
         "client_thread_id":query.get::<_,String>(12)?,
+        "task_ticket_id":query.get::<_,Option<String>>(13)?,
+        "task_digest":query.get::<_,Option<String>>(14)?,
+        "creation_kind":query.get::<_,Option<String>>(15)?,
+        "task_spec":query.get::<_,Option<String>>(16)?.and_then(|raw|serde_json::from_str::<Value>(&raw).ok()),
+        "legacy_reference":query.get::<_,Option<String>>(7)?.map(|_|"unverified_intake_reference"),
+        "task_spec_raw":query.get::<_,Option<String>>(16)?.unwrap_or_default(),
     }))
 }
 const EVENT_COLUMNS: &str = "id,source_id,thread_id,external_event_id,kind,content,payload_digest,ticket_id,occurred_at,received_at,source_sequence,thread_sequence";
-const EVENT_READ_COLUMNS: &str = "id,source_id,thread_id,external_event_id,kind,content,payload_digest,ticket_id,occurred_at,received_at,source_sequence,thread_sequence,(SELECT t.client_thread_id FROM source_threads t WHERE t.id=source_events.thread_id AND t.source_id=source_events.source_id) AS client_thread_id";
+const EVENT_READ_COLUMNS: &str = "id,source_id,thread_id,external_event_id,kind,content,payload_digest,ticket_id,occurred_at,received_at,source_sequence,thread_sequence,(SELECT t.client_thread_id FROM source_threads t WHERE t.id=source_events.thread_id AND t.source_id=source_events.source_id) AS client_thread_id,task_ticket_id,task_digest,creation_kind,task_spec_json";
+const SCOPED_EVENT_READ_COLUMNS: &str = "event.id AS id,event.source_id AS source_id,event.thread_id AS thread_id,event.external_event_id AS external_event_id,event.kind AS kind,event.content AS content,event.payload_digest AS payload_digest,event.ticket_id AS ticket_id,event.occurred_at AS occurred_at,event.received_at AS received_at,event.source_sequence AS source_sequence,event.thread_sequence AS thread_sequence,(SELECT t.client_thread_id FROM source_threads t WHERE t.id=event.thread_id AND t.source_id=event.source_id) AS client_thread_id,event.task_ticket_id AS task_ticket_id,event.task_digest AS task_digest,event.creation_kind AS creation_kind,event.task_spec_json AS task_spec_json";
 fn fetch_event(
     tx: &rusqlite::Transaction<'_>,
     source: &str,
@@ -227,6 +234,147 @@ fn receipt(event: Value, duplicate: bool) -> Value {
     value["permission_granted"] = json!(false);
     value["delivery_stage"] = json!("recorded");
     value
+}
+
+pub(crate) fn lookup_client_event(store: &Store, source_event_id: &str) -> ApiResult<Value> {
+    let source_event_id = opaque(source_event_id, "source_event_id")?;
+    let mut found = store.query(&format!("SELECT {SCOPED_EVENT_READ_COLUMNS} FROM source_events event JOIN source_instances source ON event.source_id=source.id AND source.owner_key=?2 WHERE event.id=?1"), params![source_event_id, OWNER])?
+        .pop().ok_or_else(|| ApiError::missing("Source event not found for this client"))?;
+    let raw = found["task_spec_json"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    found["task_spec_raw"] = json!(raw);
+    found["legacy_reference"] = found["ticket_id"]
+        .as_str()
+        .map(|_| json!("unverified_intake_reference"))
+        .unwrap_or(Value::Null);
+    found["task_spec"] = found["task_spec_raw"]
+        .as_str()
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            serde_json::from_str(raw).unwrap_or_else(|_| json!({"invalid_source_work_spec":true}))
+        })
+        .unwrap_or(Value::Null);
+    if found["task_spec"]["invalid_source_work_spec"] == true {
+        return Err(ApiError::conflict(
+            "source_task_identity_conflict",
+            "Stored raw Source spec is not valid JSON",
+        ));
+    }
+    Ok(found)
+}
+
+pub(crate) fn validated_replay_spec(store: &Store, event: &Value) -> ApiResult<Value> {
+    let raw_spec = event["task_spec_raw"].as_str().ok_or_else(|| {
+        ApiError::conflict(
+            "source_task_identity_conflict",
+            "Stored Source spec is missing its raw JSON representation",
+        )
+    })?;
+    let value: Value = serde_json::from_str(raw_spec).map_err(|error| {
+        ApiError::conflict(
+            "source_task_identity_conflict",
+            format!("Stored Source spec could not be parsed: {error}"),
+        )
+    })?;
+    let strict_type: loom_protocol::SourceWorkSpecV1 = serde_json::from_value(value.clone())
+        .map_err(|error| {
+            ApiError::conflict(
+                "source_task_identity_conflict",
+                format!("Stored Source spec has wrong fields or identity types: {error}"),
+            )
+        })?;
+    if !strict_type.validate() {
+        return Err(ApiError::conflict(
+            "source_task_identity_conflict",
+            "Stored Source spec does not satisfy the protocol constraints",
+        ));
+    }
+    let spec = crate::source_work::from_stored(
+        value,
+        event["task_digest"].as_str().unwrap_or_default(),
+        raw_spec,
+    )
+    .map_err(|error| {
+        ApiError::conflict(
+            "source_task_identity_conflict",
+            format!("The stored Source task specification is invalid: {error}"),
+        )
+    })?;
+    let ticket = store.detail(event["task_ticket_id"].as_str().unwrap_or_default())?;
+    if event["creation_kind"] != "explicit_task_created_after_intake"
+        || event["task_ticket_id"] != spec.value["ticket_id"]
+        || event["id"] != spec.value["source_event_id"]
+        || event["payload_digest"] != spec.value["event_request_digest"]
+        || event["content"] != spec.value["objective"]
+        || ticket["objective"] != spec.value["objective"]
+        || ticket["project_id"] != spec.value["project_id"]
+        || ticket["kind"] != spec.value["kind"]
+        || ticket["id"] != spec.value["ticket_id"]
+        || ticket["relative_path"] != spec.value["relative_path"]
+        || ticket["grant_id"] != spec.value["grant_id"]
+        || ticket["grant_digest"] != spec.value["grant_digest"]
+        || ticket["worker_id"] != spec.value["worker_id"]
+        || ticket["node_id"] != spec.value["node_id"]
+        || ticket["installation_id"] != spec.value["installation_id"]
+        || ticket["content"] != spec.value["content"]
+    {
+        let failure = if event["content"] != spec.value["objective"] {
+            "event content does not match the frozen objective"
+        } else {
+            "ticket identity or immutable grant/work scope differs from its frozen digest"
+        };
+        return Err(ApiError::conflict("source_task_rebind", failure));
+    }
+    Ok(spec.value)
+}
+
+pub(crate) fn ensure_source_work_approval(store: &Store, ticket_id: &str) -> ApiResult<()> {
+    let mut events = store.query(
+        "SELECT id,task_ticket_id,task_digest,creation_kind,task_spec_json AS task_spec_raw,payload_digest,content FROM source_events WHERE task_ticket_id=?1",
+        [ticket_id],
+    )?;
+    if events.is_empty() {
+        return Ok(());
+    }
+    let event = events.pop().unwrap_or_default();
+    let spec = validated_replay_spec(store, &event)?;
+    crate::source_work::new_source_job_is_dispatchable(store,&spec)
+        .map_err(|_| ApiError::denied("grant_scope","Source work approval still requires the original exact current Grant, Binding, root, Node and Worker; it cannot reissue different authority"))
+}
+
+pub(crate) fn attach_event_to_ticket(
+    connection: &rusqlite::Connection,
+    work: &crate::maintenance::SourceWork,
+) -> ApiResult<()> {
+    if work.spec.value["source_event_id"] != work.event_id
+        || work.spec.value["objective"] != work.objective
+        || work.spec.value["event_request_digest"] != work.event_digest
+        || work.spec.value["digest"] != json!(work.spec.digest)
+    {
+        return Err(ApiError::conflict(
+            "source_task_identity_conflict",
+            "The frozen work spec must identify exactly this event, objective and digest",
+        ));
+    }
+    let spec_json = loom_protocol::canonical::json(&work.spec.value)
+        .map_err(|_| ApiError::bad("Source work specification must be bounded JSON"))?;
+    connection.execute(
+        "INSERT INTO source_work_specs(event_id,task_ticket_id,spec_json,digest,created_at) VALUES(?4,?1,?2,?3,?5)",
+        params![work.spec.value["ticket_id"].as_str().unwrap_or_default(), spec_json,work.spec.digest.as_str(),work.event_id.as_str(),work.spec.value["created_at"].as_str().unwrap_or_default()],
+    )?;
+    let affected = connection.execute(
+        "UPDATE source_events SET task_ticket_id=?1,task_digest=?2,task_spec_json=?3,creation_kind='explicit_task_created_after_intake' WHERE id=?4 AND kind='user_message' AND content=?5 AND task_ticket_id IS NULL AND creation_kind='unbound' AND source_id IN (SELECT id FROM source_instances WHERE owner_key=?6)",
+        params![work.spec.value["ticket_id"].as_str().unwrap_or_default(), work.spec.digest.as_str(),spec_json,work.event_id.as_str(),work.objective.as_str(),OWNER],
+    )?;
+    if affected != 1 {
+        return Err(ApiError::conflict(
+            "source_event_already_bound",
+            "Source event is already assigned elsewhere; the new ticket and its assignment must be rolled back",
+        ));
+    }
+    Ok(())
 }
 
 pub fn ingest(store: &mut Store, request: AppendEvent) -> ApiResult<Value> {
@@ -568,7 +716,7 @@ mod tests {
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             upgraded.get("grants", "legacy-grant").unwrap().unwrap()["digest"],
@@ -606,7 +754,7 @@ mod tests {
             .is_empty());
         drop(upgraded);
         let reopened = Store::open(directory.path())
-            .expect("current v12 must reopen without a future-version refusal");
+            .expect("current v13 must reopen without a future-version refusal");
         assert_eq!(
             reopened.get("tickets", "legacy-ticket").unwrap().unwrap()["status"],
             "running"
@@ -668,6 +816,73 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["source_event_id"], events[0]["id"]);
+    }
+
+    #[test]
+    fn existing_v12_ticket_reference_is_history_not_a_frozen_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = now();
+        let original_payload_digest = store::hash(
+            &serde_json::to_string(&NormalizedEvent {
+                schema: EVENT_SCHEMA,
+                kind: "user_message",
+                source_id: "s".to_owned(),
+                thread_id: "thread".to_owned(),
+                event_id: "evt".to_owned(),
+                content: "Original event content".to_owned(),
+                ticket_id: Some("t".to_owned()),
+                occurred_at: None,
+            })
+            .unwrap(),
+        );
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .conn()
+                .execute_batch(
+                    "DROP INDEX source_events_one_task;
+                 DROP TRIGGER source_task_valid;
+                 DROP TRIGGER source_task_no_rebind;
+                 DROP TRIGGER source_event_identity_immutable;
+                 DROP TRIGGER source_work_specs_no_update;
+                 DROP TRIGGER source_work_specs_no_delete;
+                 DROP TABLE source_work_specs;
+                 ALTER TABLE source_events DROP COLUMN task_ticket_id;
+                 ALTER TABLE source_events DROP COLUMN task_digest;
+                 ALTER TABLE source_events DROP COLUMN creation_kind;
+                 ALTER TABLE source_events DROP COLUMN task_spec_json;
+                 PRAGMA user_version=12;",
+                )
+                .unwrap();
+            store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('p','p','/fixture','read_only',1,?1,'{}')",[&at]).unwrap();
+            store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('g','p','n','default','i','[\"read\"]',1,'d',?1)",[&at]).unwrap();
+            store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('t','p','Existing historical reference','read_summary','input.txt',NULL,'succeeded','g','d','n','i','default',1,0,?1,?1)",[&at]).unwrap();
+            store.conn().execute("INSERT INTO source_instances(id,owner_key,source_key,kind,definition_digest,last_sequence,created_at,updated_at) VALUES('s',?1,'web-input','web','d',1,?2,?2)",params![OWNER,at]).unwrap();
+            store.conn().execute("INSERT INTO source_threads(id,source_id,client_thread_id,last_sequence,created_at,updated_at) VALUES('th','s','thread',1,?1,?1)",[&at]).unwrap();
+            store.conn().execute("INSERT INTO source_events(id,source_id,thread_id,external_event_id,kind,content,payload_digest,ticket_id,received_at,source_sequence,thread_sequence) VALUES('e','s','th','evt','user_message','Original event content',?2,'t',?1,1,1)",params![at,original_payload_digest]).unwrap();
+        }
+        let mut upgraded = Store::open(dir.path()).unwrap();
+        let event = lookup_client_event(&upgraded, "e").unwrap();
+        assert_eq!(event["ticket_id"], "t");
+        assert_eq!(event["task_ticket_id"], Value::Null);
+        assert_eq!(event["creation_kind"], "unbound");
+        assert_eq!(event["task_spec"], Value::Null);
+        assert!(upgraded
+            .query("SELECT * FROM source_work_specs", [])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            upgraded.detail("t").unwrap()["objective"],
+            "Existing historical reference"
+        );
+        let receipt = ingest(&mut upgraded,serde_json::from_value(json!({"source_id":"s","thread_id":"thread","event_id":"evt","content":"Original event content","ticket_id":"t"})).unwrap()).unwrap();
+        assert_eq!(receipt["payload_digest"], original_payload_digest);
+        assert!(receipt["duplicate"].as_bool().unwrap());
+        let current = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            lookup_client_event(&current, "e").unwrap()["creation_kind"],
+            "unbound"
+        );
     }
 
     #[test]

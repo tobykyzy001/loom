@@ -209,14 +209,27 @@ try {
   assert.equal(recovered.events[0].id, first.id)
   assert.equal(recovered.source_cursor, 4)
   assert.equal(recovered.thread.last_sequence, 4)
-  assert.equal(scalar("SELECT user_version FROM pragma_user_version"), 12)
+  assert.equal(scalar("SELECT user_version FROM pragma_user_version"), 13)
+  assert.equal(scalar("SELECT COUNT(*) FROM source_work_specs"), 0)
+  for (const request of [firstInput, eventBody(sourceId, 'event-linked', 'Link this immutable message to already authorized work', { ticket_id: ticket.id })]) {
+    const actual = await admin.post('/api/v1/source-events', request)
+    assert.equal(actual.duplicate, true)
+    assert.equal(actual.creation_kind, 'unbound')
+    assert.equal(actual.task_ticket_id, null)
+    assert.equal(actual.task_digest, null)
+    assert.equal(actual.task_spec, null)
+  }
+  const restoredHistory = (await admin.get(`/api/v1/source-events?source_id=${encodeURIComponent(sourceId)}&thread_id=thread-alpha&limit=200`)).events.find(row => row.id === linked.id)
+  assert.equal(restoredHistory.legacy_reference, 'unverified_intake_reference')
+  assert.equal(restoredHistory.ticket_id, ticket.id)
+  assert.equal(restoredHistory.task_ticket_id, null)
   assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
   console.log(JSON.stringify({ overall: 'PASS', schema: 'loom.source-event-verification.v1',
     registration_idempotent: true, concurrent_first_registration_idempotent: true,
     exact_replay_digest_and_original_receipt: true, source_thread_namespace_isolation: true,
     changed_content_and_cross_thread_conflict: true, opaque_cursor_bound_to_owner_source_thread: true,
     cursor_paging_not_occurred_at: true, legacy_messages_kept_null_and_dedup_unchanged: true,
-    linked_existing_ticket_unchanged: true, schema12_upgrade_persists_history: true,
+    linked_existing_ticket_unchanged: true, schema13_upgrade_persists_history: true,
     restart_persists_cursor_ids_and_sequences: true, no_new_task_grant_or_agent_effect: true,
     not_claimed: ['automatic task intent / automated granted execution', 'multi-principal tenant matrix',
       'remote inbox, OAuth, actual IM or network discovery', 'distributed exactly-once or multi-process shared Leader locks',

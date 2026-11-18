@@ -1,6 +1,6 @@
 # SourceInstance / Thread / Trigger — 当前受限入口
 
-**入口：** `node tests/sources/events.mjs`，实际 Rust Concierge + SQLite + 真 HTTP，`LOCAL` ephemeral server/root only。
+**入口：** `node tests/sources/events.mjs`（接收/幂等/恢复）与 `node tests/sources/authorized-ticket.mjs`（显式授权工作/原子关联），实际 Rust Concierge + SQLite + 真 HTTP 与真实 Local Node，`LOCAL` ephemeral server/root only。
 
 这是M0 **Source / Trigger / Thread 基础设施**，不是完整的意图解析、Agent 运行、真实联网消息接线或一个自动任务系统。
 
@@ -17,21 +17,28 @@
 - **预览：** `GET /source-events` 要求明确 `source_id` 与 `thread_id`，设有缺省只读50、最大200。按source/server sequence而不是提供的发生时间做keyset读取，并返回 internal/client thread 信息。没有跨线程“自动展开所有”或星号 wildcard。
 - `next_cursor` 是 服务保存的opaque cursor (`loom.source-page.v1`)，绑定owner、actual source、actual thread、schema及sequence，存进 `source_event_cursors`。使用后必须只传它（可加限 页数)；不能再替换source/thread/order，也不能跨过另一Source继续翻页。未知cursor、跨namespace cursor和过界 limit显式拒绝。Last item sourceServer seq才知道下一offset；不存在更多记录时没有铸造新cursor。分页读写仍在当前store事务中，保留并发后续插入的连续排序，不是把内存响应位置当成唯一事实。
 
-## v12、现有消息与旧任务
+## v13、现有消息、独立授权规格与旧任务
 
-本次采用**additive源schema12**：添加 `source_instances`、`source_threads`、`source_events` 、 `source_event_cursors`，以及 nullable `messages.source_event_id`。现有 `source_ticket_id` 是任务证据 引用，而这里 SourceInstance/Trigger/Thread 是**入口身份**，二者不混淆。
+**additive源schema12** 添加 `source_instances`、`source_threads`、`source_events` 、 `source_event_cursors`，以及 nullable `messages.source_event_id`。现有 `source_ticket_id` 是任务证据引用，而这里 SourceInstance/Trigger/Thread 是**入口身份**，二者不混淆。
 
-`crates/concierge/src/source_events.rs` 的迁移测试涵盖实际 populated v11：存在Project、Grant、Ticket、Assignment、Artifact、Message，所有原ID/内容/grant digest/status 保持，Legacy message新 field是 null；schema 切到12后还能**再次打开同一store**而不被未来版本 误拒绝。更早快照即使原本没有messages table，也会**只创建符合既有消息结构的空表**（含可空 `source_event_id`），让后续Source ingestion真的有位置记录一条新message，而不虚构历史消息。已有表则保留原始内容和NULL relation，绝不把旧消息伪造成新Source；这种补DDL和现在可接收/重开场景也都有覆盖。未改变中央原任务权限、Grant/Artifact模型或DSH版本。不会额外写DSH Session/log或访问私有源提供方。
+**schema13 再分开历史关系与授权建造：** 接收时可选的 `source_events.ticket_id` 永远是 `unverified_intake_reference`，不能用来申请或重放新工作。用户明确另外提交 `source_event_id + project + read_summary + 实际文件 + grant + 物理 Node/Worker` 之后，才从真实 Grant 派生它的 ProjectBinding/Node/Installation/root，重新校验 read operation 与全部 identity 才能创建一张新 Ticket。`loom.source-work-spec.v1` 持久保存及 canonically 固定这些字段、事件 ID/original digest 和新 Ticket ID；`task_ticket_id`、非空 `creation_kind=explicit_task_created_after_intake`、`task_digest/task_spec_json` 与不可变 `source_work_specs` 只表示这一新建工作关系，不会增加 Grant。
+
+历史 Ticket 若有合法来源 spec，以同一输入再次提交只返回原 Ticket 与原始 digest，不新增 Assignment 或 Artifact；这是单写者 Source→Ticket 创建去重，不是“旧 Ticket 自动持续获准再次执行”、Agent 意图解释或跨机 exactly-once。后续 Grant 撤销不抹掉这段历史，但第一次新工作仍要求当时有效 grant 与 binding，旧 ticket reference 即便指向已完成普通 Task 也不能绕过。与 task 绑定后的 Source 原始身份/payload/thread/time/task spec 都禁止 SQL 改写、退绑或删掉来重新受理；内部路径不只依赖 Vue 隐藏按钮。
+
+独立 spec+Ticket+Assignment+activity+Audit 使用同一 SQLite savepoint。**先真正校验**当前原 Grant/Binding/root/Worker/Installation，Node 离线时只可形成 `waiting_approval`，没有 Assignment；明确 `/approval` 和实际 poll 前都重新验这些范围及原 Node 可用情况，不能靠一个还未撤销的 Grant 而从另一根启动。明确 reject 记录审核决定，保持等待/零 Assignment，不伪造取消或回滚。
+
+`crates/concierge/src/source_events.rs` 的迁移测试涵盖实际 populated v11：存在Project、Grant、Ticket、Assignment、Artifact、Message，所有原ID/内容/grant digest/status 保持，Legacy message新 field是 null；schema 经12增量到13后还能**再次打开同一store**而不被未来版本误拒绝。更早快照即使原本没有messages table，也会**只创建符合既有消息结构的空表**（含可空 `source_event_id`），让后续Source ingestion真的有位置记录一条新message，而不虚构历史消息。已有表则保留原始内容和NULL relation，绝不把旧消息伪造成新Source；这种补DDL和现在可接收/重开场景也都有覆盖。未改变中央原任务权限、Grant/Artifact模型或DSH版本。不会额外写DSH Session/log或访问私有源提供方。
 
 ## 已执行与尚存边界
 
 真实 driver 验证未认证拒绝、 同Source首建競争、读回与冲突、边界按钮uint duplicate、原Ticket状态/message与Artifact/grant不变化、另一个Source同eventId 同thread名独立、实际分页cursor、raw wildcard 拒绝、Source重新加入与重开一致、owned SQL行计数及audit verify。
 
 它**尚未完成**：
-- `Source user message → 授予任务的自动收款/意图识别`；当前明确 `task_created:false`，work必须独立核验现有Grant与project/root/worker。
+- `Source user message → 自动授予任务/意图识别/新的 Grant`；接收记录只记载输入。只有在下方显式业务规格再次提交时，work才独立核验已有Grant与project/root/worker。
 - approval 作为安全命令的解释/代理/调度/OAuth；没有将 `source_key` 用作远端URI执行路径。
 - 多 principal 的强度隔离 ；本切片面向当前已认证的单用户 client，不称通用多租户治理。查询/创建拥有current client来源，并将此映射再次带入一切ingest与preview。
 - 真实 iOS/Android、锁屏/杀进程、多Host、TLS、physical inbox、真实计费模型 和多平台worker。
+- 此 driver 的 restart 是 **Concierge重开**，不是 LocalNode/outbox重开；只有一个真实 Node / Installation，没有覆盖第二 Installation、真实多端Grant或Node身份隔离。未知请求有综合负例，但不称任意恶意JSON corpus、天然泛化source授权或安全多租户已经完成。
 - 全自动或跨进程 aggressive exactly-once claims.`database error after persistence ⇒ receipt delivery unsure`时需看原event以及后续receipt，而不是宣 称未发生。
 
 本轮不添加新UI 来源面板或消耗这一入口的自动执行驱动。需要实际把`source_event_id` 用显式用户提供工作与Grant去提交Ticket时，要保留这一不可变身份/核算关连并再次经过完整Ticket auth flow，不能借Source一条value把Grant做进 `content`。
