@@ -14,6 +14,7 @@ const localExpanded = ref(props.expanded)
 const sender = ref(props.preferences.sender_filter ?? '')
 watch(() => props.ticket?.id, () => { localExpanded.value = props.expanded; sender.value = props.preferences.sender_filter ?? ''; tab.value = 'activity' })
 watch(() => props.expanded, value => { localExpanded.value = value })
+watch(() => props.preferences.sender_filter, value => { sender.value = value ?? '' })
 
 const collaborations = computed(() => props.ticket?.messages?.map(message => ({ message, delegation: delegationFor(message) })).filter(item => item.message.segment === 'collaboration' || item.message.sender_kind === 'worker' || item.message.sender_kind === 'agent') ?? [])
 const visibleMessages = computed(() => collaborations.value.filter(item => !sender.value || item.message.sender === sender.value || item.message.sender_id === sender.value))

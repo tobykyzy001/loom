@@ -59,6 +59,25 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
    SQL、Ticket/Report/Artifact/Effect ID 集合与真实文件 hash 在折叠后不变。
    这里的消息是用于验证展示协议的普通本地 Node记录，**不是**伪造的
    DSH transcript，也不代表完整 Harness 交流均已接入。
+
+   **同段还实际验收了sender filtering，而不止sender_filter:null字段。**
+   现在另外通过同一个Node身份发一条具有独立request/session ID及`client`
+   display label的受控Node-authored进程事件，不另造用户/Agent/Host/Grant。
+   用户选择worker后只见原记录。服务端通过精确ticket PUT把sender改为`client`，
+   然后在**不换Ticket ID也不整页reload**的activity导航中，读取正在返回的真实
+   偏好；下拉框必须出现已验证的三个选项并停在新`client`值，只见对应label
+   的另一条记录，旧worker不得残留。再选worker只见原文，选“全部发送者”则
+   wire明确为`sender_filter:null`，两条均恢复，原SessionID/message identity不变。
+   因此这里的`client`仅是筛选标签演示，**不是开启新主体/第二物理用户**。
+   原生验证涵盖ticket内`sender_filter:worker/null`的已知记录：共7次ticket PUT
+   （四次expanded控制加三次sender选择）及两次独立global PUT，SQL里两条
+   collaboration records仍在，Report/Artifact/Effect/真实文件hash与Grant no变化。
+   新watcher会因当前Ticket的accepted sender偏好同步，同票读取不再卡旧值。
+   SQL guard通过`parse_sender_filter`拒绝number/object/空白/超160 UTF-8字节、
+   控制字符或非空global sender，不能把非文本吞成一个All，合法global只有展开默认。
+   `activity` notice不计入sender-filter的session_link子集，总计数另行说明。
+   原`assertMessageCount`也改为聚合读取，见到两个不同sender时不再错误使用单条innerText。
+   每次仍先精确等待Ticket详情及合作记录就绪，不把loading中的空select误判为同步生效。
 8. 新建 write ticket，不轮询之前点真实“取消任务”和确认按钮，必须看到
    “取消意图已记录”。随后 Node 承认取消，并断言 `cancelled`、无 Artifact、
    无目标文件。Center 将 ack 映射为 `true` 或 `1` 均是已有真实表现。

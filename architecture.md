@@ -400,6 +400,9 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 - `GET /api/v1/preferences` 保留原来的 `expanded`、`sender_filter`，并把当前响应的 `scope`、精确 `ticket_id` 和 `has_override` 一并返回：查到这一精确 Ticket 的偏好行才表示存在覆盖；没有行时的 `expanded` 只是从 global 计算出的有效显示默认值。没有这些元数据的旧响应不会被新客户端编造为用户的本地覆盖，只会显示不能同步的提示。
 - 前端严格核对该响应是否与所请求的 Ticket 一致。全局和各 Task 分别维护读取/写入忙标记、错误与代际；过期 A 不能覆写当前 B 的有效显示。一个合法但已离开 A 的读取可以更新 A 自身受验证的缓存，却不得写入 B 或 global。无 override 的视图为当前 global 的继承，不会把以前读到的 effective bool 固定为 A 自己的选择。只有存在的覆盖或用户显式保存的选择才建立该 Task 的本地选择缓存。
 - 保存失败只回滚该作用域之前的具体选择或当前继承值。直接读取 401 进入实际认证失效处理，403 或坏响应是该作用域的显示降级，不能相互掩盖、或由另一个低优先级读取重置认证结果。轮询及 audit 的提交也检查 selected Ticket 与已经加载的 Ticket 是同一个，避免切换瞬间把 A 的明细落到 B。
+- **单Task sender不全局串用**：`sender_filter=null` 明确表示不过滤；非 null 时必须位于精确 Ticket scope，且服务器只接受非空、UTF-8不超过160字节、无控制字符的字符串。Number/Object/空白/超长值400拒绝，不能借 `.as_str()` 的 null 静默降级变成All或丢掉原本有效的本Task selection。global当前只有展开默认，不接收一个非空的global sender选择后悄悄忽略。过滤只是在同一Ticket已有的`session_link`消息子集上筛选，原始ID和其它 kind的消息都不被改写，普通activity说明也不会被硬塞进这个过滤集合。
+- **偏好响应本身也驱动当前面板更新**：ActivityPanel不只初始化一次本地sender；它监听同Ticket的 `preferences.sender_filter`，即使没有换票或整页reload也要跟随后台接受后的新选择。选择某一发送者、恢复全部以及显式展开/折叠分别有真实UI与持久化断言，而不是把已存在的偏好value长成另一个Ticket的local选择或全局默认。
+- **计数和角色不以label冒充：** 实际浏览器在两个不同的`session_link`上做正例：sender=worker时原记录可见，sender=client（同一真实Node新增、用于本测试的display label）时严格只显示其带label的记录，复位null时两条还原。不是新增第二个真实用户、Host或Agent，更不是Grant/执行授权；报告/Artifact/Effect/文件SHA与Assignment ID在过滤前后一致。报告中的协作消息数按`session_link`计算，普通activity说明另行计入总数，不混成Filter可匹配条目的数量。
 - 这条归属只覆盖当前全局默认、单任务展开/再折叠/刷新和受授权过程的显示。多标签同时编辑同一坐标的冲突，尚不是全局协调协议；真实移动设备、完整 Harness 内部交流记录以及更多显示策略仍需单独证据。折叠继续显示“过程已折叠”的占位说明，不删除已授权的消息、Report、Artifact 或 Effect。
 
 ### 4.2 展示与协议边界

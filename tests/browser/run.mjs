@@ -521,7 +521,8 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   page.on('response', response => {
     const url = new URL(response.url())
     if (url.pathname === '/api/v1/preferences' && response.request().method() === 'PUT') {
-      preferenceWrites.push({ id: url.searchParams.get('ticket_id'), expanded: response.request().postDataJSON().expanded, status: response.status() })
+      const body = response.request().postDataJSON()
+      preferenceWrites.push({ id: url.searchParams.get('ticket_id'), expanded: body.expanded, sender_filter: body.sender_filter, status: response.status() })
     }
   })
   const readyForToggle = async () => {
@@ -546,7 +547,9 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   }
   const assertMessageCount = async (count) => {
     assert.equal(await page.locator('.collab-message').count(), count)
-    if (count) assert.match(await page.locator('.collab-message').innerText(), /bounded process message for display preference verification/)
+    const texts = await page.locator('.collab-message').allInnerTexts()
+    assert.equal(texts.length, count)
+    if (count) assert.match(texts.join('\n'), /bounded process message for display preference verification/)
     else await page.getByText('过程已折叠', { exact: true }).waitFor()
   }
   await expectPut(true, ticketId)
@@ -557,6 +560,7 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   await assertMessageCount(0)
   await expectPut(true, ticketId)
   await assertMessageCount(1)
+  const senderProof = await verifySenderFilter({ page, admin, node, ticketId, owner, sessionRef, withMessage })
   await page.locator('.main-nav').getByRole('button', { name: '项目', exact: true }).click()
   const globalToggle = page.getByRole('checkbox', { name: '默认展开过程消息', exact: true })
   assert.equal(await globalToggle.isChecked(), false, 'A task-level override must not change the global default checkbox')
@@ -566,17 +570,17 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
   await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
   assert.equal(await localToggle.isChecked(), true, 'Global expansion cannot erase an explicit task expansion')
-  await assertMessageCount(1)
+  await assertMessageCount(2)
   await page.locator('.main-nav').getByRole('button', { name: '项目', exact: true }).click()
   await globalToggle.locator('xpath=parent::label').click()
   await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
   await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
   assert.equal(await localToggle.isChecked(), true)
-  await assertMessageCount(1)
+  await assertMessageCount(2)
   await refreshTicket()
   await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
   assert.equal(await localToggle.isChecked(), true, 'A reload must restore task preference from authorized persistence, not shared UI state')
-  await assertMessageCount(1)
+  await assertMessageCount(2)
   await expectPut(false, ticketId)
   await assertMessageCount(0)
 
@@ -584,7 +588,7 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   try {
     assert.equal(db.prepare('SELECT value FROM settings WHERE key=?1').get('global_expanded').value, 'false', 'Global default was never modified by the task-only override')
     assert.equal(db.prepare('SELECT expanded FROM preferences WHERE ticket_id=?1').get(ticketId).expanded, 0)
-    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM messages WHERE ticket_id=?1 AND kind=?2').get(ticketId, 'session_link').count, 1, 'Collapsing a view never deletes authorized collaboration messages')
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM messages WHERE ticket_id=?1 AND kind=?2').get(ticketId, 'session_link').count, 2, 'Hiding/filtering a view never deletes authorized collaboration messages')
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM reports WHERE ticket_id=?1').get(ticketId).count, 1)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM artifacts WHERE ticket_id=?1').get(ticketId).count, 1)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM effects WHERE ticket_id=?1').get(ticketId).count, 1)
@@ -595,7 +599,7 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   assert.deepEqual(ticketAfter.effects.map(row => row.effect_id || row.id), withMessage.effects.map(row => row.effect_id || row.id))
   const bytes = await readFile(join(projectRoot, 'nested/browser-result.txt'))
   assert.equal(sha256(bytes), result.actual_write.content_sha256, 'Display preferences cannot change the real file effect')
-  assert.equal(preferenceWrites.filter(row => row.id === ticketId).length, 4)
+  assert.equal(preferenceWrites.filter(row => row.id === ticketId).length, 7)
   assert.equal(preferenceWrites.filter(row => row.id === null).length, 2)
   assert.ok(preferenceWrites.every(row => row.status === 200 && typeof row.expanded === 'boolean'))
   result.checks.push({
@@ -605,11 +609,108 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
       ticket_id: ticketId, session_id: sessionId, event_kind: 'session_link', sender: 'worker',
       initial_global: false, explicit_ticket_expansion: true, final_task_expanded: false,
       reports: ticketAfter.reports.length, artifacts: ticketAfter.artifacts.length, effects: ticketAfter.effects.length,
-      process_message_count: withMessage.messages.length, file_sha256: result.actual_write.content_sha256,
+      filtered_session_link_count: ticketAfter.messages.filter(message => message.kind === 'session_link').length,
+      total_message_count_including_activity: ticketAfter.messages.length,
+      file_sha256: result.actual_write.content_sha256,
       scoped_preference_put_responses: preferenceWrites,
-      event_provenance: `actual node-authored event through node.client.event for assignment=${owner.id}, not a claimed DSH transcript`,
+      sender_filter_evidence: senderProof,
+      event_provenance: `actual node-authored events for assignment=${owner.id}; the auxiliary sender=client is a display label on an ordinary Node-authored event, not a newly authorized user, Host, Agent or full DSH transcript`,
     },
   })
+}
+async function verifySenderFilter({ page, admin, node, ticketId, owner, sessionRef, withMessage }) {
+  // This extra record comes from the same authenticated Node and original assignment.
+  // `sender:'client'` is only a display-label fixture, NOT a newly simulated user,
+  // a second Agent or a new Grant/permission. It lets matching/hiding be distinct.
+  const labelContent = 'Node-authored collaboration record with a separate client display label for filter validation.'
+  const labelledRef = { ...sessionRef, session_id: randomUUID(), observed_seq: 2 }
+  const labelled = await node.client.http.post('/api/v1/nodes/events', {
+    protocol: 'loom.node.v1', node_id: node.nodeId, installation_id: node.installationId, request_id: randomUUID(),
+    ticket_id: ticketId, assignment_id: owner.id, lease_epoch: owner.lease_epoch,
+    kind: 'session_link', session_ref: labelledRef, sender: 'client', summary: labelContent, activity: labelContent,
+  }, { token: node.identity.token })
+  assert.equal(labelled.accepted, true, 'The extra visible record must go through the actual scoped Node transport')
+  const afterLabel = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(afterLabel.messages.filter(message => message.kind === 'session_link').length, 2)
+  const collaborTab = page.getByRole('tablist', { name: '任务过程视图', exact: true })
+  await collaborTab.getByRole('tab', { name: '协作', exact: true }).click()
+  await page.locator('.sender-filter select').waitFor()
+  const choose = async sender => {
+    const responsePromise = page.waitForResponse(response => response.request().method() === 'PUT'
+      && new URL(response.url()).pathname === '/api/v1/preferences'
+      && new URL(response.url()).searchParams.get('ticket_id') === ticketId)
+    await page.locator('.sender-filter select').selectOption(sender)
+    const response = await responsePromise
+    assert.equal(response.status(), 200)
+    const bodyName = response.request().postDataJSON()
+    assert.equal(bodyName.sender_filter, sender === '' ? null : sender, 'Reset to all senders is a real null on the wire, not an invented global field')
+    assert.equal(bodyName.expanded, true)
+  }
+  const globalPreference = await admin.get('/api/v1/preferences')
+  assert.equal(globalPreference.scope, 'global')
+  assert.equal(globalPreference.sender_filter, null)
+  const preferencesBefore = await admin.get(`/api/v1/preferences?ticket_id=${ticketId}`)
+  assert.equal(preferencesBefore.has_override, true)
+  assert.equal(preferencesBefore.sender_filter, null)
+  await choose('worker')
+  await page.locator('.sender-filter select').filter({ has: page.locator('option:checked', { hasText: 'worker' }) }).waitFor()
+  assert.equal(await page.locator('.sender-filter select').inputValue(), 'worker')
+  await page.locator('.collab-message').filter({ hasText: 'Node-authored bounded process message' }).waitFor()
+  assert.equal(await page.locator('.collab-message').count(), 1)
+  const workerPreference = await admin.get(`/api/v1/preferences?ticket_id=${ticketId}`)
+  assert.equal(workerPreference.scope, 'ticket')
+  assert.equal(workerPreference.ticket_id, ticketId)
+  assert.equal(workerPreference.has_override, true)
+  assert.equal(workerPreference.sender_filter, 'worker')
+  // Revalidation uses the existing UI activity route. There is no page.reload and
+  // no changing Ticket ID, so the local sender ref must follow the confirmed prop.
+  await admin.request('PUT', '/api/v1/preferences?ticket_id=' + encodeURIComponent(ticketId), { expanded: true, sender_filter: 'client' })
+  await page.locator('.main-nav').getByRole('button', { name: '活动', exact: true }).click()
+  const target = page.locator('.journal-item').filter({ hasText: 'Synthetic browser actual file write' })
+  await target.waitFor()
+  const reloadedPreferences = page.waitForResponse(response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === '/api/v1/preferences'
+    && new URL(response.url()).searchParams.get('ticket_id') === ticketId)
+  await target.click()
+  assert.equal((await reloadedPreferences).status(), 200)
+  const actualPreference = await (await reloadedPreferences).json()
+  assert.equal(actualPreference.scope, 'ticket')
+  assert.equal(actualPreference.ticket_id, ticketId)
+  assert.equal(actualPreference.sender_filter, 'client')
+  await page.locator('.ticket-detail .ticket-id').getByText(ticketId, { exact: false }).waitFor()
+  await collaborTab.getByRole('tab', { name: '协作', exact: true }).click()
+  await page.locator('.sender-filter select').waitFor({ state: 'visible' })
+  await page.waitForFunction(() => document.querySelector('.sender-filter select')?.options.length === 3)
+  await page.waitForFunction(() => document.querySelector('.sender-filter select')?.value === 'client')
+  assert.equal(await page.locator('.sender-filter select').inputValue(), 'client', 'The current Ticket must show the confirmed sender filter without a reload')
+  await collaborTab.getByRole('tab', { name: '协作', exact: true }).click()
+  assert.equal(await page.locator('.collab-message').count(), 1)
+  assert.equal(await page.locator('.collab-message').filter({ hasText: 'separate client display label' }).count(), 1)
+  assert.equal(await page.locator('.collab-message').filter({ hasText: 'Node-authored bounded process message for display preference verification.' }).count(), 0,
+    'A confirmed new sender choice must really hide the previous worker-only message, not remain stuck on its stale value')
+  await choose('worker')
+  assert.equal(await page.locator('.collab-message').count(), 1)
+  assert.equal(await page.locator('.collab-message').filter({ hasText: 'Node-authored bounded process message for display preference verification.' }).count(), 1)
+  const scoped = await admin.get(`/api/v1/preferences?ticket_id=${ticketId}`)
+  assert.equal(scoped.sender_filter, 'worker')
+  // null is the explicit reset to all senders, not a global preference or an invented identity.
+  await choose('')
+  assert.equal(await page.locator('.collab-message').count(), 2)
+  assert.equal(await page.locator('.collab-message').filter({ hasText: 'Node-authored bounded process message' }).count(), 1)
+  assert.equal(await page.locator('.collab-message').filter({ hasText: 'separate client display label' }).count(), 1)
+  const restoredPreferences = await admin.get(`/api/v1/preferences?ticket_id=${ticketId}`)
+  assert.equal(restoredPreferences.scope, 'ticket')
+  assert.equal(restoredPreferences.has_override, true)
+  assert.equal(restoredPreferences.sender_filter, null)
+  const originalGrant = afterLabel.grant_id
+  const after = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.deepEqual(after.reports, withMessage.reports)
+  assert.deepEqual(after.artifacts, withMessage.artifacts)
+  assert.deepEqual(after.effects, withMessage.effects)
+  assert.equal(after.assignments[0].id, owner.id)
+  assert.equal(after.grant_id, originalGrant)
+  assert.deepEqual(after.messages.map(message => message.id), afterLabel.messages.map(message => message.id))
+  return { ticket_sender_filter_persisted_and_revalidated: true, reset_all_keeps_all_source_records: true, auxiliary_label_is_not_an_actor_permission: true }
 }
 async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server, projectRoot, result, createTask, tick }) {
   result.revocation_before_first_poll ||= {}

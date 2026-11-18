@@ -703,6 +703,33 @@ mod tests {
         assert_eq!(missing["has_override"], false);
         assert_eq!(missing["sender_filter"], Value::Null);
         assert_eq!(missing.as_object().unwrap().len(), 5);
+        for invalid in [
+            json!(7),
+            json!({"value":"worker"}),
+            json!("x".repeat(161)),
+            json!("   "),
+            json!("worker\n"),
+        ] {
+            let rejected = app
+                .clone()
+                .oneshot(put(Some(&ticket_a), true, invalid))
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), 400);
+            let unchanged = json(app.clone().oneshot(get(&ticket_a)).await.unwrap()).await;
+            assert_eq!(
+                unchanged["sender_filter"], "worker",
+                "Invalid filters cannot silently become All or replace the valid ticket choice"
+            );
+            assert_eq!(unchanged["expanded"], true);
+            assert_eq!(unchanged["has_override"], true);
+        }
+        let global_filter = app
+            .clone()
+            .oneshot(put(None, true, json!("worker")))
+            .await
+            .unwrap();
+        assert_eq!(global_filter.status(), 400);
         let too_long = "t".repeat(161);
         let rejected = app.oneshot(get(&too_long)).await.unwrap();
         assert_eq!(rejected.status(), 400);
@@ -3913,6 +3940,30 @@ async fn preference(
         "sender_filter":null,
     })))
 }
+fn parse_sender_filter(body: &Value) -> ApiResult<Option<&str>> {
+    let Some(value) = body.get("sender_filter") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(value) = value.as_str() else {
+        return Err(ApiError::bad(
+            "sender_filter must be null or a bounded non-empty string",
+        ));
+    };
+    if value.is_empty()
+        || value.trim().is_empty()
+        || value.len() > 160
+        || value.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad(
+            "sender_filter must be null or a bounded non-empty string",
+        ));
+    }
+    Ok(Some(value))
+}
+
 async fn update_preference(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Query(query): axum::extract::Query<PreferenceQuery>,
@@ -3921,12 +3972,18 @@ async fn update_preference(
     let expanded = body["expanded"]
         .as_bool()
         .ok_or_else(|| ApiError::bad("expanded must be boolean"))?;
+    let sender_filter = parse_sender_filter(&body)?;
     let store = state.lock()?;
+    if query.ticket_id.is_none() && sender_filter.is_some() {
+        return Err(ApiError::bad(
+            "Sender filtering requires an exact Ticket scope; only global expansion is supported",
+        ));
+    }
     if let Some(ticket) = query.ticket_id {
         if store.get("tickets", &ticket)?.is_none() {
             return Err(ApiError::missing("ticket unknown"));
         };
-        store.conn().execute("INSERT INTO preferences(ticket_id,expanded,sender_filter,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(ticket_id) DO UPDATE SET expanded=excluded.expanded,sender_filter=excluded.sender_filter,updated_at=excluded.updated_at",params![ticket,expanded as i64,body["sender_filter"].as_str(),now()])?;
+        store.conn().execute("INSERT INTO preferences(ticket_id,expanded,sender_filter,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(ticket_id) DO UPDATE SET expanded=excluded.expanded,sender_filter=excluded.sender_filter,updated_at=excluded.updated_at",params![ticket,expanded as i64,sender_filter,now()])?;
     } else {
         store.set_setting("global_expanded", if expanded { "true" } else { "false" })?;
     }
