@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { ArtifactContent, ArtifactRef, Project, Ticket } from '../api/types'
+import CodeArtifactView from '../components/CodeArtifactView.vue'
 import { formatBytes, formatTime, projectName, reportStatusLabel, reportStatusTone, safeJson, statusLabel, statusToneFor as statusTone } from '../lib/format'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -10,6 +11,15 @@ const emit = defineEmits<{ cancel: []; retry: []; approve: ['approve' | 'reject'
 const approvalReason = ref('')
 const approvalOpen = ref(false)
 const selected = ref<ArtifactRef | null>(null)
+const currentArtifactContent = computed<ArtifactContent | undefined>(() => selected.value ? props.artifacts[selected.value.artifact_id] : undefined)
+const downloadedArtifacts = computed<ArtifactContent[]>(() => {
+  const records: ArtifactContent[] = []
+  for (const artifact of props.ticket.artifacts ?? []) {
+    const content = props.artifacts[artifact.artifact_id]
+    if (content) records.push(content)
+  }
+  return records
+})
 const label = computed(() => statusLabel(props.ticket.status))
 const observation = computed(() => {
   const value = props.ticket.model_observation
@@ -63,7 +73,7 @@ function requestApprove(decision: 'approve' | 'reject') {
       <div class="section-heading"><h2>交付产物 <span class="count-pill">{{ ticket.artifacts?.length ?? 0 }}</span></h2><span class="tiny muted">AUTHORIZED ARTIFACTS</span></div>
       <div v-if="ticket.artifacts?.length" class="artifact-grid"><button v-for="artifact in ticket.artifacts" :key="artifact.artifact_id" class="artifact-card" @click="showArtifact(artifact)"><span class="artifact-icon"><AppIcon name="document" :size="22" /></span><div><strong>{{ artifact.type ?? '任务产物' }}</strong><span>{{ formatBytes(artifact.size_bytes) }}<template v-if="artifact.media_type"> · {{ artifact.media_type }}</template></span></div><AppIcon name="arrow" :size="17" /></button></div>
       <EmptyState v-else icon="document" title="没有可下载的产物" description="产物必须来自受控存储，并关联到此 Ticket。" />
-      <div v-if="selected" class="artifact-viewer"><div class="artifact-viewer-top"><div><span class="eyebrow">纯文本查看器</span><h3>{{ selected.type ?? 'Artifact' }}</h3></div><button class="icon-button" aria-label="关闭产物查看" @click="selected = null"><AppIcon name="close" /></button></div><div v-if="errors?.[`artifact:${selected.artifact_id}`]" class="inline-note danger-note" role="alert">{{ errors[`artifact:${selected.artifact_id}`] }}</div><div v-else-if="artifactBusy" class="inline-note" role="status"><span class="spinner dark" />正在读取授权内容…</div><template v-else-if="artifacts[selected.artifact_id]"><div v-if="artifacts[selected.artifact_id].truncated" class="inline-note warning-note">内容已由服务端截断。显示的并非完整内容。</div><div v-if="artifacts[selected.artifact_id].encoding === 'base64'" class="inline-note">此产物以 base64 编码返回。为避免误解，原始编码按纯文本显示，不在浏览器中执行或渲染。</div><pre class="artifact-content" tabindex="0">{{ artifacts[selected.artifact_id].content }}</pre><pre class="artifact-metadata">{{ safeJson(artifacts[selected.artifact_id].metadata) }}</pre></template><div v-else class="inline-note">尚未读取产物正文。请重试。</div></div>
+      <div v-if="selected" class="artifact-viewer"><div class="artifact-viewer-top"><div><span class="eyebrow">纯文本查看器</span><h3>{{ selected.type ?? 'Artifact' }}</h3></div><button class="icon-button" aria-label="关闭产物查看" @click="selected = null"><AppIcon name="close" /></button></div><div v-if="errors?.[`artifact:${selected.artifact_id}`]" class="inline-note danger-note" role="alert">{{ errors[`artifact:${selected.artifact_id}`] }}</div><div v-else-if="artifactBusy" class="inline-note" role="status"><span class="spinner dark" />正在读取授权内容…</div><template v-else-if="artifacts[selected.artifact_id]"><div v-if="artifacts[selected.artifact_id].truncated" class="inline-note warning-note">内容已由服务端截断。显示的并非完整内容。</div><div v-if="artifacts[selected.artifact_id].encoding === 'base64'" class="inline-note">此产物以 base64 编码返回。为避免误解，原始编码按纯文本显示，不在浏览器中执行或渲染。</div><CodeArtifactView :key="selected.artifact_id" :artifact="currentArtifactContent!" :artifacts="downloadedArtifacts" :ticket="ticket" /><details class="artifact-reference" open><summary>收起原始 Artifact 引用</summary><pre class="artifact-metadata">{{ safeJson(artifacts[selected.artifact_id].metadata) }}</pre></details></template><div v-else class="inline-note">尚未读取产物正文。请重试。</div></div>
     </section>
 
     <section v-if="observation" class="report-section" aria-labelledby="model-observation-heading">

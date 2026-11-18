@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { copyFile, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
@@ -216,7 +216,7 @@ try {
   assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
   pass('explicit retry is a fresh legal Assignment, does not rewrite the earlier failed source/test evidence', { assignments: second.assignments.map(entry => entry.id), reports: 2 })
 
-  const browserEvidence = await showArtifactsInVue({ server, admin, root, ticket: { ...second, artifacts: latestArtifacts }, latestVerify })
+  const browserEvidence = await showArtifactsInVue({ server, admin, root, ticket: second })
   browserReports.push(browserEvidence)
   pass('production Vue opens the real diff and verification Artifacts from this DSH Ticket', { desktop: 1280, desktop_viewport_only_narrow: 390 })
 
@@ -296,7 +296,7 @@ try {
     await rm(root, { recursive: true, force: true })
   }
 }
-async function showArtifactsInVue({ server, root, ticket }) {
+async function showArtifactsInVue({ server, admin, root, ticket }) {
   process.env.LOOM_TEST_CONCIERGE_URL = server.baseUrl
   const appRoot = fileURLToPath(new URL('../../apps/web/', import.meta.url))
   const repository = fileURLToPath(new URL('../../', import.meta.url))
@@ -348,30 +348,71 @@ async function showArtifactsInVue({ server, root, ticket }) {
   await page.locator('#connection-dialog').waitFor({ state: 'hidden' })
   authenticated = true
   await page.locator('.ticket-detail').getByText('收到成功报告', { exact: true }).waitFor()
-  for (const kind of ['text/x-diff', 'application/json']) {
-    const entry = ticket.artifacts.find(artifact => artifact.media_type === kind)
-    assert.ok(entry, `Ticket exposes exactly the expected ${kind} Artifact`)
-    const card = page.locator('.artifact-card').filter({ hasText: entry.name })
-    const fetched = page.waitForResponse(response => response.url().includes(`/artifacts/${entry.id}`) && response.request().method() === 'GET')
-    await card.click()
-    assert.equal((await fetched).status(), 200)
-    await page.locator('.artifact-content').waitFor()
-    const text = await page.locator('.artifact-content').textContent()
-    if (kind === 'text/x-diff') {
-      assert.match(text, /-  return a - b;/)
-      assert.match(text, /\+  return a \+ b;/)
+  for (const assignment of ticket.assignments) {
+    const diffArtifact = ticket.artifacts.find(artifact => artifact.assignment_id === assignment.id && artifact.media_type === 'text/x-diff')
+    const verificationArtifact = ticket.artifacts.find(artifact => artifact.assignment_id === assignment.id && artifact.media_type === 'application/json')
+    const effect = ticket.effects.find(effect => effect.assignment_id === assignment.id && effect.status === 'confirmed')
+    assert.ok(diffArtifact && verificationArtifact && effect)
+    const effectId = effect.id ?? effect.effect_id
+    assert.ok(effectId, 'The authoritative raw Effect must retain its immutable identity')
+    const sourceArtifactId = diffArtifact.id ?? diffArtifact.artifact_id
+    assert.ok(sourceArtifactId, 'The real source Artifact must maintain its immutable UUID')
+    const report = ticket.reports.find(report => report.assignment_id === assignment.id)
+    assert.equal(report?.state, assignment.attempt === 1 ? 'failed' : 'succeeded')
+    const bodies = new Map()
+    for (const entry of [diffArtifact, verificationArtifact]) {
+      const card = page.locator('.artifact-card').filter({ hasText: entry.name })
+      const fetched = page.waitForResponse(response => response.url().includes(`/artifacts/${entry.id}`) && response.request().method() === 'GET')
+      await card.click()
+      const download = await fetched
+      assert.equal(download.status(), 200)
+      const evidence = (await download.json()).artifact.code_evidence
+      assert.equal(evidence.schema, 'loom.code-provenance.v1')
+      assert.equal(evidence.kind, entry.media_type === 'text/x-diff' ? 'change' : 'verification')
+      assert.equal(evidence.name, undefined)
+      assert.deepEqual(Object.keys(evidence.session).sort(), ['harness', 'host_api', 'observed_seq', 'protocol', 'session_id'])
+      await page.locator('.artifact-content').waitFor({ state: 'attached' })
+      const text = await page.locator('.artifact-content').textContent()
       assert.equal(sha256(Buffer.from(text)), entry.sha256)
-    } else {
-      const proof = JSON.parse(text)
-      assert.equal(proof.schema, 'loom.code-verification.v1')
-      assert.equal(proof.exit_code, 0)
-      assert.equal(proof.passed, true)
-      assert.equal(sha256(Buffer.from(text)), entry.sha256)
-      assert.deepEqual(proof.command, { file: 'node', args: ['--test', 'test/calc.test.js'] })
+      bodies.set(entry.id, text)
     }
+    for (const entry of [diffArtifact, verificationArtifact]) {
+      const text = bodies.get(entry.id)
+      await page.locator('.artifact-card').filter({ hasText: entry.name }).click()
+      await page.locator('.artifact-content').waitFor({ state: 'attached' })
+      if (entry.media_type === 'text/x-diff') {
+        assert.match(text, /-  return a - b;/)
+        assert.match(text, /\+  return a \+ b;/)
+/* The real timeout reports the absent dependent evidence plainly. */        await page.locator('.code-diff-line.removed').first().waitFor({ state: 'visible' })
+        await page.locator('.code-diff-line.added').first().waitFor({ state: 'visible' })
+        const facts = await page.locator('.code-artifact .facts').innerText()
+        assert.ok(facts.includes(assignment.id) && facts.includes(effectId) && facts.includes('src/calc.js'))
+      } else {
+        const proof = JSON.parse(text)
+        const expectedExit = assignment.attempt === 1 ? 1 : 0
+        assert.equal(proof.schema, 'loom.code-verification.v1')
+        assert.equal(proof.exit_code, expectedExit)
+        assert.equal(proof.passed, expectedExit === 0)
+        assert.deepEqual(proof.command, { file: 'node', args: ['--test', 'test/calc.test.js'] })
+        const result = page.locator('.code-verification-result')
+        await result.waitFor({ state: 'visible' })
+        assert.equal(await result.getAttribute('data-exit-code'), String(expectedExit))
+        assert.equal(await result.getAttribute('data-report-status'), report?.state)
+        assert.equal(await result.getAttribute('data-assignment-id'), assignment.id)
+        const facts = await page.locator('.code-artifact .facts').innerText()
+        assert.ok(facts.includes('node --test test/calc.test.js') && facts.includes(effectId) && facts.includes(sourceArtifactId))
+        assert.equal(await result.locator('pre').first().textContent(), proof.stdout)
+        assert.equal(await result.locator('pre').nth(1).textContent(), proof.stderr)
+      }
+    }
+    const afterView = await admin.get(`/api/v1/tickets/${ticket.id}`)
+    assert.equal(afterView.artifacts.filter(artifact => artifact.assignment_id === assignment.id).length, 2)
+    assert.equal(afterView.effects.length, 2)
+    assert.equal(afterView.reports.length, 2)
   }
-  await page.locator('.artifact-card').filter({ hasText: ticket.artifacts.find(artifact => artifact.media_type === 'text/x-diff').name }).click()
-  await page.locator('.artifact-content').waitFor()
+  const latestVerification = ticket.artifacts.findLast(artifact => artifact.media_type === 'application/json')
+  await page.locator('.artifact-card').filter({ hasText: latestVerification.name }).click()
+  await page.locator('.code-verification-result').waitFor({ state: 'visible' })
   const geometry = async () => {
     const columns = await page.locator('.conversation-column').evaluate(element => ({ width: element.getBoundingClientRect().width, scrollWidth: document.documentElement.scrollWidth }))
     const body = await page.locator('body').innerText()
@@ -397,14 +438,24 @@ async function showArtifactsInVue({ server, root, ticket }) {
   await narrow.getByRole('button', { name: '保存并重新连接', exact: true }).click()
   await narrow.locator('#connection-dialog').waitFor({ state: 'hidden' })
   await narrow.locator('.ticket-detail').getByText('收到成功报告', { exact: true }).waitFor()
-  await narrow.locator('.artifact-card').filter({ hasText: ticket.artifacts.find(artifact => artifact.media_type === 'text/x-diff').name }).click()
-  await narrow.locator('.artifact-content').waitFor()
+  for (const artifact of ticket.artifacts) {
+    await narrow.locator('.artifact-card').filter({ hasText: artifact.name }).click()
+    await narrow.locator('.artifact-content').waitFor({ state: 'attached' })
+  }
+  await narrow.locator('.artifact-card').filter({ hasText: latestVerification.name }).click()
+  await narrow.locator('.code-verification-result').waitFor({ state: 'visible' })
   assert.equal(await narrow.evaluate(() => document.documentElement.scrollWidth), 390)
   const narrow_screenshot = join(root, 'code-artifacts-narrow.png')
   await narrow.screenshot({ path: narrow_screenshot, fullPage: true })
   assert.deepEqual(errors, [])
   await stopCodeView()
-  return { desktop_screenshot, narrow_screenshot, desktop_geometry: desktopGeometry, narrow_viewport_no_overflow: true,
+  const desktopResult = output ? join(dirname(output), 'result-desktop.png') : desktop_screenshot
+  const narrowResult = output ? join(dirname(output), 'result-narrow.png') : narrow_screenshot
+  if (output) {
+    await copyFile(desktop_screenshot, desktopResult)
+    await copyFile(narrow_screenshot, narrowResult)
+  }
+  return { desktop_screenshot: desktopResult, narrow_screenshot: narrowResult, desktop_geometry: desktopGeometry, narrow_viewport_no_overflow: true,
     shared_existing_ticket_artifact_ui: true, actual_download_text_validation: true, no_new_ticket_or_grant: true,
     mobile_device: 'NOT RUN (390px desktop Edge viewport only)', owned_profile_closed: true }
 }

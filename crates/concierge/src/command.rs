@@ -80,6 +80,25 @@ fn register_request(
     use ed25519_dalek::Signer;
     json!({"protocol":"loom.node.v1","node_id":node_id,"installation_id":installation,"public_key":b64(key.verifying_key().as_bytes()),"enrollment_code":code,"nonce":nonce,"signed_challenge":b64(key.sign(nonce.as_bytes()).to_bytes()),"request_id":"9de22fcb-6205-43d3-aabe-7baacee914db","capabilities":[{"ticket_kind":"read_summary","permission":"read"},{"ticket_kind":"edit_file","permission":"write"}],"worker_id":"default","harness_kind":"deterministic-bare-node","profile_id":"baseline"})
 }
+async fn upload_text(
+    bench: &Bench,
+    ticket: &str,
+    assignment: &Value,
+    name: &str,
+    bytes: &[u8],
+) -> ApiResult<String> {
+    let artifact = uuid::Uuid::new_v4().to_string();
+    let digest = sha256(bytes);
+    let body = json!({"ticket_id":ticket,"assignment_id":assignment["assignment_id"],"lease_epoch":assignment["lease_epoch"],
+        "artifact_id":artifact,"bytes_base64":base64::engine::general_purpose::STANDARD.encode(bytes),
+        "metadata":{"artifact_id":artifact,"name":name,"media_type":"text/plain","sha256":digest,"size_bytes":bytes.len()}});
+    let (status, response) = bench.auth_request("/artifacts", body).await?;
+    check(
+        status == 200,
+        format!("upload bounded Effect test evidence: {response}"),
+    )?;
+    Ok(artifact)
+}
 pub async fn smoke(directory: Option<PathBuf>, listen: String) -> Result<()> {
     let temp = directory
         .is_none()
@@ -388,6 +407,89 @@ async fn run(
         retry_status == 409 || retry_response["error"].is_object(),
         "Unknown outcome is protected from blind retry",
     )?;
+    // Even without the fixture-specific public code projection, a new legal
+    // retry may not silently absorb a previous Assignment's immutable Effect.
+    let (_, proof_grant) = b.admin("/grants", json!({"project_id":pid,"operations":"read_write","node_id":node_id,"worker_id":"default"})).await?;
+    let proof_grant_id = proof_grant["grant"]["id"].as_str().unwrap_or_default();
+    let (_, effect_ticket) = b.admin("/tickets", json!({"project_id":pid,"objective":"A new retry must retain its own Effect identity","kind":"read_summary","relative_path":"README.md","grant_id":proof_grant_id,"worker_id":"default"})).await?;
+    let effect_ticket = effect_ticket["id"].as_str().unwrap_or_default().to_owned();
+    let (_, first_poll) = b
+        .auth_request("/assignments/poll", json!({"wait_seconds":0}))
+        .await?;
+    let first = first_poll["assignment"].clone();
+    let shared_effect = uuid::Uuid::new_v4().to_string();
+    let first_bytes = b"an immutable effect belonging to the first Attempt\n";
+    let first_sha = sha256(first_bytes);
+    let first_artifact =
+        upload_text(&b, &effect_ticket, &first, "first-proof.txt", first_bytes).await?;
+    let first_report = json!({"ticket_id":effect_ticket,"assignment_id":first["assignment_id"],"lease_epoch":first["lease_epoch"],"state":"failed","summary":"The first failed result retains its own Effect.","artifact_ids":[first_artifact],"effects":[{"effect_id":shared_effect,"input_digest":first_sha,"status":"confirmed","evidence":[{"kind":"artifact","digest":first_sha}],"artifacts":[first_artifact]}]});
+    let (first_status, _) = b.auth_request("/reports", first_report).await?;
+    check(
+        first_status == 200,
+        "seed a genuine report before the Effect conflict test",
+    )?;
+    let (_, retry) = b
+        .admin(&format!("/tickets/{effect_ticket}/retry"), json!({}))
+        .await?;
+    check(
+        retry["id"].is_string(),
+        "a separate failed task can start an explicit new retry",
+    )?;
+    let (_, next_poll) = b
+        .auth_request("/assignments/poll", json!({"wait_seconds":0}))
+        .await?;
+    let next = next_poll["assignment"].clone();
+    check(
+        next["assignment_id"] != first["assignment_id"] && next["lease_epoch"] == 2,
+        "the effect conflict test uses a distinct second Assignment",
+    )?;
+    let next_bytes = b"a distinct effect belonging to the second Attempt\n";
+    let next_sha = sha256(next_bytes);
+    let next_artifact =
+        upload_text(&b, &effect_ticket, &next, "second-proof.txt", next_bytes).await?;
+    let pending_retry = state.lock()?.detail(&effect_ticket)?["status"].clone();
+    check(
+        pending_retry == "running",
+        "the legal new retry is genuinely running before its conflict",
+    )?;
+    let borrowed_effect = json!({"ticket_id":effect_ticket,"assignment_id":next["assignment_id"],"lease_epoch":next["lease_epoch"],"state":"succeeded","summary":"An old Effect identity must not silently absorb a new Assignment.","artifact_ids":[next_artifact],"effects":[{"effect_id":shared_effect,"input_digest":next_sha,"status":"confirmed","evidence":[{"kind":"artifact","digest":next_sha}],"artifacts":[next_artifact]}]});
+    let (collision_status, _) = b.auth_request("/reports", borrowed_effect).await?;
+    check(
+        collision_status == 409,
+        "cross-Attempt reuse of an immutable Effect is rejected at the actual Report endpoint",
+    )?;
+    let preserved = state
+        .lock()?
+        .query("SELECT * FROM effects WHERE id=?1", [&shared_effect])?
+        .first()
+        .cloned()
+        .unwrap_or(Value::Null);
+    check(
+        preserved["assignment_id"] == first["assignment_id"]
+            && preserved["input_digest"] == first_sha
+            && preserved["status"] == "confirmed",
+        "rejection cannot rewrite the original Effect or its immutable digest",
+    )?;
+    check(
+        state
+            .lock()?
+            .query(
+                "SELECT id FROM reports WHERE ticket_id=?1",
+                [&effect_ticket],
+            )?
+            .len()
+            == 1,
+        "rejected conflict Report is not persisted alongside a new attempted Effect",
+    )?;
+    check(
+        state.lock()?.detail(&effect_ticket)?["status"] == pending_retry,
+        "an immutable-effect collision cannot stamp a legitimate pending retry as successful",
+    )?;
+    check(
+        state.lock()?.detail(&effect_ticket)?["reports"][0]["state"] == "failed",
+        "the earlier failed Report stays immutable while a new retry is genuinely pending",
+    )?;
+
     let reopened = crate::api::State::open(root.join("center"), Some(&token))?;
     check(
         reopened.lock()?.verify_audit()?,

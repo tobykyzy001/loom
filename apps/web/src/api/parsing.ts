@@ -56,7 +56,8 @@ export function artifactFrom(value: unknown): ArtifactContent {
   if (!value || typeof value !== 'object') throw new Error('Invalid artifact response')
   const result = value as Record<string, unknown>
   const source = (result.metadata ?? result.artifact ?? value) as ArtifactRef & { id?: string; name?: string }
-  const metadata: ArtifactRef & { id?: string; name?: string } = { ...source, artifact_id: source.artifact_id ?? source.id ?? '' }
+  const metadata: ArtifactRef & { id?: string; name?: string; parents?: unknown[] } = { ...source, artifact_id: source.artifact_id ?? source.id ?? '' }
+  metadata.parents = source.parents ?? (Array.isArray(source.lineage) ? source.lineage : [])
   metadata.type = source.type ?? source.name
   return {
     metadata,

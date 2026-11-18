@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 13 {
+        if current > 14 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 13)"
+                "database schema is from a newer Loom release (found {current}, supported 14)"
             )
         }
         if current == 0 {
@@ -60,7 +60,7 @@ impl Store {
             CREATE TABLE grants(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),node_id TEXT NOT NULL,worker_id TEXT NOT NULL,installation_id TEXT NOT NULL,operations TEXT NOT NULL,version INTEGER NOT NULL,revoked_at TEXT,digest TEXT NOT NULL,created_at TEXT NOT NULL);
             CREATE TABLE tickets(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),objective TEXT NOT NULL,kind TEXT NOT NULL,relative_path TEXT NOT NULL,content TEXT,status TEXT NOT NULL,grant_id TEXT NOT NULL REFERENCES grants(id),grant_digest TEXT NOT NULL,node_id TEXT NOT NULL,installation_id TEXT NOT NULL,worker_id TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,cancel_requested INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
             CREATE TABLE assignments(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),node_id TEXT NOT NULL,worker_id TEXT NOT NULL,attempt INTEGER NOT NULL,lease_id TEXT NOT NULL UNIQUE,lease_epoch INTEGER NOT NULL,lease_expires_at TEXT NOT NULL,acknowledged_at TEXT,created_at TEXT NOT NULL,cancelled_at TEXT,last_report_at TEXT);
-            CREATE TABLE artifacts(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),assignment_id TEXT NOT NULL,origin_node_id TEXT NOT NULL,name TEXT NOT NULL,media_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,storage_name TEXT NOT NULL,location TEXT NOT NULL,lineage TEXT NOT NULL,created_at TEXT NOT NULL);
+            CREATE TABLE artifacts(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),assignment_id TEXT NOT NULL,origin_node_id TEXT NOT NULL,name TEXT NOT NULL,media_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,storage_name TEXT NOT NULL,location TEXT NOT NULL,lineage TEXT NOT NULL,created_at TEXT NOT NULL,code_evidence_json TEXT);
             CREATE TABLE reports(id TEXT PRIMARY KEY,assignment_id TEXT NOT NULL,ticket_id TEXT NOT NULL,node_id TEXT NOT NULL,lease_epoch INTEGER NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,summary TEXT NOT NULL,evidence TEXT NOT NULL,session_ref TEXT,cancel_acknowledged INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,UNIQUE(assignment_id,request_id));
             CREATE TABLE effects(id TEXT PRIMARY KEY,ticket_id TEXT NOT NULL REFERENCES tickets(id),assignment_id TEXT NOT NULL,node_id TEXT NOT NULL,attempt INTEGER NOT NULL,input_digest TEXT NOT NULL,status TEXT NOT NULL,evidence TEXT NOT NULL,artifacts TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(id,node_id));
             CREATE TABLE requests(node_id TEXT NOT NULL,route TEXT NOT NULL,request_id TEXT NOT NULL,payload_digest TEXT NOT NULL,response TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(node_id,route,request_id));
@@ -372,6 +372,25 @@ CREATE TRIGGER IF NOT EXISTS source_work_specs_no_update BEFORE UPDATE ON source
             tx.execute("PRAGMA user_version=13", [])?;
             tx.commit()?;
         }
+        if current < 14 {
+            // This optional public projection is populated only by the existing,
+            // authenticated Artifact upload path after strict evidence validation.
+            // In particular, legacy raw metadata is never scanned for backfill.
+            let column_present: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name='code_evidence_json'",
+                [],
+                |row| row.get(0),
+            )?;
+            let tx = self.connection.unchecked_transaction()?;
+            if column_present == 0 {
+                tx.execute(
+                    "ALTER TABLE artifacts ADD COLUMN code_evidence_json TEXT",
+                    [],
+                )?;
+            }
+            tx.execute("PRAGMA user_version=14", [])?;
+            tx.commit()?;
+        }
         Ok(())
     }
     pub fn conn(&self) -> &Connection {
@@ -602,7 +621,23 @@ pub fn row_value(row: &Row<'_>) -> rusqlite::Result<Value> {
             rusqlite::types::ValueRef::Real(v) => json!(v),
             rusqlite::types::ValueRef::Text(v) => {
                 let value = String::from_utf8_lossy(v);
-                if matches!(
+                if key == "code_evidence_json" {
+                    serde_json::from_str::<Value>(&value)
+                        .and_then(|value| match value {
+                            Value::Object(_) => Ok(value),
+                            _ => Err(serde_json::Error::io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "code_evidence_json must be a JSON object",
+                            ))),
+                        })
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                i,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?
+                } else if matches!(
                     key.as_str(),
                     "capabilities"
                         | "workers"
@@ -642,6 +677,117 @@ mod tests {
     }
 
     #[test]
+    fn fresh_store_has_optional_code_evidence_without_backfill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let version: i64 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        let columns = store
+            .query("SELECT name FROM pragma_table_info('artifacts')", [])
+            .unwrap();
+        assert!(columns
+            .iter()
+            .any(|column| column["name"] == "code_evidence_json"));
+    }
+
+    #[test]
+    fn v13_upgrade_preserves_legacy_authority_and_artifact_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        let bytes = b"existing bounded artifact bytes";
+        {
+            let store = Store::open(tmp.path()).unwrap();
+            let at = crate::now();
+            store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('legacy-project','legacy','legacy-root','read_only',1,?1,'{}')",[&at]).unwrap();
+            store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('legacy-grant','legacy-project','legacy-node','default','legacy-install','[\"read\"]',1,'grant-digest',?1)",[&at]).unwrap();
+            store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES('legacy-ticket','legacy-project','legacy','read_summary','README.md',NULL,'succeeded','legacy-grant','grant-digest','legacy-node','legacy-install','default',1,?1,?1)",[&at]).unwrap();
+            store.conn().execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,code_evidence_json) VALUES(?1,'legacy-ticket','legacy-assignment','legacy-node','old.txt','text/plain',?2,?3,?4,?5,'[]',?6,'{\"never_backfill\":true}')",params![artifact_id,bytes.len(),crate::sha256(bytes),format!("{artifact_id}.artifact"),format!("loom://artifact/{artifact_id}"),at]).unwrap();
+            fs::write(
+                tmp.path()
+                    .join("artifacts")
+                    .join(format!("{artifact_id}.artifact")),
+                bytes,
+            )
+            .unwrap();
+            store
+                .audit(
+                    Some("legacy-ticket"),
+                    "migration-test",
+                    "legacy",
+                    &json!({"unchanged":true}),
+                )
+                .unwrap();
+            store
+                .conn()
+                .execute("ALTER TABLE artifacts DROP COLUMN code_evidence_json", [])
+                .unwrap();
+            store.conn().execute("PRAGMA user_version=13", []).unwrap();
+        }
+        let store = Store::open(tmp.path()).unwrap();
+        let version: i64 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        assert_eq!(
+            store.get("tickets", "legacy-ticket").unwrap().unwrap()["grant_id"],
+            "legacy-grant"
+        );
+        assert_eq!(
+            store.get("grants", "legacy-grant").unwrap().unwrap()["digest"],
+            "grant-digest"
+        );
+        let artifact = store.get("artifacts", artifact_id).unwrap().unwrap();
+        assert_eq!(artifact["sha256"], crate::sha256(bytes));
+        assert_eq!(artifact["origin_node_id"], "legacy-node");
+        assert_eq!(artifact["code_evidence_json"], Value::Null);
+        assert_eq!(
+            fs::read(
+                tmp.path()
+                    .join("artifacts")
+                    .join(format!("{artifact_id}.artifact"))
+            )
+            .unwrap(),
+            bytes
+        );
+        assert!(store.verify_audit().unwrap());
+    }
+
+    #[test]
+    fn code_evidence_read_is_object_or_an_explicit_storage_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let object = store.query("SELECT * FROM artifacts LIMIT 0", []).unwrap();
+        assert!(object.is_empty());
+        let projected: Value =
+            serde_json::from_str("'invalid'").unwrap_or_else(|_| json!("not used"));
+        assert_eq!(projected, "not used");
+        store
+            .conn()
+            .execute("CREATE TEMP TABLE code_evidence_read(value TEXT)", [])
+            .unwrap();
+        store.conn().execute("INSERT INTO code_evidence_read VALUES('{\"kind\":\"change\"}'),('[]'),('not-json')", []).unwrap();
+        let rows = store.query(
+            "SELECT value AS code_evidence_json FROM code_evidence_read",
+            [],
+        );
+        assert!(
+            rows.is_err(),
+            "invalid JSON cannot become an implicit public string"
+        );
+        let valid = store
+            .query(
+                "SELECT value AS code_evidence_json FROM code_evidence_read LIMIT 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(valid[0]["code_evidence_json"], json!({"kind":"change"}));
+    }
+
+    #[test]
     fn experimental_v9_upgrade_adds_nullable_assignment_digest() {
         let tmp = tempfile::tempdir().unwrap();
         {
@@ -659,7 +805,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let models = store
             .query(
                 "SELECT id,assignment_digest,source_assignment_id FROM models",
@@ -717,7 +863,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);

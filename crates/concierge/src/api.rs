@@ -2106,6 +2106,10 @@ async fn artifact_upload(
     } else {
         body.clone()
     };
+    // Only a fixed, strictly validated tool invocation has a public code
+    // projection. All unrelated metadata retains its prior private behavior.
+    let code_evidence = crate::code_evidence::projected_metadata(&metadata)
+        .map_err(|error| ApiError::bad(error.to_string()))?;
     let bytes_base64 = body["bytes_base64"]
         .as_str()
         .or_else(|| body["bytes"].as_str())
@@ -2239,6 +2243,21 @@ async fn artifact_upload(
         .join("artifacts")
         .join(format!("{artifact}.artifact"));
     if let Some(current) = store.get("artifacts", &artifact)? {
+        let existing_evidence = crate::code_evidence::projection(&current)?;
+        if code_evidence
+            .as_ref()
+            .map(|value| {
+                serde_json::from_str::<Value>(value)
+                    .map_err(|_| ApiError::bad("Malformed bounded code-evidence projection"))
+            })
+            .transpose()?
+            != existing_evidence
+        {
+            return Err(ApiError::conflict(
+                "code_evidence_conflict",
+                "An existing immutable Artifact's public code evidence cannot change or be added retroactively",
+            ));
+        }
         if current["sha256"] != digest
             || current["size_bytes"] != data.len()
             || current["assignment_id"] != assignment
@@ -2296,7 +2315,7 @@ async fn artifact_upload(
     }
     let tx = store.conn_mut().transaction()?;
     let result = (|| -> rusqlite::Result<()> {
-        tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),serde_json::Value::Array(lineage.clone()).to_string(),now()])?;
+        tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,code_evidence_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),serde_json::Value::Array(lineage.clone()).to_string(),now(),code_evidence])?;
         if let Some(observation) = model_observation.as_ref() {
             crate::model_observation::insert(&tx, observation)?;
         }
@@ -2327,6 +2346,55 @@ async fn artifact_upload(
         .expect("committed artifact");
     Ok(Json(
         json!({"artifact_id":artifact,"ticket_id":ticket,"assignment_id":assignment,"origin_node_id":node,"name":current["name"],"media_type":current["media_type"],"size_bytes":data.len(),"sha256":digest,"location":format!("loom://artifact/{artifact}")}),
+    ))
+}
+
+fn effect_story_is_unchanged(
+    existing: &Value,
+    effect: &Value,
+    ticket: &str,
+    assignment: &str,
+    node: &str,
+    epoch: i64,
+) -> bool {
+    let evidence_equal = match existing["evidence"].as_str() {
+        Some(raw) => serde_json::from_str::<Value>(raw).is_ok_and(|old| old == effect["evidence"]),
+        None => existing["evidence"] == effect["evidence"],
+    };
+    existing["ticket_id"] == ticket
+        && existing["assignment_id"] == assignment
+        && existing["node_id"] == node
+        && existing["attempt"] == epoch
+        && existing["input_digest"] == effect["input_digest"]
+        && existing["status"] == effect["status"].as_str().unwrap_or("unknown")
+        && evidence_equal
+        && existing["artifacts"] == effect["artifacts"]
+}
+
+/// Existing Effect identities cannot be silently ignored or moved between
+/// Assignments. A second identical fact may participate in reconciliation,
+/// but never acquires a new scope or a status upgrade through INSERT IGNORE.
+fn preserve_effect_identity(
+    store: &store::Store,
+    effect: &Value,
+    ticket: &str,
+    assignment: &str,
+    node: &str,
+    epoch: i64,
+) -> ApiResult<bool> {
+    let effect_id = effect["effect_id"].as_str().unwrap_or_default();
+    let existing = store.query("SELECT * FROM effects WHERE id=?1", [effect_id])?;
+    if existing.is_empty() {
+        return Ok(true);
+    }
+    if existing.len() == 1
+        && effect_story_is_unchanged(&existing[0], effect, ticket, assignment, node, epoch)
+    {
+        return Ok(false);
+    }
+    Err(ApiError::conflict(
+        "effect_collision",
+        "An Effect identity cannot be reused for another Assignment, Ticket, Node or different immutable facts",
     ))
 }
 
@@ -2468,6 +2536,29 @@ pub(crate) async fn report(
     if ticket_record["kind"] == "credential_ref" {
         crate::credential_ref::validate_outcome(&store, &ticket, &body)?;
     }
+    let mut unseen_effects = std::collections::BTreeSet::new();
+    let mut effects_to_insert = Vec::new();
+    for effect in &effects {
+        let effect_id = effect["effect_id"].as_str().unwrap_or_default();
+        if !unseen_effects.insert(effect_id) {
+            return Err(ApiError::conflict(
+                "effect_collision",
+                "A Report may not list the same immutable Effect identity twice",
+            ));
+        }
+        if preserve_effect_identity(&store, effect, &ticket, &assignment, &node, epoch)? {
+            effects_to_insert.push(effect.clone());
+        }
+    }
+    crate::code_evidence::validate_outcome(
+        &store,
+        &ticket,
+        &assignment,
+        &artifacts,
+        &effects,
+        requested_state,
+    )
+    .map_err(|error| ApiError::bad(error.to_string()))?;
     let authority_status = if requested_state == "unknown" {
         "reconciling"
     } else {
@@ -2485,9 +2576,9 @@ pub(crate) async fn report(
         "INSERT INTO reports(id,assignment_id,ticket_id,node_id,lease_epoch,request_id,state,summary,evidence,session_ref,cancel_acknowledged,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![report_id,assignment,ticket,node,epoch,request_id,requested_state,body["summary"].as_str().unwrap_or("No summary"),body["evidence"].to_string(),body["session_ref"].as_str(), requested_state == "cancelled",at],
     )?;
-    for effect in effects {
+    for effect in &effects_to_insert {
         tx.execute(
-            "INSERT OR IGNORE INTO effects(id,ticket_id,assignment_id,node_id,attempt,input_digest,status,evidence,artifacts,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
+            "INSERT INTO effects(id,ticket_id,assignment_id,node_id,attempt,input_digest,status,evidence,artifacts,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
             params![effect["effect_id"].as_str().unwrap(),ticket,assignment,node,epoch,effect["input_digest"].as_str().unwrap_or(""),effect["status"].as_str().unwrap_or("unknown"),effect["evidence"].to_string(),effect["artifacts"].to_string(),at],
         )?;
     }
@@ -2529,6 +2620,11 @@ async fn artifact(
             "Ticket does not own this artifact",
         ));
     }
+    let public_evidence = crate::code_evidence::projection(&a)?;
+    if let Some(storage_fields) = a.as_object_mut() {
+        storage_fields.remove("code_evidence_json");
+    }
+    a["code_evidence"] = public_evidence.unwrap_or(Value::Null);
     let bytes = std::fs::read(
         store
             .root
@@ -2554,6 +2650,13 @@ async fn ticket(
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
     let mut detail = store.detail(&id)?;
+    for artifact in detail["artifacts"].as_array_mut().into_iter().flatten() {
+        let public_evidence = crate::code_evidence::projection(artifact)?;
+        if let Some(storage_fields) = artifact.as_object_mut() {
+            storage_fields.remove("code_evidence_json");
+        }
+        artifact["code_evidence"] = public_evidence.unwrap_or(Value::Null);
+    }
     detail["model_observation"] = crate::model_observation::for_ticket(&store, &id)?
         .map_or(Value::Null, |entry| json!(entry));
     Ok(Json(detail))

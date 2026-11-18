@@ -243,7 +243,7 @@ Source Ticket 的 digest、duplicate和历史身份与原 intake `ticket_id` 分
 
 工具先核对真实、干净的 owned Git根、零倍之外的唯一旧代码片段和失败基线，按要求原子替换单一的 `src/calc.js`。另一工具读取实际结果后仅调用固定的 `node --test test/calc.test.js`，limits、clear env、shell:false、symbolic link/hard link boundaries与常设工作区权限仍然有效。不会任取 shell、Git路径、程序、其provider、测试文件或依据模型自报动作授权。
 
-适配层独立读取真实 `--test` 的 process result，再读取actual `git status / git show HEAD:<path> / git diff` 及实际文件 bytes，而不是只信工具回执。它产生每个Attempt一份统一 diff 与一份测试证明。前者对应当前confirmed file effect，后者关联前者作为证据关系，**不构造任意 parent UUID / PermissionTree 或混入其他 Artifact lineage**。基层Artifact认证/上传、Trace元素、Report审计与普通read/write任务仍走版本化Node接口。
+适配层独立读取真实 `--test` 的 process result，再读取actual `git status / git show HEAD:<path> / git diff` 及实际文件 bytes，而不是只信工具回执。它产生每个Attempt一份统一 diff 与一份测试证明。前者对应当前confirmed file effect，后者关联前者作为证据关系，**不构造任意 parent UUID / PermissionTree 或混入其他 Artifact lineage**。同一Session还强制 `edit.result_seq < verify.call_seq`，防止把先于编辑的结果拼接为这次源文件的验证。基层Artifact认证/上传、Trace元素、Report审计与普通read/write任务仍走版本化Node接口。Report事务前对change/verification、Scope、真实bytes、Assignment/Node及Effect交叉校验，并读取已有 Effect 的Ticket/Assignment/Node/attempt/digest/status/evidence/artifacts。跨Assignment或改变不可变事实不可静默忽略，也不能让新Result吞掉在同一或之前Assignment中产生的实际Effect。作用域和事实不重复的Unknown记录可对账，不由此升级状态。
 
 **两类结果不可混淆：**
 - 一个真实执行完成的测试若返回非零，就是 `failed` Report，实际代码修改保留为 `confirmed Effect` 并交付其diff/测试证据；不对历史回滚、复制或伪造成duplicate成功。需要重试仍是独立Assignment，并非自动重放未明副作用。
@@ -251,6 +251,12 @@ Source Ticket 的 digest、duplicate和历史身份与原 intake `ticket_id` 分
 - reused external/shared Session、任意 provider/model、任意commands禁止在此首片执行。Code tools恢复**只读历史Ticket/mapping与artifact**，而不是恢复一个先前能变砖源文件的Agent。其它类型任务的既有 resume机制不受影响。
 
 它的证明价值是一个真实的M0小规模编程样例，有实际源码变更和测试证据，不是生产 generic code editor、生产 LLM coding质量、通用 Worktree策略或 M3 Stage、Reviewer pipeline。doc详见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。
+
+Schema14在现有 `artifacts` 增加可空 `code_evidence_json`，只为这一已受限代码样例保存 `loom.code-provenance.v1` 的严格公开 tool 引用：call/result ID、序列、DSH 协议/版本/Session、路径、源hash，以及编辑的前hash/size或验证的源Artifact UUID。center不把整个私有 upload metadata、prompt/env、provider、transcript 或任意tool arguments公开，也不在旧行扫描/伪造/回填这种证明。重复上传相同的证据才可幂等，改变call/sequence/session/tuple不能替换已存在Artifact，也不能向旧Artifact后补未当次验证的code provenance。现有 `Artifact` 的UUID/bytes/hash、grant/lease、location和 parent lineage 保持不变。
+
+通常只有成对的 diff/test、现有 edit_file Ticket 与当前授权 Assignment/Node、真实验証字节/hash、精确 Ticket 内容 SHA/size，以及互相匹配的confirmed Effect/Report 才能让该代码证据进入已有普通 Report 的接受流程。它们受同一历史 Node 签名和 Grant 校验，但其公开投影**描述 Node 实际Tool产生的受限引用，不意味着 Concierge 化身成本机Git或测试执行器**。异常 Agent 终止仍不能借通过 test 得到全局成功；Unknown留 `Unknown Effect`供对账，不提升为confirmed。没有投影的旧Artifact保持原文读取，没有新Grant/Permission。
+
+在 `TicketDetail` 中只展示已经鉴权下载的payload及可关联的这两个公开projection；不能把这一UUID标记乱当作 parent lineage。把本次 Attempt 的真实统一 diff、固定测试命令、退出码/输出及它的 Assignment/Effect/Report 相互核齐，才显示特化的纯文本diff与测试阅读格式。缺source、错Ticket/digest/command/effect、截断或其外节点的信息都回到原字节不完整提示，而非给最新成功嫁接旧Attempt。stdout/stderr与普通文本永远不作HTML执行，不提供测试按钮或任务副作用。这一实现让“变更与验证证据可检查”成为可见Client过程，不宣称通用代码工作流。
 
 ### 3.2 当前受限文档工作流的授权与恢复约束
 

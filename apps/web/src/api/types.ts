@@ -55,6 +55,8 @@ export interface ArtifactRef {
   type?: string
   version?: number
   location?: string
+  parents?: Array<Record<string, string>>
+  code_evidence?: unknown
   media_type?: string
   size_bytes?: number
   sha256?: string

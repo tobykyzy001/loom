@@ -26,7 +26,7 @@ Observed result of the final maintained version: **PASS, exit 0**, including:
 3. Validated source UUID, origin, source ticket and immutable lineage including `component_sha256`. Actual on-disk text is whitespace-reduced by the specified transform, not copied from a synthetic expected output constant.
 4. Wrong write/operation scopes, traversal, unsupported transforms and non-parent dependencies being rejected.
 5. The same run and repeated polls produce no second write or child Assignment (the derived file's inode remains unchanged).
-6. The center is stopped and reopened. Node and admin transports rebuild against the current dynamic URL **without** issuing a new enrollment or mixing the admin token with a Node token. Existing saved state and `audit_valid` remain available; `doctor` confirms current additive schema v13 and SQLite integrity.
+6. The center is stopped and reopened. Node and admin transports rebuild against the current dynamic URL **without** issuing a new enrollment or mixing the admin token with a Node token. Existing saved state and `audit_valid` remain available; `doctor` confirms current additive schema v14 and SQLite integrity.
 
 Evidence produced on the successful reference run:
 

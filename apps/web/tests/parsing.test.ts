@@ -14,6 +14,19 @@ describe('bounded display response parsing', () => {
     expect(result.truncated).toBe(true)
   })
 
+  it('preserves authoritative artifact IDs, lineage and only the public code projection', () => {
+    const projection = { schema: 'loom.code-provenance.v1', kind: 'change' }
+    const result = artifactFrom({
+      artifact: { id: 'a6e79e1e-30f3-457a-925b-e1044929e06f', assignment_id: 'asg_example', ticket_id: 'ticket', origin_node_id: 'node',
+        media_type: 'text/x-diff', lineage: [], code_evidence: projection },
+      content: 'diff --git a/src/calc.js b/src/calc.js\n',
+    })
+    expect(result.metadata.artifact_id).toBe('a6e79e1e-30f3-457a-925b-e1044929e06f')
+    expect(result.metadata.parents).toEqual([])
+    expect(result.metadata.code_evidence).toEqual(projection)
+    expect(result.content).toBe('diff --git a/src/calc.js b/src/calc.js\n')
+  })
+
   it('preserves cancellation and reconciliation in structured reports', () => {
     const ticket = ticketFrom({ id: 'ticket', status: 'cancel_requested', reports: [{ state: 'cancelled', summary: '节点已确认取消' }, { state: 'reconciling', summary: '待对账' }] })
     expect(ticket.cancel_requested).toBe(true)

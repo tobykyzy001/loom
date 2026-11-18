@@ -76,6 +76,10 @@
 
 本轮**可称已验证一个 M0 受限源码任务**，而非通用自然语言编程能力、自动worktree/review pipeline、live LLM、通用shell/编辑器或全M0通过。真实production Vue可打开该Ticket的两类Artifact（与两个per-attempt effects分别关联），桌面与390视口实际尺寸without溢出，不等于iOS/Android真机。证据和代码范围见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。连接CLI `node tests/harness/real-code-task.mjs` 已反复0 exit；通用Source浏览器也完成full PASS而非只调用底层helper。
 
+除真正执行与四个 Artifact 之外，现还补足**对应 Attempt 的可检查 View Process**。center严格保存/公开 whitelist 的 `loom.code-provenance.v1` 工具引用（schema14可空列，没有发布私有metadata、provider/env、prompt/transcript或任意tool命令），再检查精确代码文件SHA/大小、真实验証字bytes、固定命令、当前Assignment/Node、编辑→验证顺序及Effect/Report交叉关联。客户端需下载相关source/testproof并匹配当时的Assignment/effect/Retry report，才能在现有交付 UI 显示单文件diff、真实test退出码与输出及身份关联；错跨Scope/Hash/Session或缺失时只显示原字节不完整提示，并不靠最新Ticket总体成功伪装先前失败。
+
+同时查清并修复了**报告级 Effect identity吞并**：第二合法Attempt复用旧Effect ID不能靠`INSERT OR IGNORE`吞掉新Effect，须比较原Scope/digest/status/evidence/Artifact引用并返回冲突；同Report重复ID也拒绝。Unknown effect保持unknown/对账，不因已知test byte或public proof升级成整体成功。实际 `cargo run ... -- smoke` 的跨Attempt report冲突已409且旧effect/Report不变，合法pending retry仍运行，第一份失败Report也保留。这个是本机实现与验收上的共享身份可靠修复，非新增Permission或确切一次跨机副作用。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。
