@@ -50,6 +50,26 @@ node tests/runner/ack-audit-atomic.mjs
 
 验证分两部分互不混淆：router/同connection SQL TRIGGER fault验证原子回滚与后续合法ack；外层真实registered Node +真实HTTP契约由这一driver以同一临时数据库上的**持久 trigger**制造只在服务器写入connection可见的audit失败，要求`acknowledged_at`仍为NULL且匹配audit=0，禁止“审计拒绝結果テーブル却被 accept写入” 的结果。结束仅这个 fixture trigger被DROP，随后同一ack命中 `delivered_is_not_read=true`、正确assignment/timestamp和审计链路。前一脚本漏objective曾先被合法API拒绝；外部`TEMP TRIGGER`在不同SQLite connection中看不到server自己的连接，触发失败预期曾被issue归因为转录遗漏，未误作产品证明。没有grants/capability license/private身分架构扩展、其他DSH Provider/插件安装或第二物理机的执行证明，仅本节点的审批入口与审计可靠性。
 
+## Node事件回执一致性、跨语言digest与真实重放
+
+```sh
+node tests/runner/node-event-receipt.mjs
+```
+
+这条driver在独立root创建真正注册的LocalNode、Binding、Grant与**实际poll得到的Assignment**，用 `client.event` 和持久outbox发送一条process消息，再通过实际Rust HTTP和SQLite核对message、receipt、时间戳及logical digest。第一笔送货之后使用同一Node凭据重新提交原body，仅改变outer/inner Session对象键顺序，须返回原message的`duplicate:true`，不是新增一条记录。停启同一Concierge root后再重放，明确这是lost-response retry的**模拟**，并没有给真实TCP丢包或物理网络故障包装成PASS。
+
+正文、kind/sender/session和带自报`source_verified`的parent字段都不能在同一request_id下改写事件。使用同一Node的另一笔**显式预先授权**Ticket/Assignment也会冲突，两笔Ticket/Assignment是测试特意建立的work，不是replay所在节点中新偷偷生成。stale epoch仍走原`stale_lease`，null、非字符串和超长requestID仍是400。driver不运行executor，硬断言零Report/Artifact/Effect、零cancel_intent，各Ticket仍running。不是API按钮或包装json讲完成结果。
+
+这是一个与Report/Artifact有不同namespace的event回执：**`SHA256(canonical({logical_fields:body去掉顶层request_id}))`**；对象键递归sort而array顺序保留，**这一层logical_fields不能省**。事件request_id是opaque UUID，不要求等于该digest、也不是权限凭证。另一Node合法地具有独立opaque ID namespace，不能因原表`(ticket_id,request_id)`与全表查找同名ID而把两个原消息误当作同一份缺失的receipt。
+
+实际开发中，Native driver发现内层单测只能通过**稳定hash**却漏了一层wrapper：Rust与真正Node outbox/logical digest并不一致。现在Rust按 [client.js 的实际逻辑](packages/node-client/src/client.js)计算，且固定Client.js生成的golden进restart测试。真实driver的[结果](/tmp/loom-node-event-receipt-final-Mqsph1/result.json)和[manifest](/tmp/loom-node-event-receipt-final-Mqsph1/manifest.json)保留两者的相等SHA、不相等的opaque ID及第一条immutable message；不调用DSH资料或修改用户profile，也没有让管理client token回退成Node身份。
+
+附加的Rust `api::tests::event`共有**六个**focused cases，覆盖实际认证Router/HTTP+SQLite的两份数据原子写入、restart回放、array/key排序差异、冲突保持不变、独立Node命名空间、跨另一合法Task/Assignment以及legacy兼容。最窄的一组旧行只是在**同ticket/request_id**的content/sender/kind和原始session均严格匹配时才允许duplicate，不回填对整条所谓旧body的新认证。`source_event_id`关联消息不被纳入这一普通Node事件receipt判定。
+
+另有**scripted source fixture**（严格分别选择的parent/child Grant、真实byte-backedArtifact、UUID、document graph和受限Parent Session）首先真实通过`validated_delegation_relation`，才存储server-derived normalized session及规范的`source_verified`/`validated_by`，而非信任raw flag。private receipt把它保存为内部`stored_session_ref`，与首次实际message一致，HTTP首次和duplicate都不返回这个字段。删除fixture中的父Session之后，**完全同一个原始事件**仍按已捕获的关系返回duplicate、原message/requestID配对不变，不重造parent proof或生成新工作。拒绝通过把receipt.message_id改成一份**请求ID不同但文本相似的消息**来冒充duplicate，response损坏/缺message也保持`receipt_corrupt`而不是fallback insert。
+
+原生Native Driver是事实交付的代表，受限document fixture则仅证明模型内source关系的保存与读取；**均不是实际DSH Provider/Agent/多Host或全球exactly-once承诺**。当前Lease始终先于读回执，过期、撤权或取消仍按既有规则，不能在receipt层复权。本次未启动用户明确暂缓的1+3 Compose。最终测试的总数以主控实际完整workspace日志为准，不把写脚本时的稳定性估算当成正式结果。
+
 ## 实际中心的撤权停止帧、旧证据围栏与审计
 
 ```sh

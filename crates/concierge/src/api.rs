@@ -990,6 +990,624 @@ mod tests {
         assert!(store.verify_audit().unwrap());
     }
 
+    const EVENT_NODE_TOKEN: &str = "event-node-token-123456789012345";
+
+    fn event_test_state(directory: &Path) -> Arc<State> {
+        let store = crate::store::Store::open(directory).unwrap();
+        if store
+            .query("SELECT id FROM nodes WHERE id='node'", [])
+            .unwrap()
+            .is_empty()
+        {
+            store
+                .conn()
+            .execute_batch(&format!(
+                "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at) VALUES('node','installation','event-fixture-public-key','{}','online','{{}}','[]','{{}}','2026-01-01T00:00:00Z');
+                 INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','event fixture','/event-fixture','read_write',1,'2026-01-01T00:00:00Z','{{}}');
+                 INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','project','node','worker','installation','[\"read\"]',1,'digest','2026-01-01T00:00:00Z');
+                 INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES
+                   ('ticket','project','first event','read_summary','README.md','running','grant','digest','node','installation','worker',1,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+                   ('ticket-two','project','second event','read_summary','README.md','running','grant','digest','node','installation','worker',3,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                 INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES
+                   ('assignment','ticket','node','worker',1,'lease',1,'2100-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+                   ('assignment-two','ticket-two','node','worker',3,'lease-two',3,'2100-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+                crate::store::hash(EVENT_NODE_TOKEN)
+                ))
+                .unwrap();
+        }
+        Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: EVENT_NODE_TOKEN.into(),
+            bootstrap_token_written: false,
+        })
+    }
+
+    fn event_body() -> Value {
+        json!({
+            "protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation",
+            "request_id":"event-request", "ticket_id":"ticket", "assignment_id":"assignment",
+            "lease_epoch":1, "activity":"Original visible progress", "kind":"activity",
+            "sender":"worker", "session_ref":{"session_id":"session","observed_seq":3},
+            "metadata":{"nested":[1,{"z":true,"a":null}]}
+        })
+    }
+
+    async fn event_request(app: &Router, body: &Value) -> (StatusCode, Value) {
+        event_request_with_token(app, body, EVENT_NODE_TOKEN).await
+    }
+
+    async fn event_request_with_token(
+        app: &Router,
+        body: &Value,
+        token: &str,
+    ) -> (StatusCode, Value) {
+        response_json(post_json(app, "/api/v1/nodes/events".into(), token, body.clone()).await)
+            .await
+    }
+
+    fn event_fixture_counts(store: &crate::store::Store, request_id: &str) -> (usize, usize) {
+        (
+            store
+                .query("SELECT * FROM messages WHERE request_id=?1", [request_id])
+                .unwrap()
+                .len(),
+            store
+                .query(
+                    "SELECT * FROM requests WHERE node_id='node' AND route='events' AND request_id=?1",
+                    [request_id],
+                )
+                .unwrap()
+                .len(),
+        )
+    }
+
+    #[tokio::test]
+    async fn event_receipt_preserves_canonical_replay_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("receipt-db");
+        let state = event_test_state(&database);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(server_state)).await.unwrap();
+        });
+        let app = router(state.clone());
+        let (status, first) = event_request(&app, &event_body()).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["accepted"], true);
+        assert_eq!(first["duplicate"], false);
+        assert_eq!(first["node_id"], "node");
+        let (original, receipt_before) = {
+            let store = state.lock().unwrap();
+            (
+                store
+                    .query("SELECT * FROM messages WHERE request_id='event-request'", [])
+                    .unwrap(),
+                store
+                    .query("SELECT * FROM requests WHERE route='events' AND request_id='event-request'", [])
+                    .unwrap(),
+            )
+        };
+        assert_eq!(original.len(), 1);
+        assert_eq!(receipt_before.len(), 1);
+        assert_eq!(first["message_id"], original[0]["id"]);
+        assert!(!serde_json::to_string(&receipt_before)
+            .unwrap()
+            .contains(EVENT_NODE_TOKEN));
+
+        // Generated by actual JS LoomNodeClient.prototype.logicalDigest for
+        // event_body: hash(canonical({logical_fields:body_without_request_id})).
+        // The protected logical_fields wrapper is part of the wire contract.
+        assert_eq!(
+            receipt_before[0]["payload_digest"],
+            "800bf40b7a22b3fe9845640b3ef59adf6aef2e4200f566b87f48101c1e8274e8"
+        );
+
+        // Raw JSON formatting and object order are irrelevant, but array order is not.
+        let replay_raw = r#"{
+          "metadata":{"nested":[1,{"a":null,"z":true}]},
+          "session_ref":{"observed_seq":3,"session_id":"session"},
+          "sender":"worker", "kind":"activity", "activity":"Original visible progress",
+          "lease_epoch":1, "assignment_id":"assignment", "ticket_id":"ticket",
+          "request_id":"event-request", "installation_id":"installation",
+          "node_id":"node", "protocol":"loom.node.v1"
+        }"#;
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/api/v1/nodes/events"))
+            .bearer_auth(EVENT_NODE_TOKEN)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(replay_raw)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let duplicate = response.json::<Value>().await.unwrap();
+        assert_eq!(duplicate["accepted"], true);
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["message_id"], first["message_id"]);
+
+        let replay: Value = serde_json::from_str(replay_raw).unwrap();
+        let (status, duplicate) = event_request(&app, &replay).await;
+        assert_eq!(status, StatusCode::OK, "{duplicate}");
+        assert_eq!(duplicate["accepted"], true);
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["message_id"], first["message_id"]);
+
+        server.abort();
+        let reopened = event_test_state(&database);
+        let app = router(reopened.clone());
+        let (status, duplicate) = event_request(&app, &replay).await;
+        assert_eq!(status, StatusCode::OK, "{duplicate}");
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["message_id"], first["message_id"]);
+        {
+            let store = reopened.lock().unwrap();
+            assert_eq!(event_fixture_counts(&store, "event-request"), (1, 1));
+            assert_eq!(
+                store
+                    .query(
+                        "SELECT * FROM messages WHERE request_id='event-request'",
+                        []
+                    )
+                    .unwrap(),
+                original
+            );
+            assert_eq!(
+                store
+                    .query("SELECT * FROM requests WHERE route='events' AND request_id='event-request'", [])
+                    .unwrap(),
+                receipt_before
+            );
+        }
+        let mut reordered = replay;
+        reordered["metadata"]["nested"] = json!([{"a":null,"z":true}, 1]);
+        let (status, conflict) = event_request(&app, &reordered).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        assert_eq!(conflict["error"]["code"], "idempotency_conflict");
+    }
+
+    #[tokio::test]
+    async fn event_receipt_replay_is_not_corrupted_by_another_node_request_id() {
+        const OTHER_TOKEN: &str = "event-other-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("node-replay-db");
+        let state = event_test_state(&database);
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at) VALUES('node-two','installation-two','other-fixture-public-key','{}','online','{{}}','[]','{{}}','2026-01-01T00:00:00Z');
+                 INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant-two','project','node-two','worker','installation-two','[\"read\"]',1,'digest-two','2026-01-01T00:00:00Z');
+                 INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('ticket-other','project','other event','read_summary','README.md','running','grant-two','digest-two','node-two','installation-two','worker',1,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                 INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES('assignment-other','ticket-other','node-two','worker',1,'lease-other',1,'2100-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+                crate::store::hash(OTHER_TOKEN)
+            ))
+            .unwrap();
+        let app = router(state);
+        let first = event_request(&app, &event_body()).await;
+        let mut other = event_body();
+        other["node_id"] = json!("node-two");
+        other["installation_id"] = json!("installation-two");
+        other["ticket_id"] = json!("ticket-other");
+        other["assignment_id"] = json!("assignment-other");
+        other["activity"] = json!("Independent other Node event");
+        assert_eq!(
+            event_request_with_token(&app, &other, OTHER_TOKEN).await.0,
+            StatusCode::OK
+        );
+        drop(app);
+        let reopened = event_test_state(&database);
+        let app = router(reopened);
+        let (status, replay) = event_request(&app, &event_body()).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["message_id"], first.1["message_id"]);
+        let (status, other_replay) = event_request_with_token(&app, &other, OTHER_TOKEN).await;
+        assert_eq!(status, StatusCode::OK, "{other_replay}");
+        assert_eq!(other_replay["duplicate"], true);
+    }
+
+    #[tokio::test]
+    async fn event_receipt_conflicts_without_mutating_original_or_current_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = event_test_state(directory.path());
+        let app = router(state.clone());
+        assert_eq!(event_request(&app, &event_body()).await.0, StatusCode::OK);
+        let original = {
+            let store = state.lock().unwrap();
+            store
+                .query(
+                    "SELECT * FROM messages WHERE request_id='event-request'",
+                    [],
+                )
+                .unwrap()
+        };
+        let variants = [
+            ("activity", json!("Changed content")),
+            (
+                "content",
+                json!("Fallback content changes the complete body"),
+            ),
+            ("kind", json!("heartbeat")),
+            ("sender", json!("assistant")),
+            (
+                "session_ref",
+                json!({"session_id":"other","observed_seq":3}),
+            ),
+            ("assignment_id", json!("assignment-two")),
+            ("ticket_id", json!("ticket-two")),
+            ("lease_epoch", json!(3)),
+            ("source_verified", json!(true)),
+            ("unrelated_extra_field", json!(false)),
+        ];
+        for (field, value) in variants {
+            let mut changed = event_body();
+            if matches!(field, "assignment_id" | "ticket_id" | "lease_epoch") {
+                // The second legal Assignment has a different current epoch;
+                // reusing the same opaque ID must still hit the Node receipt gate.
+                changed["ticket_id"] = json!("ticket-two");
+                changed["assignment_id"] = json!("assignment-two");
+                changed["lease_epoch"] = json!(3);
+            }
+            changed[field] = value;
+            let (status, body) = event_request(&app, &changed).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{field}: {body}");
+            assert_eq!(body["error"]["code"], "idempotency_conflict", "{field}");
+            let store = state.lock().unwrap();
+            assert_eq!(event_fixture_counts(&store, "event-request"), (1, 1));
+            assert_eq!(
+                store
+                    .query(
+                        "SELECT * FROM messages WHERE request_id='event-request'",
+                        []
+                    )
+                    .unwrap(),
+                original,
+                "{field}"
+            );
+        }
+        let mut stale = event_body();
+        stale["lease_epoch"] = json!(99);
+        let (status, body) = event_request(&app, &stale).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["code"], "stale_lease");
+    }
+
+    #[tokio::test]
+    async fn event_legacy_collision_is_proved_and_source_namespace_stays_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = event_test_state(directory.path());
+        let app = router(state.clone());
+        {
+            let store = state.lock().unwrap();
+            store.conn().execute(
+                "INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES('legacy','ticket','worker','concierge','activity','Original visible progress',' { \"observed_seq\":3, \"session_id\":\"session\" } ','summary','2026-01-01T00:00:00Z','legacy-request')",
+                [],
+            ).unwrap();
+            // Same scalar request_id on a different Ticket proves source_event_id
+            // rather than the (ticket_id,request_id) key separates those histories.
+            store.conn().execute_batch(
+                "INSERT INTO source_instances(id,owner_key,source_key,kind,definition_digest,created_at,updated_at) VALUES('source','legacy-source','key','webhook','digest','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                 INSERT INTO source_threads(id,source_id,client_thread_id,last_sequence,created_at,updated_at) VALUES('thread','source','client',0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                 INSERT INTO source_events(id,source_id,thread_id,external_event_id,kind,content,payload_digest,received_at,source_sequence,thread_sequence) VALUES('source-event','source','thread','legacy','user_message','Legacy source collision','digest','2026-01-01T00:00:00Z',1,1);
+                 INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,visibility,created_at,request_id,source_event_id) VALUES('source-message','ticket-two','user','concierge','conversation','Legacy source collision','private','2026-01-01T00:00:00Z','legacy:collision','source-event');",
+            ).unwrap();
+        }
+        let mut legacy = event_body();
+        legacy["request_id"] = json!("legacy-request");
+        let (status, replay) = event_request(&app, &legacy).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["message_id"], "legacy");
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "legacy-request"),
+            (1, 0)
+        );
+
+        state.lock().unwrap().conn().execute(
+            "UPDATE messages SET session_ref='{\"session_id\":\"different\",\"observed_seq\":3}' WHERE id='legacy'",
+            [],
+        ).unwrap();
+        let (status, conflict) = event_request(&app, &legacy).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+        assert_eq!(conflict["error"]["code"], "idempotency_conflict");
+
+        let mut independent = event_body();
+        independent["request_id"] = json!("legacy:collision");
+        let (status, accepted) = event_request(&app, &independent).await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["duplicate"], false);
+        let store = state.lock().unwrap();
+        assert_eq!(event_fixture_counts(&store, "legacy:collision"), (2, 1));
+        assert_eq!(
+            store
+                .query(
+                    "SELECT source_event_id FROM messages WHERE id='source-message'",
+                    []
+                )
+                .unwrap()[0]["source_event_id"],
+            "source-event"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_receipt_replays_the_validated_normalized_session_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = event_test_state(directory.path());
+        let artifact_id = "22222222-2222-4222-8222-222222222222";
+        let session_id = "11111111-1111-4111-8111-111111111111";
+        let pipeline_id = "33333333-3333-4333-8333-333333333333";
+        let artifact_bytes = b"source";
+        let artifact_digest = crate::sha256(artifact_bytes);
+        let parent_session = json!({
+            "harness":"dsh", "session_id":session_id, "protocol":"dsh-session-log",
+            "host_api":"bounded-fixture-host", "observed_seq":1,
+        });
+        {
+            let store = state.lock().unwrap();
+            // A known already-produced bounded document source, not a claimed
+            // live DSH Agent. Only owned fixture rows and source bytes are used.
+            store.conn().execute(
+                "UPDATE tickets SET kind='edit_file',relative_path='docs/derived.txt' WHERE id='ticket'",
+                [],
+            ).unwrap();
+            store
+                .conn()
+                .execute(
+                    "UPDATE grants SET operations='[\"read\",\"write\"]' WHERE id='grant'",
+                    [],
+                )
+                .unwrap();
+            store.conn().execute(
+                "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at)
+                 VALUES('parent-grant','project','node','worker','installation','[\"read\"]',1,'parent-digest','2026-01-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            store.conn().execute(
+                "INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at)
+                 VALUES('parent-ticket','project','Read the bounded parent source','read_summary','docs/source.txt','succeeded','parent-grant','parent-digest','node','installation','worker',1,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            let at = crate::now();
+            store.conn().execute(
+                "INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at)
+                 VALUES(?1,'parent-ticket','parent-assignment','node','bounded-source.txt','text/plain',?2,?3,?4,?5,'[]',?6)",
+                params![artifact_id,artifact_bytes.len() as i64,artifact_digest,format!("{artifact_id}.artifact"),format!("loom://artifact/{artifact_id}"),at],
+            ).unwrap();
+            std::fs::create_dir_all(store.root.join("artifacts")).unwrap();
+            std::fs::write(
+                store
+                    .root
+                    .join("artifacts")
+                    .join(format!("{artifact_id}.artifact")),
+                artifact_bytes,
+            )
+            .unwrap();
+            let definition = json!({
+                "schema":crate::pipeline::SCHEMA,"version":1,"pipeline_id":pipeline_id,
+                "project_id":"project","name":"Bounded normalized receipt fixture",
+                "read":{"stage_id":"read","kind":"read_summary","grant_id":"parent-grant","relative_path":"docs/source.txt"},
+                "edit":{"stage_id":"edit","kind":"edit_file","grant_id":"grant","relative_path":"docs/derived.txt","depends_on":["read"],"transform":"trim"},
+            });
+            store.conn().execute(
+                "INSERT INTO document_pipeline_runs(id,project_id,name,definition_json,definition_digest,created_at,updated_at)
+                 VALUES(?1,'project','Bounded normalized receipt fixture',?2,?3,?4,?4)",
+                params![pipeline_id,definition.to_string(),crate::store::hash(&definition.to_string()),at],
+            ).unwrap();
+            for (stage, ticket, grant, checkpoint) in [
+                ("read", "parent-ticket", "parent-grant", "succeeded"),
+                ("edit", "ticket", "grant", "pending"),
+            ] {
+                store.conn().execute(
+                    "INSERT INTO document_pipeline_stages(pipeline_id,stage_id,ticket_id,raw_grant_id,checkpoint_state,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)",
+                    params![pipeline_id,stage,ticket,grant,checkpoint,at],
+                ).unwrap();
+            }
+            store.conn().execute(
+                "INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id)
+                 VALUES('parent-public-session','parent-ticket','worker','concierge','session_link','Known bounded parent Session',?1,'summary',?2,'parent-session-request')",
+                params![parent_session.to_string(),at],
+            ).unwrap();
+        }
+        let mut event = event_body();
+        event["request_id"] = json!("normalized-replay");
+        event["activity"] = json!("One source-derived process link");
+        event["kind"] = json!("session_link");
+        event["session_ref"] = json!({
+            "harness":"caller-supplied-presentation", "protocol":"dsh-session-log",
+            "host_api":"bounded-fixture-child", "session_id":session_id, "observed_seq":1,
+            "delegated_from":{
+                "type":"artifact_ref", "artifact_id":artifact_id, "ticket_id":"parent-ticket",
+                "origin_node_id":"node", "sha256":artifact_digest,
+                "location":format!("loom://artifact/{artifact_id}"), "parents":[],
+                "session":parent_session, "source_verified":false,
+            },
+        });
+        let app = router(state.clone());
+        let (status, first) = event_request(&app, &event).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["accepted"], true);
+        assert!(first.get("stored_session_ref").is_none());
+        let child_id = first["message_id"].as_str().unwrap().to_owned();
+        let (message, receipt) = {
+            let store = state.lock().unwrap();
+            let message = store
+                .query("SELECT * FROM messages WHERE id=?1", [child_id.as_str()])
+                .unwrap()
+                .remove(0);
+            let session: Value =
+                serde_json::from_str(message["session_ref"].as_str().unwrap()).unwrap();
+            let relation = &session["delegated_from"];
+            assert_eq!(session["harness"], "dsh");
+            assert_eq!(relation["source_verified"], true);
+            assert_eq!(
+                relation["validated_by"],
+                "current_assignment_and_pipeline_relation"
+            );
+            let receipt = &store.query("SELECT * FROM requests WHERE route='events' AND request_id='normalized-replay'", []).unwrap()[0];
+            let persisted: Value =
+                serde_json::from_str(receipt["response"].as_str().unwrap()).unwrap();
+            assert_eq!(persisted["stored_session_ref"], session);
+            (message, receipt.clone())
+        };
+        // The immutable capture no longer needs a second lookup of the parent
+        // Session row. This fixture deletion does not delete the already accepted
+        // child event and is not a simulated provider/session acknowledgement.
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "DELETE FROM messages WHERE ticket_id='parent-ticket' AND kind='session_link'",
+                [],
+            )
+            .unwrap();
+        let (status, replay) = event_request(&app, &event).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["message_id"], child_id);
+        assert!(replay.get("stored_session_ref").is_none());
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(event_fixture_counts(&store, "normalized-replay"), (1, 1));
+            assert_eq!(
+                store
+                    .query("SELECT * FROM messages WHERE id=?1", [child_id.as_str()])
+                    .unwrap()
+                    .remove(0),
+                message
+            );
+            assert_eq!(receipt, store.query("SELECT * FROM requests WHERE route='events' AND request_id='normalized-replay'", []).unwrap()[0]);
+            assert_eq!(
+                store.query("SELECT COUNT(*) AS n FROM grants", []).unwrap()[0]["n"],
+                2
+            );
+            assert_eq!(
+                store
+                    .query("SELECT COUNT(*) AS n FROM reports", [])
+                    .unwrap()[0]["n"],
+                0
+            );
+            assert_eq!(
+                store
+                    .query("SELECT COUNT(*) AS n FROM effects", [])
+                    .unwrap()[0]["n"],
+                0
+            );
+            assert_eq!(
+                store
+                    .query("SELECT COUNT(*) AS n FROM artifacts", [])
+                    .unwrap()[0]["n"],
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_receipt_integrity_and_transaction_rollback_are_not_fake_duplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = event_test_state(directory.path());
+        let app = router(state.clone());
+        assert_eq!(event_request(&app, &event_body()).await.0, StatusCode::OK);
+        let original = state
+            .lock()
+            .unwrap()
+            .query("SELECT * FROM requests WHERE route='events'", [])
+            .unwrap();
+        // Even otherwise identical text/session metadata does not allow this
+        // receipt to point at a message carrying a different request identity.
+        let mut sibling = event_body();
+        sibling["request_id"] = json!("sibling-event-request");
+        assert_eq!(event_request(&app, &sibling).await.0, StatusCode::OK);
+        let sibling_message = state
+            .lock()
+            .unwrap()
+            .query(
+                "SELECT * FROM messages WHERE request_id='sibling-event-request'",
+                [],
+            )
+            .unwrap()[0]
+            .clone();
+        {
+            let store = state.lock().unwrap();
+            let mut wrong_pointer: Value =
+                serde_json::from_str(original[0]["response"].as_str().unwrap()).unwrap();
+            wrong_pointer["message_id"] = json!(sibling_message["id"]);
+            store.conn().execute(
+                "UPDATE requests SET response=?1 WHERE route='events' AND request_id='event-request'",
+                [wrong_pointer.to_string()],
+            ).unwrap();
+        }
+        let (status, wrong_link) = event_request(&app, &event_body()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{wrong_link}");
+        assert_eq!(wrong_link["error"]["code"], "receipt_corrupt");
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "event-request"),
+            (1, 1)
+        );
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "sibling-event-request"),
+            (1, 1)
+        );
+        state.lock().unwrap().conn().execute(
+            "UPDATE requests SET response='not JSON' WHERE route='events' AND request_id='event-request'",
+            [],
+        ).unwrap();
+        let (status, corrupt) = event_request(&app, &event_body()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{corrupt}");
+        assert_eq!(corrupt["error"]["code"], "receipt_corrupt");
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "event-request"),
+            (1, 1)
+        );
+
+        state.lock().unwrap().conn().execute(
+            "UPDATE requests SET response=?1 WHERE route='events' AND request_id='event-request'",
+            [original[0]["response"].as_str().unwrap()],
+        ).unwrap();
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute("DELETE FROM messages WHERE request_id='event-request'", [])
+            .unwrap();
+        let (status, missing) = event_request(&app, &event_body()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{missing}");
+        assert_eq!(missing["error"]["code"], "receipt_corrupt");
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "event-request"),
+            (0, 1)
+        );
+
+        // A controlled receipt write failure must roll back its just-created message.
+        let mut fresh = event_body();
+        fresh["request_id"] = json!("atomic-first-call");
+        state.lock().unwrap().conn().execute_batch(
+            "CREATE TEMP TRIGGER deny_event_receipt BEFORE INSERT ON requests
+             WHEN NEW.route='events' BEGIN SELECT RAISE(ABORT,'fixture denies event receipt'); END;",
+        ).unwrap();
+        let (status, failed) = event_request(&app, &fresh).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+        assert_eq!(failed["error"]["code"], "storage_error");
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "atomic-first-call"),
+            (0, 0)
+        );
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute("DROP TRIGGER deny_event_receipt", [])
+            .unwrap();
+        assert_eq!(event_request(&app, &fresh).await.0, StatusCode::OK);
+        assert_eq!(
+            event_fixture_counts(&state.lock().unwrap(), "atomic-first-call"),
+            (1, 1)
+        );
+    }
+
     async fn post_json(app: &Router, uri: String, token: &str, body: Value) -> Response {
         app.clone()
             .oneshot(
@@ -3591,37 +4209,219 @@ pub(crate) async fn acknowledge(
         json!({"accepted":true,"acknowledged_at":acknowledged_at}),
     ))
 }
+fn event_idempotency_conflict() -> ApiError {
+    ApiError::conflict(
+        "idempotency_conflict",
+        "The same Node event Request ID cannot carry different immutable event data",
+    )
+}
+
+fn corrupt_event_receipt() -> ApiError {
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "receipt_corrupt",
+        "Persisted Node event receipt or its message is not readable",
+    )
+}
+
+fn event_message_matches(row: &Value, expected: &Value, ticket: &str, content: &str) -> bool {
+    row["ticket_id"] == ticket
+        && row["sender"] == expected["sender"]
+        && row["recipient"] == "concierge"
+        && row["kind"] == expected["kind"]
+        && row["content"] == content
+        && row["visibility"] == "summary"
+        && row["session_ref"]
+            .as_str()
+            .and_then(|stored| serde_json::from_str::<Value>(stored).ok())
+            .is_some_and(|stored| stored == expected["session_ref"])
+}
+
+fn event_receipt(
+    tx: &rusqlite::Transaction<'_>,
+    node: &str,
+    request_id: &str,
+) -> ApiResult<Option<Value>> {
+    tx.query_row(
+        "SELECT payload_digest,response FROM requests WHERE node_id=?1 AND route='events' AND request_id=?2",
+        params![node, request_id],
+        store::row_value,
+    )
+    .optional()
+    .map_err(ApiError::from)
+}
+
+fn event_message(
+    tx: &rusqlite::Transaction<'_>,
+    message_id: &str,
+    request_id: &str,
+) -> ApiResult<Option<Value>> {
+    tx.query_row(
+        "SELECT id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id
+         FROM messages WHERE id=?1 AND request_id=?2 AND source_event_id IS NULL",
+        params![message_id, request_id],
+        store::row_value,
+    )
+    .optional()
+    .map_err(ApiError::from)
+}
+
+fn legacy_event_messages(
+    tx: &rusqlite::Transaction<'_>,
+    ticket: &str,
+    request_id: &str,
+) -> ApiResult<Vec<Value>> {
+    let mut statement = tx.prepare(
+        "SELECT id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id
+         FROM messages WHERE ticket_id=?1 AND request_id=?2 AND source_event_id IS NULL
+         ORDER BY created_at,id",
+    )?;
+    let rows = statement
+        .query_map(params![ticket, request_id], store::row_value)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub(crate) async fn event(
     AppState(state): AppState<Arc<State>>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let (node, _) = node(&state, &headers, &body)?;
-    let ticket = required(&body, "ticket_id", 160)?;
+    let request_id = required(&body, "request_id", 160)?.to_owned();
+    let ticket = required(&body, "ticket_id", 160)?.to_owned();
     let assignment = required(&body, "assignment_id", 160)?;
     let content = body["activity"]
         .as_str()
         .or_else(|| body["content"].as_str())
         .filter(|x| x.len() <= 8000 && !x.is_empty())
-        .ok_or_else(|| ApiError::bad("A bounded visible event summary is required"))?;
-    let store = state.lock()?;
-    // A Session link is an ordinary progress reference, not the special stale
-    // cancellation path; delegation provenance additionally depends on this
-    // exact current Assignment, its immutable source and the real parent reference.
+        .ok_or_else(|| ApiError::bad("A bounded visible event summary is required"))?
+        .to_owned();
+    let sender = body["sender"].as_str().unwrap_or("worker").to_owned();
+    let kind = body["kind"].as_str().unwrap_or("activity").to_owned();
+    let mut logical_body = body.clone();
+    logical_body
+        .as_object_mut()
+        .expect("the event is a JSON object after required field validation")
+        .remove("request_id");
+    let payload_digest = store::hash(
+        &loom_protocol::canonical::json(&json!({"logical_fields":logical_body}))
+            .map_err(|_| ApiError::bad("Node event body cannot be canonically encoded"))?,
+    );
+    let mut store = state.lock()?;
+    // A receipt does not relax current admission; exact replay reads the retained
+    // response only after the same current Lease and Assignment checks as a new event.
     valid_lease(&store, &body, &node, body["kind"] != "session_link")?;
-    let session_reference = if let Some(relation) = validated_delegation_relation(&store, &body)? {
+    // Existing receipts and legacy rows compare only their complete historical
+    // Session reference. Current parent/source validation belongs to insertion,
+    // never to replay of an already immutable accepted event.
+    let mut expected = json!({
+        "sender":sender, "kind":kind,
+        "session_ref":body.get("session_ref").cloned().unwrap_or_else(|| json!({"assignment_id":&assignment})),
+    });
+    let tx = store
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if let Some(receipt) = event_receipt(&tx, &node, &request_id)? {
+        // Parsing is mandatory before any new-insert path. A damaged response
+        // must never be mistaken for absence of an already admitted event.
+        let mut response: Value = serde_json::from_str(
+            receipt["response"]
+                .as_str()
+                .ok_or_else(corrupt_event_receipt)?,
+        )
+        .map_err(|_| corrupt_event_receipt())?;
+        if receipt["payload_digest"].as_str() != Some(payload_digest.as_str()) {
+            return Err(event_idempotency_conflict());
+        }
+        if !response.is_object()
+            || response["accepted"] != true
+            || response["node_id"] != node
+            || response["message_id"].as_str().is_none()
+        {
+            return Err(corrupt_event_receipt());
+        }
+        // A validated delegation may be normalized before the message is
+        // persisted. Compare its recorded projection, never a self-asserted
+        // body substitute, and do not reconstruct its parent during replay.
+        expected["session_ref"] = response
+            .get("stored_session_ref")
+            .cloned()
+            .ok_or_else(corrupt_event_receipt)?;
+        let message_id = response["message_id"]
+            .as_str()
+            .ok_or_else(corrupt_event_receipt)?;
+        let message =
+            event_message(&tx, message_id, &request_id)?.ok_or_else(corrupt_event_receipt)?;
+        if !event_message_matches(&message, &expected, &ticket, &content) {
+            return Err(corrupt_event_receipt());
+        }
+        response
+            .as_object_mut()
+            .ok_or_else(corrupt_event_receipt)?
+            .remove("stored_session_ref");
+        response["duplicate"] = json!(true);
+        // Drop the transaction explicitly before returning a historical response.
+        drop(tx);
+        return Ok(Json(response));
+    }
+
+    // Before receipts existed, Node messages used only this unique legacy key.
+    // SourceEvent messages are excluded because their opaque IDs use another
+    // namespace (source_id:event_id). Any other collision must be proved, not
+    // silently ignored or allowed to acquire another event identity.
+    let messages = legacy_event_messages(&tx, &ticket, &request_id)?;
+    if !messages.is_empty() {
+        if messages.len() == 1 && event_message_matches(&messages[0], &expected, &ticket, &content)
+        {
+            let message_id = messages[0]["id"].clone();
+            drop(tx);
+            return Ok(Json(json!({
+                "accepted":true,"duplicate":true,"node_id":node,"message_id":message_id
+            })));
+        }
+        return Err(event_idempotency_conflict());
+    }
+
+    drop(tx);
+    let expected = if let Some(relation) = validated_delegation_relation(&store, &body)? {
         json!({
-            "harness": "dsh", "session_id": body["session_ref"]["session_id"],
-            "protocol": "dsh-session-log", "host_api": body["session_ref"]["host_api"],
-            "observed_seq": body["session_ref"]["observed_seq"], "delegated_from": relation,
+            "sender":sender, "kind":kind, "session_ref":{
+                "harness":"dsh", "session_id":body["session_ref"]["session_id"],
+                "protocol":"dsh-session-log", "host_api":body["session_ref"]["host_api"],
+                "observed_seq":body["session_ref"]["observed_seq"], "delegated_from":relation,
+            }
         })
     } else {
-        body.get("session_ref")
-            .cloned()
-            .unwrap_or_else(|| json!({"assignment_id":assignment}))
+        expected
     };
-    store.conn().execute("INSERT OR IGNORE INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES(?1,?2,?3,'concierge',?4,?5,?6,'summary',?7,?8)",params![id("message"),ticket,body["sender"].as_str().unwrap_or("worker"),body["kind"].as_str().unwrap_or("activity"),content,session_reference.to_string(),now(),body["request_id"].as_str()])?;
-    Ok(Json(json!({"accepted":true,"node_id":node})))
+    let tx = store
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if event_receipt(&tx, &node, &request_id)?.is_some()
+        || !legacy_event_messages(&tx, &ticket, &request_id)?.is_empty()
+    {
+        return Err(event_idempotency_conflict());
+    }
+    let message_id = id("message");
+    let created_at = now();
+    let response = json!({
+        "accepted":true,"duplicate":false,"node_id":node,"message_id":message_id
+    });
+    // This resolved value is server-derived and is not returned as a new
+    // worker authority. It is only used to compare an exact historical replay.
+    let mut receipt_response = response.clone();
+    receipt_response["stored_session_ref"] = expected["session_ref"].clone();
+    tx.execute(
+        "INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,session_ref,visibility,created_at,request_id) VALUES(?1,?2,?3,'concierge',?4,?5,?6,'summary',?7,?8)",
+        params![message_id,ticket,sender,kind,content,expected["session_ref"].to_string(),created_at,request_id],
+    )?;
+    tx.execute(
+        "INSERT INTO requests(node_id,route,request_id,payload_digest,response,created_at) VALUES(?1,'events',?2,?3,?4,?5)",
+        params![node,request_id,payload_digest,receipt_response.to_string(),created_at],
+    )?;
+    tx.commit()?;
+    Ok(Json(response))
 }
 
 pub(crate) async fn source_input(
