@@ -733,7 +733,14 @@ export async function retryTicket(id: string) {
 }
 
 export async function decideApproval(id: string, decision: 'approve' | 'reject', reason: string) {
-  const result = await run('ticket-write', () => client.post<unknown>(`/tickets/${encodeURIComponent(id)}/approval`, { approval_id: crypto.randomUUID(), decision, reason }))
+  // An old confirmation is not authority for another selection or a stale phase.
+  const current = state.selectedTicketId === id && state.ticket?.id === id ? state.ticket : null
+  const trimmed = reason.trim()
+  if (!current || current.status !== 'waiting_approval' || current.cancel_requested || !trimmed || new TextEncoder().encode(trimmed).byteLength > 1000) {
+    state.errors['ticket-write'] = '请核对当前选中的待审批对象。选择已切换、状态已改变或理由不符合要求时，不会提交审批。'
+    return false
+  }
+  const result = await run('ticket-write', () => client.post<unknown>(`/tickets/${encodeURIComponent(id)}/approval`, { approval_id: crypto.randomUUID(), decision, reason: trimmed }))
   if (result === undefined) return false
   await selectTicket(id)
   return true

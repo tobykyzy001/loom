@@ -472,55 +472,206 @@ pub fn cancel(store: &Store, ticket: &str) -> Result<()> {
     store.conn().execute("UPDATE assignments SET cancelled_at=?1,lease_expires_at=?1 WHERE ticket_id=?2 AND cancelled_at IS NULL",params![crate::now(),ticket])?;
     Ok(())
 }
+#[derive(Clone, Copy)]
+pub(crate) struct ApprovalContext<'a> {
+    pub approval_id: &'a str,
+    pub reason: &'a str,
+}
+
+#[derive(Clone, Copy)]
+enum AttemptMode<'a> {
+    FailedRetry,
+    Approval {
+        context: Option<ApprovalContext<'a>>,
+    },
+}
+
 pub fn retry(store: &Store, ticket: &str) -> Result<()> {
-    let t = store.get("tickets", ticket)?.context("ticket not found")?;
-    if t["status"] == "reconciling" {
-        bail!("Unresolved outcomes require effect reconciliation, not blind retry.")
-    }
-    if t["cancel_requested"] == true {
-        bail!("Durable stop intent cannot be overwritten by an automatic retry")
-    }
-    if t["status"] != "failed" {
-        bail!("Only a failed Ticket can be retried")
-    }
-    issue_next_attempt(store, &t, ticket)
+    issue_next_attempt(store, ticket, AttemptMode::FailedRetry)
 }
 
+/// Compatibility entry point for the original in-process approval helper. Unlike
+/// the authenticated HTTP decision it carries no user reason and no grant audit.
+#[allow(dead_code)]
 pub fn retry_after_approval(store: &Store, ticket: &str) -> Result<()> {
-    let t = store.get("tickets", ticket)?.context("ticket not found")?;
-    if t["status"] == "reconciling" {
-        bail!("Unresolved outcomes require effect reconciliation, not blind retry.")
-    }
-    if t["cancel_requested"] == true {
-        bail!("Durable stop intent cannot be overwritten by an automatic retry")
-    }
-    if t["status"] != "waiting_approval" {
-        bail!("Only an exactly waiting-for-approval Ticket can issue its first attempt")
-    }
-    issue_next_attempt(store, &t, ticket)
+    issue_next_attempt(store, ticket, AttemptMode::Approval { context: None })
 }
 
-fn issue_next_attempt(store: &Store, t: &Value, ticket: &str) -> Result<()> {
-    if store
-        .query(
-            "SELECT id FROM grants WHERE id=?1 AND revoked_at IS NULL",
-            [t["grant_id"].as_str().unwrap_or_default()],
-        )?
-        .is_empty()
-    {
-        bail!("Grant revoked; cannot reactivate authorization through retry")
+pub fn approve_ticket(store: &Store, ticket: &str, context: ApprovalContext<'_>) -> Result<()> {
+    issue_next_attempt(
+        store,
+        ticket,
+        AttemptMode::Approval {
+            context: Some(context),
+        },
+    )
+}
+
+pub fn reject_ticket(store: &Store, ticket: &str, context: ApprovalContext<'_>) -> Result<()> {
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> Result<()> {
+        let current = store.get("tickets", ticket)?.context("ticket not found")?;
+        if current["status"] == "reconciling" {
+            bail!("Unresolved outcomes require effect reconciliation, not blind retry.")
+        }
+        if current["cancel_requested"] == true {
+            bail!("Durable stop intent cannot be overwritten by an automatic retry")
+        }
+        if current["status"] != "waiting_approval" {
+            bail!("Only an exactly waiting-for-approval Ticket can be reviewed")
+        }
+        store.audit(
+            Some(ticket),
+            "client",
+            "task.approval_rejected",
+            &json!({
+                "approval_id":context.approval_id,
+                "reason":context.reason,
+                "decision":"reject",
+                "assignment_created":false,
+                "remains":"waiting_approval",
+            }),
+        )?;
+        Ok(())
+    })();
+    finish_attempt_transaction(store, result)
+}
+
+fn issue_next_attempt(store: &Store, ticket: &str, mode: AttemptMode<'_>) -> Result<()> {
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> Result<()> {
+        // Status, authority and immutable work are all read again in this write
+        // transaction. A previously loaded API response is not the decision input.
+        let t = store.get("tickets", ticket)?.context("ticket not found")?;
+        if t["status"] == "reconciling" {
+            bail!("Unresolved outcomes require effect reconciliation, not blind retry.")
+        }
+        if t["cancel_requested"] == true {
+            bail!("Durable stop intent cannot be overwritten by an automatic retry")
+        }
+        match mode {
+            AttemptMode::FailedRetry if t["status"] != "failed" => {
+                bail!("Only a failed Ticket can be retried")
+            }
+            AttemptMode::Approval { .. } if t["status"] != "waiting_approval" => {
+                bail!("Only an exactly waiting-for-approval Ticket can issue its first attempt")
+            }
+            AttemptMode::FailedRetry => {}
+            AttemptMode::Approval { .. } if t["attempt"].as_i64() != Some(0) => {
+                bail!("Approval can only issue the first attempt of a waiting Ticket")
+            }
+            _ => {}
+        }
+        if store
+            .query(
+                "SELECT id FROM grants WHERE id=?1 AND revoked_at IS NULL",
+                [t["grant_id"].as_str().unwrap_or_default()],
+            )?
+            .is_empty()
+        {
+            bail!("Grant revoked; cannot reactivate authorization through retry")
+        }
+        let context = match mode {
+            AttemptMode::Approval { context } => context,
+            AttemptMode::FailedRetry => None,
+        };
+        if context.is_some() {
+            crate::source_events::ensure_source_work_approval(store, ticket)
+                .map_err(anyhow::Error::new)?;
+        }
+        let attempt = t["attempt"].as_i64().unwrap_or(0);
+        let epoch = attempt
+            .checked_add(1)
+            .context("Ticket attempt cannot be advanced without overflow")?;
+        let asg = id("asg");
+        let lease = id("lease");
+        let program = store
+            .get(
+                "projects",
+                t["project_id"]
+                    .as_str()
+                    .context("Ticket project required")?,
+            )?
+            .context("Ticket project not found")?;
+        let at = crate::now();
+        let updated = store.conn().execute(
+            "UPDATE tickets SET status='running',attempt=?1,updated_at=?2 WHERE id=?3 AND status=?4 AND attempt=?5 AND cancel_requested=0",
+            params![epoch, at, ticket, t["status"].as_str().unwrap_or_default(), attempt],
+        )?;
+        if updated != 1 {
+            bail!("Ticket changed before its retry could be issued; no attempt was created")
+        }
+        let inserted = store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) SELECT ?1,id,node_id,worker_id,?2,?3,?2,?4,?5 FROM tickets WHERE id=?6 AND status='running' AND attempt=?2",params![asg,epoch,lease,(chrono::Utc::now()+chrono::Duration::seconds(75)).to_rfc3339(),at,ticket])?;
+        if inserted != 1 {
+            bail!("The current Ticket did not produce exactly one real Assignment")
+        }
+        store.audit(
+            Some(ticket),
+            "client",
+            "assignment.retried",
+            &json!({
+                "assignment_id":asg,
+                "lease_id":lease,
+                "lease_epoch":epoch,
+                "attempt":epoch,
+                "node_id":t["node_id"],
+                "project_revision":program["inventory"]["revision"],
+            }),
+        )?;
+        match mode {
+            AttemptMode::FailedRetry => {
+                store.audit(Some(ticket), "client", "ticket.retried", &json!({}))?;
+            }
+            AttemptMode::Approval {
+                context: Some(context),
+            } => {
+                store.audit(
+                    Some(ticket),
+                    "client",
+                    "task.approval_granted",
+                    &json!({
+                        "approval_id":context.approval_id,
+                        "reason":context.reason,
+                        "decision":"approve",
+                        "assignment_id":asg,
+                        "lease_id":lease,
+                        "lease_epoch":epoch,
+                        "attempt":epoch,
+                        "node_id":t["node_id"],
+                        "grant_id":t["grant_id"],
+                        "grant_digest":t["grant_digest"],
+                        "source_authority_preserved":true,
+                        "grant_created":false,
+                    }),
+                )?;
+            }
+            AttemptMode::Approval { context: None } => {}
+        }
+        Ok(())
+    })();
+    finish_attempt_transaction(store, result)
+}
+
+fn finish_attempt_transaction(store: &Store, result: Result<()>) -> Result<()> {
+    let outcome = match result {
+        Ok(()) => store
+            .conn()
+            .execute("COMMIT", [])
+            .map(|_| ())
+            .map_err(Into::into),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = outcome {
+        // Commit is attempted only after the write closure succeeds. A failed
+        // COMMIT gets one rollback attempt; a successful COMMIT never does.
+        let rollback = store.conn().execute("ROLLBACK", []);
+        return match rollback {
+            Ok(_) => Err(error),
+            Err(rollback) => Err(error.context(format!(
+                "Attempt transaction rollback failed after unsuccessful storage/audit write: {rollback}"
+            ))),
+        };
     }
-    let epoch = t["attempt"].as_i64().unwrap_or(0) + 1;
-    let asg = id("asg");
-    let program = store
-        .get("projects", t["project_id"].as_str().unwrap())?
-        .unwrap_or(Value::Null);
-    store.conn().execute(
-        "UPDATE tickets SET status='running',attempt=?1,updated_at=?2 WHERE id=?3",
-        params![epoch, crate::now(), ticket],
-    )?;
-    store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) SELECT ?1,id,node_id,worker_id,?2,?3,?2,?4,?5 FROM tickets WHERE id=?6",params![asg,epoch,id("lease"),(chrono::Utc::now()+chrono::Duration::seconds(75)).to_rfc3339(),crate::now(),ticket])?;
-    store.audit(Some(ticket),"client","assignment.retried",&json!({"attempt":epoch,"node_id":t["node_id"],"project_revision":program["inventory"]["revision"]}))?;
     Ok(())
 }
 
@@ -1360,7 +1511,7 @@ mod retry_tests {
         let unrelated = store.detail("unrelated-ticket").unwrap();
 
         retry(&store, "ticket-a").unwrap();
-        assert_eq!(store.audits(None).unwrap().len(), audits.len() + 1);
+        assert_eq!(store.audits(None).unwrap().len(), audits.len() + 2);
 
         let after = store.detail("ticket-a").unwrap();
         assert_eq!(after["status"], "running");
@@ -1417,10 +1568,166 @@ mod retry_tests {
                 .count(),
             1
         );
-        assert!(!audits
-            .iter()
-            .any(|entry| entry["action"] == "ticket.retried"));
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry["action"] == "ticket.retried")
+                .count(),
+            1,
+            "The API's former outer audit is now part of this same atomic domain completion"
+        );
         assert!(store.verify_audit().unwrap());
+    }
+
+    #[test]
+    fn approval_audits_roll_back_ticket_assignment_and_lease_together() {
+        for action in ["assignment.retried", "task.approval_granted"] {
+            let fixture = fixture("waiting_approval", 0, false);
+            let store = fixture.store;
+            store
+                .conn()
+                .execute("DELETE FROM assignments WHERE ticket_id='ticket-a'", [])
+                .unwrap();
+            let before = store.detail("ticket-a").unwrap();
+            let audits = store.audits(None).unwrap();
+            store
+                .conn()
+                .execute(
+                    &format!("CREATE TRIGGER fail_approval_audit BEFORE INSERT ON audits WHEN NEW.action='{action}' BEGIN SELECT RAISE(ABORT,'owned approval audit failure'); END"),
+                    [],
+                )
+                .unwrap();
+            let error = approve_ticket(
+                &store,
+                "ticket-a",
+                ApprovalContext {
+                    approval_id: "approval-regression",
+                    reason: "Audit must be inseparable from actual execution",
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("owned approval audit failure"));
+            assert_eq!(store.detail("ticket-a").unwrap(), before);
+            assert_eq!(store.audits(None).unwrap(), audits);
+            assert!(store.verify_audit().unwrap());
+            store
+                .conn()
+                .execute("DROP TRIGGER fail_approval_audit", [])
+                .unwrap();
+            approve_ticket(
+                &store,
+                "ticket-a",
+                ApprovalContext {
+                    approval_id: "approval-regression",
+                    reason: " Audit is committed with execution ",
+                },
+            )
+            .unwrap();
+            let after = store.detail("ticket-a").unwrap();
+            assert_eq!(after["status"], "running");
+            assert_eq!(after["attempt"], 1);
+            assert_eq!(after["assignments"].as_array().unwrap().len(), 1);
+            let audit_rows = store.audits(Some("ticket-a")).unwrap();
+            assert_eq!(audit_rows.len(), 3);
+            let granted: Value =
+                serde_json::from_str(audit_rows[2]["evidence"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                granted["evidence"]["reason"],
+                " Audit is committed with execution "
+            );
+            assert_eq!(granted["evidence"]["approval_id"], "approval-regression");
+            assert_eq!(granted["evidence"]["decision"], "approve");
+            assert_eq!(granted["evidence"]["grant_created"], false);
+            assert!(store.verify_audit().unwrap());
+        }
+    }
+
+    #[test]
+    fn failed_retry_ticket_audit_is_atomic_and_legacy_approval_stays_generic() {
+        let failed = fixture("failed", 1, false);
+        let store = failed.store;
+        let before = store.detail("ticket-a").unwrap();
+        let audits = store.audits(None).unwrap();
+        store.conn().execute("CREATE TRIGGER fail_retry_audit BEFORE INSERT ON audits WHEN NEW.action='ticket.retried' BEGIN SELECT RAISE(ABORT,'owned retry audit failure'); END", []).unwrap();
+        assert!(retry(&store, "ticket-a").is_err());
+        assert_eq!(store.detail("ticket-a").unwrap(), before);
+        assert_eq!(store.audits(None).unwrap(), audits);
+        store
+            .conn()
+            .execute("DROP TRIGGER fail_retry_audit", [])
+            .unwrap();
+        retry(&store, "ticket-a").unwrap();
+        assert_eq!(store.detail("ticket-a").unwrap()["attempt"], 2);
+
+        let legacy = fixture("waiting_approval", 0, false);
+        let store = legacy.store;
+        store
+            .conn()
+            .execute("DELETE FROM assignments WHERE ticket_id='ticket-a'", [])
+            .unwrap();
+        retry_after_approval(&store, "ticket-a").unwrap();
+        let actions = store
+            .audits(Some("ticket-a"))
+            .unwrap()
+            .into_iter()
+            .map(|row| row["action"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(actions, vec!["original.history", "assignment.retried"]);
+    }
+
+    #[test]
+    fn rejected_decision_is_a_transactional_hold_with_its_actual_reason() {
+        let fixture = fixture("waiting_approval", 0, false);
+        let store = fixture.store;
+        store
+            .conn()
+            .execute("DELETE FROM assignments WHERE ticket_id='ticket-a'", [])
+            .unwrap();
+        let before = store.detail("ticket-a").unwrap();
+        let audits = store.audits(None).unwrap();
+        store.conn().execute("CREATE TRIGGER fail_reject_audit BEFORE INSERT ON audits WHEN NEW.action='task.approval_rejected' BEGIN SELECT RAISE(ABORT,'owned rejection audit failure'); END", []).unwrap();
+        assert!(reject_ticket(
+            &store,
+            "ticket-a",
+            ApprovalContext {
+                approval_id: "reject-failure",
+                reason: "not yet"
+            }
+        )
+        .is_err());
+        assert_eq!(store.detail("ticket-a").unwrap(), before);
+        assert_eq!(store.audits(None).unwrap(), audits);
+        store
+            .conn()
+            .execute("DROP TRIGGER fail_reject_audit", [])
+            .unwrap();
+        reject_ticket(
+            &store,
+            "ticket-a",
+            ApprovalContext {
+                approval_id: "reject-persisted",
+                reason: "Need a human review first",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            store.detail("ticket-a").unwrap()["status"],
+            "waiting_approval"
+        );
+        assert_eq!(
+            store.detail("ticket-a").unwrap()["assignments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let entries = store.audits(Some("ticket-a")).unwrap();
+        let evidence: Value =
+            serde_json::from_str(entries[1]["evidence"].as_str().unwrap()).unwrap();
+        assert_eq!(evidence["evidence"]["approval_id"], "reject-persisted");
+        assert_eq!(evidence["evidence"]["reason"], "Need a human review first");
+        assert_eq!(evidence["evidence"]["decision"], "reject");
+        assert_eq!(evidence["evidence"]["assignment_created"], false);
     }
 
     #[test]

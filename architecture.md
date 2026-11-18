@@ -813,6 +813,14 @@ queued → leased → confirmed
 
 无法证明是否成功的敏感效果，询问用户而非盲目重跑。模型“先检查一下再决定”可辅助恢复，但不能代替确定性证据。
 
+**审批理由必须与首签身份和实际审计一起成立。** `POST /tickets/{id}/approval` 现要求 `decision=approve|reject`、有界 `approval_id` 及**非空、trim后、UTF-8最多1000字节**的 `reason`。Vue只在仍选中同一张真正 `waiting_approval` 且无停止意图的Ticket时提交，并在表单事先说明理由会以可读文字持久化、不能填Secret；外部凭据或子进程secret不因此进入Prompt。随后填写另一明确决定不是自动学习习惯，也不为了审批ID而去创建审批Granted对象。
+
+Concierge在现有Store锁及 `BEGIN IMMEDIATE` 事务中重新读取实际Ticket/frozen Source Spec、Grant、Binding、root、Node及Worker/心跳状态，核对而至首次Attempt，不代替之前看到的旧modal。带人工理由的 `approve_ticket` 才走严格Source授权校验；原库内部 `retry_after_approval` 仅保留generic兼容性，不是HTTP绕开理由的备用通道。批准时，Ticket从0→1、真实Assignment/Lease、原Grant/digest/物理Node/worker/`assignment.retried` 和 **`task.approval_granted`**（reason、approval_id、实际的Assignment ID、Lease ID、epoch、原始Grant/digest与`grant_created:false`）在同一个事务提交。拒绝只写**`task.approval_rejected`**（真实reason/ID）并保持`waiting_approval`、空Assignment、无Report/Artifact/Effect、无stop intent；它是有记录的暂缓，不是取消或失败。原关联仍可能由用户再次显式检查后作另一个新的决定，不会因旧拒绝而自动执行或把approval_id当作可无限使用的授权。
+
+COMMIT只在字段校验、状态/权限、插入及audit均成功后发生，任一失败尝试RollBack，而非提交后才声称无法写入历史。普通failed重试的 `assignment.retried` 和 `ticket.retried` 也纳入这一唯一事务，保留旧failed根记录和方法结构，不能因为后一条audit失败而先遗留Attempt；审批的attempt溢出/状态改变同样拒绝。同一`approval_id`**不是持久化去重键或 guarantee idempotent replay**。客户端应重读实际Ticket/audit来恢复未知回执，不应把ambiguous-->retry材料视为再次授权。
+
+已有真实验证覆盖 1000 字节、1001字节、非文本/空白拒绝，未经当前范围Grant/Binding错误403、状态已变409，以及SQL trigger分别阻止审批grant或retry审计时Ticket/attempt/历史完整回滚。第三条生产Source的真实UI又走过离线待审批 → 实际reason拒绝且保持零工作 → 原生Node以原Project Root inventory真heartbeat恢复 → 新reason明确批准 → 唯一首Attempt/Lease → 实际Artifact及input SHA/assignment对齐。后续撤权仍不能复活历史作业或创建第四票。[浏览器报告](/tmp/loom-approval-browser-result.json) 和[HTTP/源事务证明](/tmp/loom-approval-http-final-jrwOGs/result.json)。它们证明这一单Service的人工审批闭环，不等于多 principal 强度隔离、两Tab并发幂等或跨主机 exactly-once。
+
 **当前公共重试的正常语义窄于任何历史状态的继续执行**。只有当前已明确 `failed` 且没有停止意图的Ticket，才能沿其原Grant（未撤销）签发一个新的Assignment/epoch。它保留本Ticket的内容、原Grant digest、Node/worker/binding等既有范围及旧Report/Artifact/Effect，而不是换Grant、冒充换机或自动回滚。新的尝试有自己的Assignment、Epoch和相应实际执行/报告证据。
 
 `reconciling`/未知结果必须先核对已有副作用，`pending`、`running`、`cancelled`、`succeeded`、已有停止意图或撤销的资源都不能由公共 `/retry` 另建执行**或记录一次虚假的“已重试”审计**。这不能靠UI禁用按钮代替后端限制。`waiting_approval` 的批准动作只通过已有人工审批门及当前Grant/Source校验后调用共享签发逻辑，仍产生合法的首次Attempt；不能把这条专门入口混同为任意直接 retry，也不能让普通 retry 成为绕过审批的变道。

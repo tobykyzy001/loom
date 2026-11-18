@@ -28,6 +28,10 @@ const scalar = sql => {
   const db = new DatabaseSync(join(root, 'concierge', 'loom.sqlite3'), { readOnly: true })
   try { return Object.values(db.prepare(sql).get())[0] } finally { db.close() }
 }
+const mutate = (sql, ...params) => {
+  const db = new DatabaseSync(join(root, 'concierge', 'loom.sqlite3'))
+  try { return db.prepare(sql).run(...params) } finally { db.close() }
+}
 async function run() {
   await promisify(execFile)('pnpm', ['--dir', appRoot, 'build'], { cwd: repository, timeout: 120_000 })
   assert.equal(await realpath(executable), '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
@@ -323,6 +327,218 @@ async function run() {
   assert.equal(await runner.pollAndRun().then(result => result.status), 'idle')
   await runner.client.dispatchOutbox()
   assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(secondTicketId)}`), secondTicket)
+
+  // Third Source job: this SQL is only a deterministic fixture input gate, not
+  // authentication or approval. Recovery must come from the real Node heartbeat.
+  const thirdSourceObjective = ' Third Source requires reject, restore, then one actual approval。 '
+  const rejectReason = 'Hold before selecting the restored exact source-reading host.'
+  const approveReason = 'The exact original Grant, project, file and restored worker are approved once.'
+  const offlineBeforeHeartbeat = scalar(`SELECT last_heartbeat FROM nodes WHERE id='${runner.nodeId}' AND installation_id='${runner.installationId}'`)
+  assert.equal(mutate('UPDATE nodes SET status=? WHERE id=? AND installation_id=?', 'offline', runner.nodeId, runner.installationId).changes, 1)
+  const thirdSourceId = await recordMessage(page, thirdSourceObjective)
+  assert.equal(thirdSourceId, sourceId)
+  await prepareSourceWork(page, { ...scope, contains: thirdSourceObjective })
+  const thirdAccepted = await confirmSourceWork(page, { duplicate: false })
+  const thirdTicketId = thirdAccepted.ticket.id
+  assert.equal(thirdAccepted.ticket.status, 'waiting_approval')
+  assert.equal(thirdAccepted.duplicate, false)
+  const thirdEvent = (await events()).find(event => event.content === thirdSourceObjective)
+  assert.equal(thirdEvent.id, thirdAccepted.source_event_id)
+  assert.equal(thirdEvent.ticket_id, null)
+  assert.equal(thirdEvent.task_ticket_id, thirdTicketId)
+  assert.equal(thirdEvent.creation_kind, 'explicit_task_created_after_intake')
+  assert.equal(thirdEvent.task_spec.ticket_id, thirdTicketId)
+  assert.equal(thirdEvent.task_spec.event_request_digest, thirdEvent.payload_digest)
+  assert.equal(thirdEvent.task_spec.project_id, projectId)
+  assert.equal(thirdEvent.task_spec.grant_id, grant.grant.id)
+  assert.equal(thirdEvent.task_spec.grant_digest, grant.grant.digest)
+  assert.equal(thirdEvent.task_spec.project_binding_id, binding.id)
+  assert.equal(thirdEvent.task_spec.root_scope, projectRoot)
+  assert.equal(thirdEvent.task_spec.node_id, runner.nodeId)
+  assert.equal(thirdEvent.task_spec.installation_id, runner.installationId)
+  assert.equal(thirdEvent.task_spec.worker_id, 'default')
+  assert.equal(thirdEvent.task_spec.relative_path, 'input.txt')
+  assert.equal(thirdEvent.task_spec.digest, thirdAccepted.task_digest)
+  const waitingDetail = page.locator('.ticket-detail')
+  await waitingDetail.locator('.ticket-id').getByText(thirdTicketId, { exact: false }).waitFor()
+  assert.equal(await waitingDetail.locator('.ticket-id').innerText(), `Ticket / ${thirdTicketId}`)
+  await waitingDetail.locator('h1').getByText(thirdSourceObjective, { exact: true }).waitFor()
+  await waitingDetail.getByText('等待批准', { exact: true }).waitFor()
+  const visibleApprovalMeta = await waitingDetail.locator('.detail-meta').innerText()
+  assert.ok(visibleApprovalMeta.includes('Explicit Source work in a real browser'), `Approval must show the actual selected Project: ${visibleApprovalMeta}`)
+  assert.ok(visibleApprovalMeta.includes('input.txt'), `Approval must show the exact relative input path: ${visibleApprovalMeta}`)
+  assert.ok(visibleApprovalMeta.includes('第 0 次尝试'), visibleApprovalMeta)
+  const waitingTicket = await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`)
+  assert.equal(waitingTicket.status, 'waiting_approval')
+  assert.equal(waitingTicket.project_id, projectId)
+  assert.equal(waitingTicket.attempt, 0)
+  assert.equal(waitingTicket.grant_id, grant.grant.id)
+  assert.equal(waitingTicket.grant_digest, grant.grant.digest)
+  assert.equal(waitingTicket.node_id, runner.nodeId)
+  assert.equal(waitingTicket.installation_id, runner.installationId)
+  assert.equal(waitingTicket.worker_id, 'default')
+  assert.equal(waitingTicket.relative_path, 'input.txt')
+  assert.equal(waitingTicket.cancel_requested, false)
+  for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual(waitingTicket[field], [])
+  const beforeRejectCounts = { tickets: 3, assignments: scalar('SELECT COUNT(*) FROM assignments'), reports: scalar('SELECT COUNT(*) FROM reports'), artifacts: scalar('SELECT COUNT(*) FROM artifacts'), effects: scalar('SELECT COUNT(*) FROM effects'), specs: scalar('SELECT COUNT(*) FROM source_work_specs') }
+  assert.deepEqual(beforeRejectCounts, { tickets: 3, assignments: 3, reports: 3, artifacts: 2, effects: 2, specs: 3 })
+  assert.equal((await admin.get('/api/v1/grants')).grants.length, 1)
+
+  await waitingDetail.getByRole('button', { name: '检查并决定', exact: true }).click()
+  await page.locator('#approval-reason').fill(rejectReason)
+  await waitingDetail.getByRole('button', { name: '拒绝本次操作', exact: true }).click()
+  await page.getByText('拒绝这次工作区操作？', { exact: true }).waitFor()
+  assert.equal(await page.locator('.confirm-modal').innerText().then(text => text.includes(rejectReason) && text.includes('input.txt')), true)
+  const rejectPath = `/api/v1/tickets/${thirdTicketId}/approval`
+  const rejectResponse = page.waitForResponse(response => new URL(response.url()).pathname === rejectPath && response.request().method() === 'POST')
+  rejectResponse.catch(error => console.error('SOURCE APPROVAL REJECT WAIT', error.message))
+  await page.getByRole('button', { name: '确认拒绝', exact: true }).click()
+  const rejectedHttp = await rejectResponse
+  assert.equal(rejectedHttp.status(), 200)
+  const rejectedBody = await rejectedHttp.json()
+  const rejectionRequest = requests.filter(request => request.path === rejectPath && request.method === 'POST').at(-1)
+  assert.deepEqual(Object.keys(rejectionRequest.body).sort(), ['approval_id', 'decision', 'reason'])
+  assert.match(rejectionRequest.body.approval_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+  assert.equal(rejectionRequest.body.decision, 'reject')
+  assert.equal(rejectionRequest.body.reason, rejectReason)
+  assert.equal(rejectedBody.status, 'waiting_approval')
+  assert.equal(rejectedBody.attempt, 0)
+  assert.equal(rejectedBody.assignments.length, 0)
+  assert.equal(rejectedBody.cancel_requested, false)
+  await page.locator('.confirm-modal').waitFor({ state: 'hidden' })
+  await waitingDetail.getByText('等待批准', { exact: true }).waitFor()
+  const rejectedTicket = await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`)
+  assert.equal(rejectedTicket.status, 'waiting_approval')
+  assert.equal(rejectedTicket.cancel_requested, false)
+  for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual(rejectedTicket[field], [])
+  const rejectionAudits = (await admin.get(`/api/v1/audit?ticket_id=${encodeURIComponent(thirdTicketId)}`)).audit.filter(entry => entry.action === 'task.approval_rejected')
+  assert.equal(rejectionAudits.length, 1)
+  assert.equal(rejectionAudits[0].actor, 'client')
+  assert.deepEqual(JSON.parse(rejectionAudits[0].evidence).evidence, {
+    approval_id: rejectionRequest.body.approval_id, reason: rejectReason, decision: 'reject', assignment_created: false, remains: 'waiting_approval' })
+  assert.equal(await runner.pollAndRun().then(result => result.status), 'idle', 'Rejection and offline host cannot emit executable work')
+  await runner.client.dispatchOutbox()
+  const beforeEmitCounts = { tickets: scalar('SELECT COUNT(*) FROM tickets'), assignments: scalar('SELECT COUNT(*) FROM assignments'), reports: scalar('SELECT COUNT(*) FROM reports'), artifacts: scalar('SELECT COUNT(*) FROM artifacts'), effects: scalar('SELECT COUNT(*) FROM effects'), specs: scalar('SELECT COUNT(*) FROM source_work_specs') }
+  assert.deepEqual(beforeEmitCounts, beforeRejectCounts)
+  assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`), rejectedTicket)
+
+  const restoredHeartbeat = await runner.client.heartbeat({ capabilities: runner.capabilities, workers: [{ worker_id: 'default' }], inventory: { project_roots: { [projectId]: projectRoot } } })
+  assert.equal(restoredHeartbeat.accepted, true)
+  assert.equal(scalar(`SELECT status FROM nodes WHERE id='${runner.nodeId}' AND installation_id='${runner.installationId}'`), 'online', 'Only the genuine Node heartbeat restores status')
+  const restoredHeartbeatAt = scalar(`SELECT last_heartbeat FROM nodes WHERE id='${runner.nodeId}' AND installation_id='${runner.installationId}'`)
+  assert.ok(Date.parse(restoredHeartbeatAt) > Date.parse(offlineBeforeHeartbeat), 'The accepted authenticated heartbeat gives genuinely fresh placement evidence')
+  assert.ok(Date.parse(restoredHeartbeatAt) >= Date.parse(waitingTicket.created_at), 'Waiting approval cannot manufacture online freshness or success')
+  await waitingDetail.getByRole('button', { name: '检查并决定', exact: true }).click()
+  await page.locator('#approval-reason').fill(approveReason)
+  await waitingDetail.getByRole('button', { name: '批准，仅限这一次', exact: true }).click()
+  await page.getByText('批准这次工作区操作？', { exact: true }).waitFor()
+  assert.equal(await page.locator('.confirm-modal').innerText().then(text => text.includes(approveReason) && text.includes('input.txt')), true)
+  const approveResponse = page.waitForResponse(response => new URL(response.url()).pathname === rejectPath && response.request().method() === 'POST')
+  approveResponse.catch(error => console.error('SOURCE APPROVAL GRANT WAIT', error.message))
+  await page.getByRole('button', { name: '确认一次性批准', exact: true }).click()
+  const approvedHttp = await approveResponse
+  assert.equal(approvedHttp.status(), 200)
+  const approvedBody = await approvedHttp.json()
+  const approveRequest = requests.filter(request => request.path === rejectPath && request.method === 'POST').at(-1)
+  assert.deepEqual(Object.keys(approveRequest.body).sort(), ['approval_id', 'decision', 'reason'])
+  assert.match(approveRequest.body.approval_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+  assert.notEqual(approveRequest.body.approval_id, rejectionRequest.body.approval_id)
+  assert.equal(approveRequest.body.decision, 'approve')
+  assert.equal(approveRequest.body.reason, approveReason)
+  assert.equal(approvedBody.status, 'running')
+  assert.equal(approvedBody.attempt, 1)
+  assert.equal(approvedBody.assignments.length, 1)
+  await page.locator('.confirm-modal').waitFor({ state: 'hidden' })
+  const approvedTicket = await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`)
+  assert.equal(approvedTicket.status, 'running')
+  assert.equal(approvedTicket.attempt, 1)
+  assert.equal(approvedTicket.assignments.length, 1)
+  const newAssignment = approvedTicket.assignments[0]
+  assert.notEqual(newAssignment.id, secondTicket.assignments[0].id)
+  assert.ok(newAssignment.lease_id)
+  assert.equal(newAssignment.ticket_id, thirdTicketId)
+  assert.equal(newAssignment.node_id, runner.nodeId)
+  assert.equal(newAssignment.worker_id, 'default')
+  assert.equal(newAssignment.attempt, 1)
+  assert.equal(newAssignment.lease_epoch, 1)
+  assert.equal(approvedTicket.grant_id, grant.grant.id)
+  assert.equal(approvedTicket.grant_digest, grant.grant.digest)
+  assert.equal(approvedTicket.installation_id, runner.installationId)
+  assert.equal(approvedTicket.reports.length, 0)
+  assert.equal(approvedTicket.artifacts.length, 0)
+  assert.equal(approvedTicket.effects.length, 0)
+  assert.equal(scalar('SELECT COUNT(*) FROM assignments'), beforeEmitCounts.assignments + 1)
+  assert.equal(scalar('SELECT COUNT(*) FROM reports'), beforeEmitCounts.reports)
+  assert.equal(scalar('SELECT COUNT(*) FROM artifacts'), beforeEmitCounts.artifacts)
+  assert.equal(scalar('SELECT COUNT(*) FROM effects'), beforeEmitCounts.effects)
+  assert.equal(scalar('SELECT COUNT(*) FROM grants'), 1)
+  assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(ticketId)}`), ticket)
+  assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(secondTicketId)}`), secondTicket)
+  const approvalAudits = (await admin.get(`/api/v1/audit?ticket_id=${encodeURIComponent(thirdTicketId)}`)).audit.filter(entry => entry.action === 'task.approval_granted')
+  assert.equal(approvalAudits.length, 1)
+  assert.equal(approvalAudits[0].actor, 'client')
+  const grantedEvidence = JSON.parse(approvalAudits[0].evidence).evidence
+  assert.equal(grantedEvidence.approval_id, approveRequest.body.approval_id)
+  assert.equal(grantedEvidence.reason, approveReason)
+  assert.equal(grantedEvidence.decision, 'approve')
+  assert.equal(grantedEvidence.assignment_id, newAssignment.id)
+  assert.equal(grantedEvidence.lease_id, newAssignment.lease_id)
+  assert.equal(grantedEvidence.lease_epoch, 1)
+  assert.equal(grantedEvidence.attempt, 1)
+  assert.equal(grantedEvidence.node_id, runner.nodeId)
+  assert.equal(grantedEvidence.grant_id, grant.grant.id)
+  assert.equal(grantedEvidence.grant_digest, grant.grant.digest)
+  assert.equal(grantedEvidence.source_authority_preserved, true)
+  assert.equal(grantedEvidence.grant_created, false)
+
+  const thirdOutcome = await deliver()
+  assert.equal(thirdOutcome.status, 'succeeded')
+  assert.equal(thirdOutcome.assignmentId, newAssignment.id)
+  await waitingDetail.locator('.ticket-id').getByText(thirdTicketId, { exact: false }).waitFor()
+  await waitingDetail.getByText('收到成功报告', { exact: true }).waitFor()
+  const thirdTicket = await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`)
+  assert.equal(thirdTicket.status, 'succeeded')
+  assert.equal(thirdTicket.attempt, 1)
+  assert.equal(thirdTicket.assignments.length, 1)
+  assert.equal(thirdTicket.reports.length, 1)
+  assert.equal(thirdTicket.reports[0].state, 'succeeded')
+  assert.equal(thirdTicket.reports[0].assignment_id, newAssignment.id)
+  assert.equal(thirdTicket.reports[0].lease_epoch, 1)
+  assert.equal(thirdTicket.artifacts.length, 1)
+  assert.equal(thirdTicket.artifacts[0].assignment_id, newAssignment.id)
+  assert.equal(thirdTicket.artifacts[0].origin_node_id, runner.nodeId)
+  assert.equal(thirdTicket.effects.length, 1)
+  assert.equal(thirdTicket.effects[0].status, 'confirmed')
+  assert.equal(thirdTicket.effects[0].assignment_id, newAssignment.id)
+  const thirdArtifactId = thirdTicket.artifacts[0].id ?? thirdTicket.artifacts[0].artifact_id
+  assert.match(thirdArtifactId, /^[0-9a-f-]{36}$/i)
+  const thirdArtifactPath = `/api/v1/tickets/${thirdTicketId}/artifacts/${thirdArtifactId}`
+  const thirdNativeDownload = await page.evaluate(async ({ clientToken, path }) => {
+    const response = await fetch(path, { headers: { Authorization: `Bearer ${clientToken}`, Accept: 'application/json' } })
+    return { status: response.status, body: await response.json() }
+  }, { clientToken: token, path: thirdArtifactPath })
+  assert.equal(thirdNativeDownload.status, 200)
+  assert.equal(thirdNativeDownload.body.artifact.assignment_id, newAssignment.id, 'The native download artifact must name the exact approved Assignment')
+  const thirdSummary = JSON.parse(thirdNativeDownload.body.content)
+  assert.equal(thirdSummary.path, 'input.txt')
+  assert.equal(thirdSummary.byte_length, originalInputBytes.length)
+  assert.equal(thirdSummary.input_sha256, sha256(originalInputBytes))
+  assert.ok(thirdSummary.lines.includes('Real isolated project input.'))
+  assert.equal(sha256(thirdNativeDownload.body.content), thirdTicket.artifacts[0].sha256)
+  assert.equal(thirdNativeDownload.body.artifact.sha256, thirdTicket.artifacts[0].sha256)
+  const thirdArtifactResponse = page.waitForResponse(response => new URL(response.url()).pathname === thirdArtifactPath && response.request().method() === 'GET')
+  thirdArtifactResponse.catch(error => console.error('SOURCE THIRD ARTIFACT WAIT', error.message))
+  await waitingDetail.locator('.artifact-card').click()
+  assert.equal((await thirdArtifactResponse).status(), 200)
+  await waitingDetail.locator('.artifact-content').waitFor()
+  assert.equal(await waitingDetail.locator('.artifact-content').innerText(), thirdNativeDownload.body.content)
+  assert.equal(await waitingDetail.locator('.artifact-metadata').innerText().then(text => text.includes(thirdTicket.artifacts[0].sha256)), true)
+  const thirdApprovalHistory = (await admin.get(`/api/v1/audit?ticket_id=${encodeURIComponent(thirdTicketId)}`)).audit.filter(entry => ['task.approval_rejected', 'task.approval_granted'].includes(entry.action))
+  assert.equal(thirdApprovalHistory.filter(entry => entry.action === 'task.approval_rejected').length, 1)
+  assert.equal(thirdApprovalHistory.filter(entry => entry.action === 'task.approval_granted').length, 1)
+  const thirdSpec = (await events()).find(event => event.id === thirdEvent.id).task_spec
+  assert.deepEqual(thirdSpec, thirdEvent.task_spec)
+  assert.deepEqual((await admin.get('/api/v1/grants')).grants.filter(row => row.id === grant.grant.id).map(row => row.digest), [grant.grant.digest])
   // Use the real visible permission form to revoke this one exact current Grant.
   const secondObjective = ' Revoked authority must not cause a new execution。 '
   await recordMessage(page, secondObjective)
@@ -349,7 +565,7 @@ async function run() {
   const beforeRevoke = captures('/api/v1/tickets').length
   assert.equal(await page.getByRole('button', { name: '提交给父层，第二次确认后创建摘要', exact: false }).isDisabled(), true)
   assert.equal(captures('/api/v1/tickets').length, beforeRevoke)
-  assert.equal((await admin.get('/api/v1/tickets')).tickets.length, 2, 'Revocation must not add to the two already delivered Source jobs')
+  assert.equal((await admin.get('/api/v1/tickets')).tickets.length, 3, 'Revocation must not add to the three legitimately delivered Source jobs')
   assert.equal((await events()).filter(event => event.content === secondObjective)[0].task_ticket_id, null)
   const firstAfterRevocation = await admin.get(`/api/v1/tickets/${encodeURIComponent(ticketId)}`)
   assert.equal(firstAfterRevocation.assignments.length, ticket.assignments.length)
@@ -379,7 +595,22 @@ async function run() {
   secondTicket.assignments.map(({ acknowledged_at, attempt, cancelled_at, created_at, grant_digest, id, lease_epoch, lease_id, node_id, ticket_id, worker_id }) =>
     ({ acknowledged_at, attempt, cancelled_at, created_at, grant_digest, id, lease_epoch, lease_id, node_id, ticket_id, worker_id })))
   assert.ok(secondAfterRevocation.assignments.every(assignment => Date.parse(assignment.lease_expires_at) <= Date.now()))
-  assert.equal((await admin.get('/api/v1/tickets')).tickets.length, 2)
+  const thirdAfterRevocation = await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`)
+  assert.equal(thirdAfterRevocation.id, thirdTicket.id)
+  assert.equal(thirdAfterRevocation.status, 'succeeded')
+  assert.equal(thirdAfterRevocation.objective, thirdTicket.objective)
+  assert.equal(thirdAfterRevocation.grant_id, thirdTicket.grant_id)
+  assert.equal(thirdAfterRevocation.grant_digest, thirdTicket.grant_digest)
+  assert.deepEqual(thirdAfterRevocation.artifacts, thirdTicket.artifacts)
+  assert.deepEqual(thirdAfterRevocation.effects, thirdTicket.effects)
+  assert.deepEqual(thirdAfterRevocation.reports, thirdTicket.reports)
+  assert.deepEqual(thirdAfterRevocation.assignments.map(({ acknowledged_at, attempt, cancelled_at, created_at, grant_digest, id, lease_epoch, lease_id, node_id, ticket_id, worker_id }) =>
+    ({ acknowledged_at, attempt, cancelled_at, created_at, grant_digest, id, lease_epoch, lease_id, node_id, ticket_id, worker_id })),
+  thirdTicket.assignments.map(({ acknowledged_at, attempt, cancelled_at, created_at, grant_digest, id, lease_epoch, lease_id, node_id, ticket_id, worker_id }) =>
+    ({ acknowledged_at, attempt, cancelled_at, created_at, grant_digest, id, lease_epoch, lease_id, node_id, ticket_id, worker_id })))
+  assert.ok(thirdAfterRevocation.assignments.every(assignment => Date.parse(assignment.lease_expires_at) <= Date.now()))
+  assert.equal((await admin.get('/api/v1/tickets')).tickets.length, 3)
+  assert.equal((await events()).filter(event => event.id === thirdEvent.id)[0].task_ticket_id, thirdTicketId)
 
   // Exercise the explicit current-Grant failure as well, then explicitly recreate only the test Grant.
   await admin.post(`/api/v1/grants/${encodeURIComponent(grant.grant.id)}/revoke`, {})
@@ -399,20 +630,26 @@ async function run() {
   await page.getByRole('button', { name: '关闭 Source 面板', exact: true }).click()
   assert.deepEqual(browserFailures, [])
   assert.ok(completed.every(response => response.status < 400 || (response.status === 401 && response.path === '/api/v1/bootstrap')))
-  assert.equal(scalar('SELECT COUNT(*) FROM tickets'), 2)
-  for (const id of [ticketId, secondTicketId]) {
+  assert.equal(scalar('SELECT COUNT(*) FROM tickets'), 3)
+  const finalDetails = []
+  for (const id of [ticketId, secondTicketId, thirdTicketId]) {
     const detail = await admin.get(`/api/v1/tickets/${encodeURIComponent(id)}`)
+    finalDetails.push(detail)
     console.error('SOURCE FINAL REPORTS', id, JSON.stringify(detail.reports.map(report => ({ id: report.id, assignment_id: report.assignment_id, state: report.state }))))
   }
   console.error('SOURCE FINAL SQL REPORTS', scalar('SELECT COUNT(*) FROM reports'))
-  assert.equal(scalar('SELECT COUNT(*) FROM assignments'), 3)
-  assert.equal(scalar('SELECT COUNT(*) FROM reports'), 3, 'Two first-Ticket failure/retry Reports and one second-Ticket success Report')
+  assert.equal(scalar('SELECT COUNT(*) FROM assignments'), 4)
+  assert.equal(scalar('SELECT COUNT(*) FROM reports'), 4, 'Two first-Ticket failure/retry Reports and two subsequent one-attempt successes')
   assert.equal(firstAfterRevocation.reports.filter(report => report.state === 'failed').length, 1)
   assert.equal(firstAfterRevocation.reports.filter(report => report.state === 'succeeded').length, 1)
   assert.equal(secondAfterRevocation.reports.filter(report => report.state === 'succeeded').length, 1)
-  assert.equal(scalar('SELECT COUNT(*) FROM artifacts'), 2)
-  assert.equal(scalar('SELECT COUNT(*) FROM effects'), 2)
-  assert.equal(scalar('SELECT COUNT(*) FROM source_work_specs'), 2)
+  assert.equal(thirdAfterRevocation.reports.filter(report => report.state === 'succeeded').length, 1)
+  assert.equal(finalDetails.flatMap(detail => detail.reports).filter(report => report.state === 'failed').length, 1)
+  assert.equal(finalDetails.flatMap(detail => detail.reports).filter(report => report.state === 'succeeded').length, 3)
+  assert.equal(scalar('SELECT COUNT(*) FROM artifacts'), 3)
+  assert.equal(scalar('SELECT COUNT(*) FROM effects'), 3)
+  assert.equal(scalar('SELECT COUNT(*) FROM source_work_specs'), 3)
+  assert.equal((await events()).filter(event => event.creation_kind === 'explicit_task_created_after_intake').length, 3)
   assert.equal(captures('/api/v1/grants').length, 0, 'Source work must not create a Grant')
   assert.equal(captures('/api/v1/project-bindings').length, 0, 'Source work must not create/rebind a root')
   assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
@@ -425,6 +662,15 @@ async function run() {
     immutable_spec_and_legacy_history_separate: true, actual_download_sha_input_sha_status_report_effect: true,
     replay_does_not_new_assignment_artifact_report_effect: true, watcher_does_not_duplicate: true,
     retry_real_failure_then_failure_report_and_new_assignment_succeeded: true, two_distinct_source_executions_no_duplicate: true,
+    actual_reject_then_approve_source_first_attempt: true,
+    approval_reason_persisted_as_actual_audit: { reject: rejectReason, approve: approveReason },
+    approval_distinct_opaque_ids: true,
+    approval_issued_one_assignment_only: newAssignment.id,
+    approval_actual_download_matches_original_source: { input_sha256: thirdSummary.input_sha256, artifact_sha256: thirdTicket.artifacts[0].sha256, assignment_id: newAssignment.id },
+    heartbeat_restored_before_approval: true,
+    rejection_zero_runtime_and_not_cancelled: true,
+    approval_source_authority_preserved_without_new_grant: true,
+    three_source_tasks_three_immutable_specs: true,
     revoke_and_mutated_current_grant_no_new_job: true,
     narrow_viewport_real_column_no_overflow: true, screenshots: [join(root, 'source-work-desktop.png'), join(root, 'source-work-narrow.png')],
     not_claimed: ['physical mobile/browser lifecycle', 'actual IM/OAuth', 'Live LLM/intent inference', 'DSH code Agent',

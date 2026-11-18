@@ -162,7 +162,7 @@ mod tests {
             &app,
             "/api/v1/tickets/ticket/approval".into(),
             TOKEN,
-            json!({"decision":"approve","approval_id":"approval-1"}),
+            json!({"decision":"approve","approval_id":"approval-1","reason":"Authorized fixture execution"}),
         )
         .await;
         assert_eq!(approved.status(), StatusCode::OK);
@@ -205,8 +205,26 @@ mod tests {
                 bindings
             );
             let audits = store.audits(Some("ticket")).unwrap();
-            assert_eq!(audits.len(), 1);
+            assert_eq!(audits.len(), 2);
             assert_eq!(audits[0]["action"], "assignment.retried");
+            assert_eq!(audits[1]["action"], "task.approval_granted");
+            for audit in &audits {
+                let evidence: Value =
+                    serde_json::from_str(audit["evidence"].as_str().unwrap()).unwrap();
+                if audit["action"] == "assignment.retried" {
+                    assert_eq!(evidence["evidence"]["assignment_id"], assignments[0]["id"]);
+                    assert_eq!(evidence["evidence"]["lease_id"], assignments[0]["lease_id"]);
+                    assert_eq!(evidence["evidence"]["lease_epoch"], 1);
+                } else {
+                    assert_eq!(evidence["evidence"]["approval_id"], "approval-1");
+                    assert_eq!(
+                        evidence["evidence"]["reason"],
+                        "Authorized fixture execution"
+                    );
+                    assert_eq!(evidence["evidence"]["decision"], "approve");
+                    assert_eq!(evidence["evidence"]["grant_created"], false);
+                }
+            }
             assert!(store.verify_audit().unwrap());
         }
 
@@ -214,7 +232,7 @@ mod tests {
             &app,
             "/api/v1/tickets/ticket/approval".into(),
             TOKEN,
-            json!({"decision":"approve","approval_id":"approval-2"}),
+            json!({"decision":"approve","approval_id":"approval-2","reason":"Repeated decision cannot issue again"}),
         )
         .await;
         assert_eq!(repeated.status(), StatusCode::CONFLICT);
@@ -226,7 +244,105 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(store.audits(Some("ticket")).unwrap().len(), 1);
+        assert_eq!(store.audits(Some("ticket")).unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn approval_reason_is_normalized_bounded_and_rejection_can_precede_one_real_approval() {
+        const TOKEN: &str = "test-client-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Approval fixture','/owned/approval-fixture','read_write',1,'2026-01-01T00:00:00Z','{\"revision\":\"approval-revision\"}'); INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','worker','/owned/approval-fixture','binding-digest','2026-01-01T00:00:00Z'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','worker','installation','[\"read\"]',1,'grant-digest','2026-01-01T00:00:00Z','binding'); INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('ticket','project','Waiting for explicit approval','read_summary','README.md','Original request','waiting_approval','grant','grant-digest','node','installation','worker',0,0,'2026-01-01T00:01:00Z','2026-01-01T00:01:00Z');").unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        let before = state.lock().unwrap().detail("ticket").unwrap();
+        let before_audits = state.lock().unwrap().audits(None).unwrap();
+        for decision in ["approve", "reject"] {
+            for reason in [
+                Value::Null,
+                json!("   \t\n"),
+                json!("r".repeat(1001)),
+                json!(42),
+            ] {
+                let response = post_json(
+                    &app,
+                    "/api/v1/tickets/ticket/approval".into(),
+                    TOKEN,
+                    json!({"decision":decision,"approval_id":"reason-validation","reason":reason}),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(state.lock().unwrap().detail("ticket").unwrap(), before);
+                assert_eq!(state.lock().unwrap().audits(None).unwrap(), before_audits);
+            }
+        }
+        let boundary = post_json(
+            &app,
+            "/api/v1/tickets/ticket/approval".into(),
+            TOKEN,
+            json!({"decision":"reject","approval_id":"boundary-hold","reason":"r".repeat(1000)}),
+        )
+        .await;
+        assert_eq!(boundary.status(), StatusCode::OK);
+        let rejected: Value = serde_json::from_slice(
+            &axum::body::to_bytes(boundary.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rejected["status"], "waiting_approval");
+        assert_eq!(rejected["cancel_requested"], false);
+        assert_eq!(rejected["assignments"].as_array().unwrap().len(), 0);
+        {
+            let store = state.lock().unwrap();
+            let audits = store.audits(Some("ticket")).unwrap();
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0]["action"], "task.approval_rejected");
+            assert_eq!(audits[0]["actor"], "client");
+            assert_eq!(audits[0]["ticket_id"], "ticket");
+            let envelope: Value =
+                serde_json::from_str(audits[0]["evidence"].as_str().unwrap()).unwrap();
+            assert_eq!(envelope["evidence"]["reason"], "r".repeat(1000));
+            assert_eq!(envelope["evidence"]["approval_id"], "boundary-hold");
+            assert_eq!(envelope["evidence"]["decision"], "reject");
+            assert_eq!(envelope["evidence"]["assignment_created"], false);
+        }
+        let approved = post_json(
+            &app,
+            "/api/v1/tickets/ticket/approval".into(),
+            TOKEN,
+            json!({"decision":"approve","approval_id":"approval-after-hold","reason":"  Approved after preserving a separate rejection <reason>  "}),
+        )
+        .await;
+        assert_eq!(approved.status(), StatusCode::OK);
+        let repeated = post_json(
+            &app,
+            "/api/v1/tickets/ticket/approval".into(),
+            TOKEN,
+            json!({"decision":"reject","approval_id":"not-id-replay","reason":"This is an inadmissible later state, not a replay"}),
+        )
+        .await;
+        assert_eq!(repeated.status(), StatusCode::CONFLICT);
+        let store = state.lock().unwrap();
+        let detail = store.detail("ticket").unwrap();
+        assert_eq!(detail["assignments"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["attempt"], 1);
+        let audits = store.audits(Some("ticket")).unwrap();
+        assert_eq!(audits.len(), 3);
+        let granted: Value = serde_json::from_str(audits[2]["evidence"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            granted["evidence"]["reason"],
+            "Approved after preserving a separate rejection <reason>"
+        );
+        assert_eq!(granted["evidence"]["approval_id"], "approval-after-hold");
+        assert!(store.verify_audit().unwrap());
     }
 
     async fn assert_route_error_preserves_ticket_and_audit(
@@ -293,7 +409,7 @@ mod tests {
             &app,
             "/api/v1/tickets/ticket/approval".into(),
             TOKEN,
-            json!({"decision":"approve","approval_id":"approval-1"}),
+            json!({"decision":"approve","approval_id":"approval-1","reason":"Authorized fixture execution"}),
         )
         .await;
         assert_eq!(approved.status(), StatusCode::OK);
@@ -313,7 +429,7 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(store.audits(Some("ticket")).unwrap().len(), 1);
+        assert_eq!(store.audits(Some("ticket")).unwrap().len(), 2);
     }
 
     #[test]
@@ -1113,6 +1229,9 @@ impl From<rusqlite::Error> for ApiError {
 impl std::error::Error for ApiError {}
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if let Some(error) = error.downcast_ref::<ApiError>() {
+            return error.clone();
+        }
         let lower = error.to_string();
         if lower.contains("not found") {
             Self::missing(lower)
@@ -3718,7 +3837,6 @@ async fn retry(
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
     crate::maintenance::retry(&store, &ticket)?;
-    store.audit(Some(&ticket), "client", "ticket.retried", &json!({}))?;
     Ok(Json(store.detail(&ticket)?))
 }
 async fn approval(
@@ -3732,7 +3850,8 @@ async fn approval(
     if !matches!(decision, "approve" | "reject") {
         return Err(ApiError::bad("approve/reject"));
     };
-    let _ = required(&body, "approval_id", 160)?;
+    let approval_id = required(&body, "approval_id", 160)?;
+    let reason = required(&body, "reason", 1000)?.trim();
     let store = state.lock()?;
     let t = store
         .get("tickets", &ticket)?
@@ -3743,12 +3862,15 @@ async fn approval(
             "Task is not awaiting approval",
         ));
     }
-    if decision == "reject" {
-        store.audit(Some(&ticket),"client","task.approval_rejected",&json!({"approval_id":required(&body,"approval_id",160)?,"assignment_created":false,"remains":"waiting_approval"}))?;
-        return Ok(Json(store.detail(&ticket)?));
+    let context = crate::maintenance::ApprovalContext {
+        approval_id,
+        reason,
+    };
+    match decision {
+        "approve" => crate::maintenance::approve_ticket(&store, &ticket, context)?,
+        "reject" => crate::maintenance::reject_ticket(&store, &ticket, context)?,
+        _ => unreachable!("decision was validated above"),
     }
-    crate::source_events::ensure_source_work_approval(&store, &ticket)?;
-    crate::maintenance::retry_after_approval(&store, &ticket)?;
     Ok(Json(store.detail(&ticket)?))
 }
 #[derive(Deserialize)]

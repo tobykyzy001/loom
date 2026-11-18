@@ -158,6 +158,8 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 - 用户撤权界面用已返回的 `revoked_at` 与版本表现权限，**不要假设 grants 有 status 列**。中心确认撤权与资源列表刷新成功分别处理，旧快照不得冒充已同步的有效权限；确认框在取回最新资源前保持忙碌。普通未 acknowledged Assignment 的撤权不等于任务 cancel_acknowledgement，也不等于已受理源码编辑中的 native stop；前者其实际Node空poll、未执行、无文件效果和原审计保留须按用户控制链验证，参见 architecture.md §9.1 和 tests/browser/README.md。
 - 公共 `/retry` 只允许已明确 **failed且没有停止意图** 的Ticket，沿原Grant/digest和原物理范围创建下一Assignment。pending/running/cancelled/succeeded/reconciling 均不得借它新增执行、补写no-op成功retry或盲重做未知副作用；reconciling的UI要提示先对账而不是给一个必败确认按钮。`waiting_approval` 仍走已有Source/Human审批门并使用独立 `retry_after_approval` 首签，不能把它混为公共retry绕过审批。真正failed UI retry必须产生新Attempt，并保留旧失败的Report/Artifact/Effect；当前实现、引用证据和限制见 architecture.md §9.3 与 tests/harness/CODE_TASK.md。若failed的重试确认框打开*之后*原Grant才撤销，最终请求仍需经过当前Grant校验并拒绝，不能自动换Grant、也不能在发现旧Grant已撤后仍把旧确认变成新Attempt；当前模态错误与返回按钮、原Ticket/Attempt/原Report/原Artifact与完整历史ID集合保护已有真实Edge证据见 tests/browser/README.md。此处撤权不伪造cancel_requested或native cancellation，且把一个独立grant只用于该失读Ticket与该随后撤权时序，不挪用/复活其它已撤票。
 
+- **人工审批的决定/理由/执行证据应同一事务可追溯。** `/approval` 现要求非空规范化`reason≤1000 UTF-8字节`，真实存入`task.approval_granted`/`task.approval_rejected`，仍由原Grant/Binding/root/worker而非客户端授予新权限。Approval带着原有Source 校验进行唯一0→1首签，并保存实际Assignment/Lease/epoch、原Grant/digest，拒绝保持等待且零工作。新HTTP走`approve_ticket`，遗留`retry_after_approval`仅库内generic兼容，不能拿来略过人类理由或把approval_id当长期幂等授权。前端在确认时再核同ID/waiting和cancel intent，并将理由的明文持久化告诉用户不要粘贴Secret。公共failed retry的`assignment.retried`与`ticket.retried`也纳入同一BEGIN IMMEDIATE事务，任一DML或审计失败都回滚，`COMMIT`仅在写闭包成功之后。权限`403 grant_scope`及状态`409 approval_not_pending`保留。完整真实Source审批/真实DSH重试与SQL触发器回滚证明见[tests/sources/README.md](tests/sources/README.md)及`tests/runner/README.md`，不要把API按钮、单测状态名称或HTTP 200本身当完成。
+
 ## 7. 修改和验证协议
 
 ### 每次改动
