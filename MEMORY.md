@@ -290,6 +290,8 @@
 - 同次普通 `node tests/browser/run.mjs --keep-evidence` **overall:PASS**，不是仅说明基础函式/局部字段正确。真实read/Artifact打开与hash lines、Grant/Node与typed binding、真实 write Artifact/effects/Lease、取消Node acknowledgement与0/非零file effects的区分，本地401→旧snapshot→bad Candidate not saved→valid refresh recovery，亲自查看实际结果且没有reuse用户browser profile或当前DSH GUI port；使用owned temporary Edge profile与run data，no Provider/no Live LLM。五份证据及result report保留在owned输出目录，Source fixtures和Edge profile结束时也被验证关闭清理，没有遗留有迹可循的child浏览器或临时数据写入用户配置。
 - **集成方法记录**：没有用删除测试/忽略错误、直接重写负例为result for PASS，更没有调用真实计费模型或修改真实用户 Profile/browser/OS Credential。测试旁路类型/frameworkhelpers被确定是driver而不是backend封端时，奇迹般named permission wrappers应退回最小 原流程重跑；不重述历史draft错误当现状BUG。End-to-end Source/普通 proof不代表generic Agent/AI code edit/provider/host install或全M0结束。
 
+- **Checkpoint `a74e691 feat: add explicit Source work browser flow`**: 包含17个Source/UI/unit/browser/docs文件 plus lock内read handler literal clean，没有生产Profile或runtime 临时data入库。主控重新实测完整 `cargo fmt/clippy/test --workspace --locked`、Source events/authorized-ticket、Vue typecheck+**13 files 91 tests**、production build与**`node tests/sources/browser.mjs` overall:PASS / owned_cleanup:true**；独立Source agent之前已连续两次Source PASS。普通真实浏览器连续 `run.mjs --keep-evidence`最终全阶段PASS，另独立只读审阅未发现本次范围内阻断缺陷，并以Vue 91 tests复核。没有修改真实DSH Host/Provider、没有phone或IM/OAuth/m3 claim；本地main比origin/main多62 commit，**尚未推送**。M0仍active，下一增量继续分析而非宣称全路线图完成。
+
 ## Open problems and resolutions
 
 - Scope is large and includes actual hardware, platform-signed distribution and mobile verification. Proceed in evidenced increments rather than marking roadmap milestones complete from mocks, compilation or unit tests.

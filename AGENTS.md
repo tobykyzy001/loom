@@ -17,7 +17,7 @@
 | `docs/BARE_PACKAGE.md` | **当前架构**Bare Host 二进制打包候选的真实构建、复制/拒绝校验与独立原生流程证据 | 只记录本机实际生成与执行的有限验收入口，不把它扩张成安装器、跨平台或远程部署承诺 |
 | `testing.md` | 1 Concierge + 3 Node 的容器拓扑、单元 / 协议 / 宿主 / 回放 / Live LLM 分层、硬断言、Token 预算与 CI 触发 | 增加测试模式、Fixture、模型成本、验收口径或 CI 时更新；只有真实运行过才记录 PASS，未执行不可写成已验证 |
 | `tests/runner/README.md` | LocalNode 启动取消/注册凭据恢复、持久 admission、内容稳定回执、HTTP限流、首达预取消、篡改/缺digest负例与真实回放的验证入口和限制 | 只在这些围栏、输入快照和 receipt/耐久恢复契约改变时更新；区分 SyntheticCoordinator、本地文件、真实socket和真实DSH，不替代多机验收 |
-| `tests/sources/README.md` | 受限 SourceInstance / Thread / Trigger 入站身份、幂等事件、游标、认证与重启恢复的真实 Rust 验证入口及边界 | 只在来源协议、持久化、入口授权、事件与游标语义或测试覆盖变化时更新；不代替业务触发/审批、真实 IM、跨进程或多宿主验收 |
+| `tests/sources/README.md` | 受限 SourceInstance / Thread / Trigger 入站身份、幂等事件、游标、认证与重启恢复的真实 Rust 验证入口及边界 | 只在来源协议、持久化、入口授权、事件与游标语义或测试覆盖变化时更新；不代替业务触发/审批、真实 IM、跨进程或多宿主验收。当前 Vue `SourceWorkPanel` 是明确run/read摘要消息流：`tests/sources/browser.mjs` 真实Edge验证消息→用户选existing精确Grant/内部file/worker→Artifact，不自动解释或授权 |
 | `tests/observations/README.md` | 受限 MemoryObservation 的来源/审阅证据、本地真实HTTP/浏览器入口和边界 | 只在来源/审阅契约、关联存储或验收变化时更新；不代替完整习惯学习架构 |
 
 ### 1.2 开始工作的阅读顺序
