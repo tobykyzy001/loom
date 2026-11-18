@@ -115,7 +115,7 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 
 ## 3. 里程碑
 
-**显式Memory来源现在是经过中心核验的关系。** 项目Memory不能把另一个项目的Ticket直接从客户端填入source_ticket_id；未知ID明确404、bogus数字字段拒绝且不写入任何Memory/审计。合法同项目引用、完全不引用历史的独立Memory、既有项目／用户scope编辑、linked Candidate撤销与再次接受均保留真实流程。候选撤回编辑后的Memory仍使用同一关联事务，没有自动学习、借引用来激活Ticket或创建新的执行Grant。实浏览器另已走过接受→显式project→user编辑且保留出处→直接删除linkedMemory使候选pending→再次接受新ID。另有先前driver没有随当前存储schema14同步更新而失败的问题已修正，当前重启重新读取schema14，而不是沿用user_version11的旧断言。`POST /memories`仍保留allowed optional source，校验来源本身不意味着原Ticket已成功或可继续执行。普通Memory编辑／删除的独立action审计仍缺一项，另列M0补片，不能将candidate-withdrawn现有审计混称为每个用户改动都有审计。
+**显式Memory来源现在是经过中心核验的关系。** 项目Memory不能把另一个项目的Ticket直接从客户端填入source_ticket_id；未知ID明确404、bogus数字字段拒绝且不写入任何Memory/审计。合法同项目引用、完全不引用历史的独立Memory、既有项目／用户scope编辑、linked Candidate撤销与再次接受均保留真实流程。候选撤回编辑后的Memory仍使用同一关联事务，没有自动学习、借引用来激活Ticket或创建新的执行Grant。实浏览器另已走过接受→显式project→user编辑且保留出处→直接删除linkedMemory使候选pending→再次接受新ID。另有先前driver没有随当前存储schema14同步更新而失败的问题已修正，当前重启重新读取schema14，而不是沿用user_version11的旧断言。`POST /memories`仍保留allowed optional source，校验来源本身不意味着原Ticket已成功或可继续执行。后续M0补片已另完成普通Memory编辑／无候选关联删除的独立action审计：同Memory实际修改／删除与审计同属一个现有Store事务，记录确实的旧／新版本、scope、出处与变更标记而不复制敏感正文，审计写入失败时原Memory及旧链完整回滚。真实SQLite故障注入、普通UI编辑、linked delete只允许原有candidate withdrawal、成功操作及重开均已验证。schema14与完整源出处规则不改，且不承诺其它旧源码、Ticket/Grant/外部Effect被回滚或所有历史正文已经归档。
 详见 [tests/observations/README.md](tests/observations/README.md)。
 
 ## M0 — 单机任务闭环与会话可控

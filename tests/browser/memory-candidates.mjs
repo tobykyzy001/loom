@@ -102,6 +102,10 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
       return response.json()
     }
     async function memories() { return (await controller.get('/api/v1/memories')).memories }
+    async function memoryAudits(action, memoryId) {
+      return (await controller.get('/api/v1/audit')).audit.filter(entry => entry.action === action
+        && JSON.parse(entry.evidence).evidence.memory_id === memoryId)
+    }
     await review(card('Concise reports with citations'), '审阅后保存', '确认保存这条偏好')
     assert.equal((await readCandidate(rootId)).status, 'accepted')
     assert.equal((await memories()).length, 1)
@@ -131,6 +135,17 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.equal(editedMemory.scope, 'user')
     assert.equal(editedMemory.project_id, null)
     assert.equal(editedMemory.source_ticket_id, firstSourceId)
+    const [editAudit, ...duplicateEditAudits] = await memoryAudits('memory.explicit_updated', savedBeforeEdit.id)
+    assert.deepEqual(duplicateEditAudits, [], 'The real UI edit writes exactly one ordinary explicit-update audit')
+    const editEnvelope = JSON.parse(editAudit.evidence)
+    assert.equal(editAudit.actor, 'client')
+    assert.equal(editAudit.ticket_id, firstSourceId, 'The event retains the accepted Memory origin, not a body-invented source')
+    assert.equal(editEnvelope.event_type, 'memory.explicit_updated')
+    assert.deepEqual(editEnvelope.evidence, {
+      memory_id: savedBeforeEdit.id, previous_scope: 'project', scope: 'user', previous_version: 1, version: 2,
+      content_changed: true, project_changed: true, authority_changed: false, origin_preserved: true,
+      client_reason: 'explicit_memory_edit',
+    }, 'The actual persisted UI edit is represented by bounded old/new state evidence')
     const preservedCandidate = await readCandidate(rootId)
     assert.equal(preservedCandidate.status, 'accepted')
     assert.equal(preservedCandidate.derived_memory_id, editedMemory.id)
@@ -148,6 +163,9 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     const reopened = await review(card('Concise reports with citations'), '审阅后保存', '确认保存这条偏好')
     assert.equal(reopened.status, 'accepted')
     assert.notEqual(reopened.derived_memory_id, savedBeforeEdit.id)
+    assert.deepEqual(await memoryAudits('memory.explicit_deleted', savedBeforeEdit.id), [], 'Linked UI deletion must never write an ordinary deletion audit')
+    const linkedDeleteWithdrawals = await memoryAudits('candidate.memory.withdrawn', savedBeforeEdit.id)
+    assert.equal(linkedDeleteWithdrawals.length, 1, 'The linked deletion retains exactly its established candidate withdrawal event')
     assert.equal((await memories()).length, 1)
     assert.equal((await memories())[0].source_ticket_id, firstSourceId)
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('accepted')
@@ -255,8 +273,13 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.deepEqual(reviewRequests.map(request => request.decision), ['accept', 'accept', 'undo', 'later', 'never', 'undo', 'accept', 'undo'])
     assert.deepEqual(logs, [], `Unexpected browser error: ${logs.join('\n')}`)
     assert.equal((await controller.get('/api/v1/grants')).grants.length, 2, 'No review action invents a new Grant')
+    assert.deepEqual(await memoryAudits('memory.explicit_deleted', reopened.derived_memory_id), [], 'Repeated re-accept/undo never fabricates ordinary deletion history')
+    const undoWithdrawals = await memoryAudits('candidate.memory.withdrawn', reopened.derived_memory_id)
+    assert.equal(undoWithdrawals.length, 1, 'The last re-accepted linked Memory has one and only one candidate withdrawal')
+    assert.equal((await memoryAudits('memory.explicit_updated', savedBeforeEdit.id)).length, 1, 'No later UI action duplicates the original explicit edit')
     return { actual_ui_candidate_accept: true, actual_ui_withdraw: true,
       explicit_ui_edit_preserves_original_source_link: true,
+      ordinary_edit_and_linked_delete_audited_without_duplicate: true,
       explicit_ui_delete_withdraws_only_same_linked_memory: true,
       later_and_never_restore: true, rejected_history_read_only: true,
       refresh_failure_remains_visible_and_recovers: true,

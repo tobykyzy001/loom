@@ -451,6 +451,10 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 记忆可见性不等于资源访问权限。即使某 Worker 看到项目引用，也不自动取得该项目的读取权。会话折叠偏好是展示设置，不是记忆清理指令。
 
 显式 `Remember` 允许不引用任何历史 Ticket。若调用方主动提供 `source_ticket_id`，中心必须查询到相应 Ticket；若同时指定了项目，该项目也必须与来源所属项目相同。因此，项目 Memory 不能把另一个项目的 Ticket 当作自己的原始出处，非文本或未知引用也不能悄悄降级为“无来源”。持久化与 `memory.explicit_saved` 审计使用同一个已核验的ID。来源关联只描述记忆出处，不重新打开Ticket、证明原任务完成、验证偏好已经被习惯学习识别，或产生新的Grant。
+
+普通显式 Memory 的编辑与无候选关联的删除必须在同一次现有 Store 事务中同时完成实际 UPDATE/DELETE 和对应 `memory.explicit_updated` / `memory.explicit_deleted` 记录。编辑从原行计算实际旧／新scope、版本和变更标记，复核持久的新行与source原貌；审计保留原始出处、动作及界限明确的元数据，而不把偏好正文、下一次请求的秘密或直接代码/工具执行混入记录。 审计失败则回滚本次Memory变更并向调用者明确报错，不能在只完成Memory变更时却向调用者谎称完整成功；这也不自动赋予跨机操作exactly-once。普通删除也不能抹除Ticket、Grant、Artifact、以前的观察历史或实际外部 Effect。
+
+候选关联Memory删除走的是既有的 exact-link 撤回事务，**不能同样再写一条普通删除**来伪造第二笔事实。原候选仍只回到pending，来源Ticket/Grant/Artifact/源代码不变；下一次接受再按已验证引用创建新ID。后续真正编辑已存在的Memory复用其原有变更层与审计，source本身不被客户端PATCH重写。具备显式操作的审计并不等于已经实现通用 transcript 历史重放、模型自动归纳或用户/Worker协作冲突消解。
 ### 5.3 从使用习惯形成 Memory / Skill 建议
 
 采用“观察 → 提议 → 审核 → 保存 → 验证 / 撤回”的生命周期：

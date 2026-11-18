@@ -3885,27 +3885,92 @@ async fn edit_memory(
             return Err(ApiError::missing("Memory scope project not found"));
         }
     }
-    let existing = store
-        .get("memories", &memory)?
-        .ok_or_else(|| ApiError::missing("Memory not found"))?;
-    let scope_sql = scope.unwrap_or_else(|| existing["scope"].as_str().unwrap_or("project"));
-    let project_sql = if scope == Some("project") || (scope.is_none() && project_id.is_some()) {
-        project_id
-    } else if scope.is_none() {
-        existing["project_id"].as_str()
-    } else {
-        None
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> ApiResult<Value> {
+        let existing = store
+            .get("memories", &memory)?
+            .ok_or_else(|| ApiError::missing("Memory not found"))?;
+        let scope_sql = scope.unwrap_or_else(|| existing["scope"].as_str().unwrap_or("project"));
+        let project_sql = if scope == Some("project") || (scope.is_none() && project_id.is_some()) {
+            project_id
+        } else if scope.is_none() {
+            existing["project_id"].as_str()
+        } else {
+            None
+        };
+        let previous_version = existing["version"]
+            .as_i64()
+            .filter(|version| *version > 0)
+            .ok_or_else(|| {
+                ApiError::conflict("invalid_memory_version", "Stored Memory version is invalid")
+            })?;
+        let content_changed = existing["content"].as_str() != Some(content);
+        let project_changed = existing["project_id"].as_str() != project_sql;
+        let source_ticket_id = existing["source_ticket_id"].as_str();
+        let previous_scope = existing["scope"].clone();
+        let updated_at = now();
+        if store.conn().execute(
+            "UPDATE memories SET content=?1,project_id=?2,scope=?3,version=version+1,updated_at=?4 WHERE id=?5",
+            params![content, project_sql, scope_sql, updated_at, memory],
+        )? != 1
+        {
+            return Err(ApiError::missing("Memory not found"));
+        }
+        let persisted = store
+            .get("memories", &memory)?
+            .ok_or_else(|| ApiError::missing("Memory not found"))?;
+        if persisted["version"].as_i64() != Some(previous_version + 1)
+            || persisted["content"].as_str() != Some(content)
+            || persisted["scope"].as_str() != Some(scope_sql)
+            || persisted["project_id"].as_str() != project_sql
+            || persisted["updated_at"].as_str() != Some(updated_at.as_str())
+            || persisted["source_ticket_id"].as_str() != source_ticket_id
+        {
+            return Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_update_verification_failed",
+                "Updated Memory did not match its committed audit evidence; changes were rolled back.",
+            ));
+        }
+        store
+            .audit(
+                source_ticket_id,
+                "client",
+                "memory.explicit_updated",
+                &json!({
+                    "memory_id":memory,
+                    "previous_scope":previous_scope,
+                    "scope":scope_sql,
+                    "previous_version":previous_version,
+                    "version":previous_version+1,
+                    "content_changed":content_changed,
+                    "project_changed":project_changed,
+                    "authority_changed":false,
+                    "origin_preserved":true,
+                    "client_reason":"explicit_memory_edit",
+                }),
+            )
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "audit_write_failed",
+                    "Memory audit could not be written; the Memory update was rolled back.",
+                )
+            })?;
+        Ok(persisted)
+    })();
+    let persisted = match result {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            store.conn().execute("ROLLBACK", [])?;
+            return Err(error);
+        }
     };
-    if store.conn().execute(
-        "UPDATE memories SET content=?1,project_id=?2,scope=?3,version=version+1,updated_at=?4 WHERE id=?5",
-        params![content, project_sql, scope_sql, now(), memory],
-    )? != 1
-    {
-        return Err(ApiError::missing("Memory not found"));
+    if let Err(error) = store.conn().execute("COMMIT", []) {
+        store.conn().execute("ROLLBACK", [])?;
+        return Err(error.into());
     }
-    Ok(Json(
-        json!({"updated":true,"memory":store.get("memories",&memory)?}),
-    ))
+    Ok(Json(json!({"updated":true,"memory":persisted})))
 }
 async fn delete_memory(
     AppState(state): AppState<Arc<State>>,
@@ -3915,14 +3980,50 @@ async fn delete_memory(
     if let Some(withdrawn) = crate::maintenance::delete_linked_memory(&store, &memory)? {
         return Ok(Json(withdrawn));
     }
-    if store
-        .conn()
-        .execute("DELETE FROM memories WHERE id=?1", [memory])?
-        != 1
-    {
-        return Err(ApiError::missing("Memory not found"));
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> ApiResult<()> {
+        let existing = store
+            .get("memories", &memory)?
+            .ok_or_else(|| ApiError::missing("Memory not found"))?;
+        if store
+            .conn()
+            .execute("DELETE FROM memories WHERE id=?1", [&memory])?
+            != 1
+        {
+            return Err(ApiError::missing("Memory not found"));
+        }
+        store
+            .audit(
+                existing["source_ticket_id"].as_str(),
+                "client",
+                "memory.explicit_deleted",
+                &json!({
+                    "memory_id":memory,
+                    "previous_scope":existing["scope"],
+                    "authority_changed":false,
+                    "candidate_withdrawal":false,
+                }),
+            )
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "audit_write_failed",
+                    "Memory audit could not be written; the Memory deletion was rolled back.",
+                )
+            })?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        store.conn().execute("ROLLBACK", [])?;
+        return Err(error);
     }
-    Ok(Json(json!({"deleted":true,"grants_changed":false})))
+    if let Err(error) = store.conn().execute("COMMIT", []) {
+        store.conn().execute("ROLLBACK", [])?;
+        return Err(error.into());
+    }
+    Ok(Json(
+        json!({"deleted":true,"grants_changed":false,"authority_changed":false}),
+    ))
 }
 async fn messages(
     AppState(state): AppState<Arc<State>>,
