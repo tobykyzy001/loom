@@ -349,6 +349,8 @@ schema v6新增可选的`loom.model-observation.v1`信息随现有Ticket Detail�
 
 空models和合法 `requested_disabled`、`unsupported_*`、`lookup_*` finding是真实的“当前没有符合条件对象”，不是异常或旧模型presence。缺失/非法data、错误policy、unknown worker与错误scope分别输出missing/invalid和固定finding，不能沿用旧模型为当前fresh。观察时间与GET时间分离；现有heartbeat90秒阈值使`models[].freshness=stale`、`resource_state=unavailable`。重开沿用已在v8时期存现有表里的Node inventory；v9仅扩展descriptor授权元数据，不重写这些事实; GET也不会重新accessSDK、provider、stream或grant一个model_text任务。API policy是`read_catalog_only`，download/install/activation/general_provider_registry/image_generation/model_execution_grants不支持；下述局部descriptor Registry不是这些能力的实现。
 
+节点心跳的持久化也必须由**已认证的精确 `(node_id, installation_id)`** 定向更新，不能用`id`单独覆盖共享该Node ID的全部Installation。`heartbeat`现在要求目标行`id AND installation_id AND revoked_at IS NULL`恰好命中一条；否则不作为接受的心跳。每个安装的inventory、worker观测、capability/status和last_heartbeat只归属该身份，不是被同Node ID的另一个实例覆盖。已撤销状态不会被心跳重新写成在线。这些是已认证现有凭据的自报观察，不是新Grant、worker权限/OS事实真实性证明或额外的逐Installation撤销模型。另设[真实双Installation验证](tests/runner/node-installation-scope.mjs)，在原缺陷中已先观测marker相互串写，再以整行before/after同级比较确保隔离，并用另一token 401和已撤销负例验证边界；重启保留原SQLite完整性与各自记录。它只覆盖单进程同Node Key的两个逻辑Installation，**不是两个物理Host**。
+
 签署Node的真实HTTP、负例与上线/缺失/恢复由`node tests/model-inventory/controller.mjs`要求验证；真实隔离DSH SDK一次prepareCall和stream/request零次由`node tests/model-inventory/real-dsh.mjs`另行实测。文本adapter观测绝不是任意付费模型、模型质量、下载安装、本地图片、通用provider execution、跨机或全M1完成证明。设备页已以`apps/web/src/components/ModelInventorySection.vue`呈现相同的认证投影，包含精确 Node/Worker、source/text modality、上下文窗口（token声明，不是内存bytes）与观察时间；读取只在进入设备页与用户手动刷新发生，未提供下载或激活操作。`node tests/model-inventory/browser.mjs`用真实签名 Node heartbeat 验证实际Vue请求与只读状态，长标识在390px换行，不改变已有Ticket/Grant/Node计数。它不是手机、生产目录管理或生成/安装能力。
 
 ### 3.6.2 本地模型描述符与独立的放置授权

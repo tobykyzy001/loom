@@ -2,6 +2,16 @@
 
 Updated: 2026-11-19.
 
+## Heartbeat preserves each authenticated Node/Installation
+
+A real shared-key, two-Installation regression at parent `1aec8e5` demonstrated that heartbeat matched only `id`, despite authentication using `(node_id, installation_id, token)` and the existing primary key `(id, installation_id)`. The first Installation's heartbeat wrote `marker-for-first` into **both** rows; the second then wrote `marker-for-second` into both, replacing each other's inventory/liveness/worker observations.
+
+The write is now restricted to **exactly one active composite-key row**: `id AND installation_id AND revoked_at IS NULL`. Missing or revoked state produces `heartbeat_inactive` rather than accepted status or an implicit online rewrite. First-enrollment atomicity, heartbeat self-report/metadata and model-view filtering remain unchanged; this is not a new per-Installation revocation API, Grant, or verified hardware report.
+
+`node tests/runner/node-installation-scope.mjs` actually reuses one real Ed25519 public key for two distinct installations and their issued credentials, then deep-compares the sibling's full row (inventory, workers/profile, status, capability and liveness fields) after each heartbeat. The previously reported mutual overwrites no longer occur. An out-of-pair token receives HTTP 401 without altering the first inventory. A revoked-row negative fixture prevents that identity's heartbeat while the other valid installation still updates its own fields. Real center restart preserves the surviving record/token and SQLite integrity.
+
+[Actual scoped proof](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-node-installation-scope-proof-fEdyqy/result.json), explicitly omitting all private key/token/bearer material. This asserts storage isolation for two legitimate logical Installations, **not** two physical Hosts, DSH Profile lifecycle credentials, per-Installation administrative revocation, global exactly-once, or deferred 1+3. The ordinary `scripts/bare-integration.mjs`, Rust workspace 205 tests with one opt-in probe ignored, shared Node 39 and Vue 155 suite plus format/strict Clippy additionally passed.
+
 ## Atomic first enrollment and same-key credential rotation
 
 A real regression at `a78cd77` proved that the previous API consumed the one-time enrollment code before fetching or validating the challenge. An intentionally invalid Ed25519 signature returned HTTP 400, left `enrollment_codes.used_at` non-null, and denied a subsequent valid registration with 403. The challenge was unused and no Node/`node.registered` row existed; this is not presented as proof that an attack completed a registration.

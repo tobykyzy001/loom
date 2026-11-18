@@ -32,7 +32,19 @@ node tests/runner/coordinator-admission.mjs
 
 这些场景使用临时 owned inputs、真实本地文件读写和受限返回数据。新进程/新 runner 重开同一 Native State 不等于 `kill -9` 发生在 DSH Tool 投入外部效果的精确时刻，也不是一中心三工作者 Compose。
 
-### failed-only公共重试与独立审批
+### 同一Node Key的逐Installation heartbeat隔离
+
+```sh
+node tests/runner/node-installation-scope.mjs
+```
+
+真实在同一Node public key下生成两份不同Installation身份，并取得各自签名注册/token。初始分别发送self-report markers，旧实现先使两行都被first marker覆盖，随后两行又都被second marker覆盖；根因是`UPDATE nodes ... WHERE id`忽略该表的`PRIMARY KEY(id,installation_id)`，而认证已经包含这对身份。现只有`id AND installation_id AND revoked_at IS NULL`恰好命中一行才接受心跳。
+
+driver比较first写入前后的**完整SQL行结构**：first更新为busy及自有marker后，second整行不变；再second写入自己的profile/workers/inventory，first仍保留其marker与state，未串改。另一实例token实际得到401。随后在这个owned表里**手动将first row标记revoked（只是negative fixture，不是宣称有独立撤销API）**，它的身份和符合条件的查询都不能把状态恢复成online，另一仍合法的Installation照常更新。真实center stop/restart还证实SQLite integrity、该other instance的凭证与记录持续存在。
+
+这里只current self-reported观察数据，**不是两个物理Host、DSH profile实质认证、Grant/Assignment变更、全局 exactly-once或新的逐Installation撤销模型**。最终结果[scope proof](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-node-installation-scope-proof-fEdyqy/result.json)只包含counts/status/diff/bool，不含token/私钥/Authorization。Rust workspace **205 passed**及原生`node scripts/bare-integration.mjs`也保留正常注册、文件作用、取消与重开证据；没有改动Model Catalog或任务协议。
+
+## failed-only公共重试与独立审批
 
 `maintenance::retry` 不再让 pending/running/cancelled/succeeded/等待审批等状态借用原Grant新增Assignment或生成no-op成功校验日志；public retry仅接受已完成 `failed` 且没有停止意图的Ticket，沿原Grant/digest、Node/worker/binding生成独立下一Attempt（epoch递增，原历史不改）。已与reconciling、revoke Grant等拒绝场景逐状态比较原Assignment/Report/Artifact/Effect及审计不变。`retry_after_approval` 仅保留库内generic兼容及自身测试，不是HTTP绕开人工理由的授权旁路。真实 `/approval` 改走携带规范化 `reason≤1000 UTF-8字节` 的 `approve_ticket`，并验证同票Source/current Grant/root/worker。批准理由与实际Assignment/Lease/epoch、原Grant/digest与审批事件在同一个BEGIN IMMEDIATE内写入，拒绝仅记录理由而保持waiting/零工作。公共retry的assignment.retried与ticket.retried已经收进该相同事务，TTL里任一DML/audit失败都回滚ticket和lease。实际HTTP仍保持scope非法403和非pending409，SQL trigger拒绝后零变更，并有真实heartbeat恢复和artifact证据。具体见 [tests/sources/README.md](../sources/README.md) 的当前三源审批闭环，和刚重跑的[真实DSH重试证明](/tmp/loom-approval-dsh-final-wvhkGI/result.json)。Node自身的 `validateAssignment`/admission仍需逐项核对当前作用域，这不是让UI拥有更强的执行权。
 

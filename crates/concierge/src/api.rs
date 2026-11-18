@@ -4479,13 +4479,22 @@ pub(crate) async fn heartbeat(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let (node, _) = node(&state, &headers, &body)?;
+    let (node, installation) = node(&state, &headers, &body)?;
     let capacity = json!(body["capabilities"]);
     let workers = json!(body["workers"]);
     let inventory = body["inventory"].to_string();
     let status = body["status"].as_str().unwrap_or("online");
     let store = state.lock()?;
-    store.conn().execute("UPDATE nodes SET last_heartbeat=?1,status=?2,inventory=?3,capabilities=?4,workers=?5 WHERE id=?6",params![now(),status,inventory,capacity.to_string(),workers.to_string(),node])?;
+    // A token authenticates an exact Node/Installation, not every row sharing
+    // its Node ID. Never let another installation's heartbeat replace the
+    // inventory, workers, status or liveness that belongs to this one.
+    let changed = store.conn().execute("UPDATE nodes SET last_heartbeat=?1,status=?2,inventory=?3,capabilities=?4,workers=?5 WHERE id=?6 AND installation_id=?7 AND revoked_at IS NULL",params![now(),status,inventory,capacity.to_string(),workers.to_string(),node,installation])?;
+    if changed != 1 {
+        return Err(ApiError::denied(
+            "heartbeat_inactive",
+            "Heartbeat must belong to an exact active Node installation",
+        ));
+    }
     Ok(Json(
         json!({"accepted":true,"observed_at":now(),"inventory":"stale_if_heartbeats_exceed_policy"}),
     ))
