@@ -16,7 +16,7 @@ import DevicesView from './views/DevicesView.vue'
 import ProjectsView from './views/ProjectsView.vue'
 import { memoryCandidates, memoryText, type MemoryCandidate, type ReviewDecision } from './lib/memoryCandidate'
 import { skillSourceRefs } from './lib/skillProof'
-import { reviewMemoryCandidate } from './state/workspace'
+import { editMemoryCandidateText, reviewMemoryCandidate } from './state/workspace'
 import MemoriesView from './views/MemoriesView.vue'
 import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
@@ -209,6 +209,10 @@ function reviewCandidate(candidate: MemoryCandidate, decision: ReviewDecision) {
     confirmLabel: decision === 'accept' ? '确认保存这条偏好' : decision === 'undo' && candidate.status === 'never' ? '确认恢复候选' : decision === 'undo' ? '确认撤回保存偏好' : decision === 'never' ? '确认不再建议' : decision === 'later' ? '确认稍后审阅' : '确认拒绝建议',
   }, () => reviewMemoryCandidate(candidate.id, decision))
 }
+function editCandidate(candidate: MemoryCandidate, content: string) {
+  // Editing the proposal is deliberately not the independent accept action.
+  void editMemoryCandidateText(candidate.id, candidate.version, content)
+}
 function removeMemory(id: string) {
   ask({ title: '删除这条记忆？', effect: '只删除明确保存的偏好，不改变任务、审计或任何 Grant。', changes: ['该明细偏好不再存在于工作空间中。'], danger: true, confirmLabel: '删除这条记忆' }, () => deleteMemory(id))
 }
@@ -278,7 +282,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
       </template>
       <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy['preferences:global']" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />
       <SkillsView v-else-if="state.page === 'skills'" :data="state.skillData" :tickets="tickets" :projects="projects" :loading="state.busy.skills" :busy="state.busy['skill-write']" :error="!state.busy.skills ? state.errors.skills : ''" :load-error="state.errors.skills" @refresh="void loadSkillEvidence()" @replay="skillReplay" @review="skillReview" @ticket="selectTask" />
-      <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :candidates="memoryCandidateData" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" @review="reviewCandidate" @source="selectTask" />
+      <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :candidates="memoryCandidateData" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" @review="reviewCandidate" @edit="editCandidate" @source="selectTask" />
       <AccessView v-else-if="state.page === 'access'" :grants="state.grants" :projects="projects" :nodes="nodes" :busy="state.busy['grant-write']" :error="state.errors['grant-write'] || (!state.busy.resources ? state.errors.resources : '')" @create="grantCreate" @revoke="revokeGrantWithConfirmation" />
       <HelpView v-else @connect="showConnection = true" />
       <p v-if="preferenceError" class="preferences-error" role="status">{{ preferenceError }}</p>

@@ -918,6 +918,12 @@ export async function reviewMemoryCandidate(candidateId: string, decision: strin
   return applyMemoryChange(() => client.patch<unknown>(`/candidates/${encodeURIComponent(candidateId)}`, { decision }))
 }
 
+export async function editMemoryCandidateText(candidateId: string, expectedVersion: number, content: string) {
+  return applyMemoryChange(() => client.patch<unknown>(`/candidates/${encodeURIComponent(candidateId)}`, {
+    decision: 'edit', expected_version: expectedVersion, content,
+  }))
+}
+
 export async function saveMemory(input: { id?: string; project_id?: string | null; scope: string; content: string }) {
   return applyMemoryChange(() => input.id
     ? client.patch<unknown>(`/memories/${encodeURIComponent(input.id!)}`, { content: input.content, project_id: input.project_id, scope: input.scope })

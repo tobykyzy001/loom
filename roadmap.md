@@ -377,7 +377,9 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 
 ### M5 — 习惯学习、Skill 建议与受控自主性
 
-> 当前仅验证很小的**来源可查人工偏好审阅**子集：明确选择的真实同项目Source Ticket可形成最多32个引用链接的候选，来源去重/过期、明确接受/稍后/不再建议、精确派生Memory及撤回可恢复且有审计。 SQLite新增schema11 `candidate_memory_links`。原Skill的真实独立回放保持不变，且不能退化为workflow/Memory同一回看。 `node tests/observations/candidates.mjs --browser`、`node tests/skills/read-replay.mjs`为当前证据，详见[受限观察与审阅说明](tests/observations/README.md)。 尚未通过**真实沟通中的自动观察/有效抽象、候选内容/作用域编辑、冲突、批量历史整理、自然语言偏好质量、通用Skill归纳**，所以不把M5或N3标为完成。
+> 当前仅验证很小的**来源可查人工偏好审阅与候选文字纠正**子集：**pending/later中人工修正候选文字**：现支持同一`PATCH /candidates/{id}`内的`decision:'edit',content,expected_version`，只允许精确当前version与完整的source-boundv1。文字非空、最多500bytes并复用原公开偏好限制；project/scope/sources和原始group fingerprint都保留，stale version返回409，原文字不变才是同版本no-op。仅在BEGINIMMEDIATE内写内容、version+1及一条不含正文的`candidate.memory.edited`，不改Grant/Source，不能把accepted/rejected/never复活成新建议。修改本身没有Memory/Grant/Ticket；随后**独立**accept才按原有exact-link生成Memory。 driver实际抓过浏览器已经改正文字后又把这份新文本误当原始raw value提交的错误（SQL里确实是另一个原始群组occurrence=1）；现在**编辑前**冻结初始raw input，后续同一raw value+新真实Source Ticket使observation真正3→4追加，但candidate仍保留编辑文字和原有source_refs，不能把observations合并误当作额外人工提升。Edge同时操作取消草稿（零PATCH）、两次读取失败（edit与accept）、正文的独立接受/撤回，窄屏内显示编辑form、有且仅有一次写入；SQL审计注入失败则回滚整行，还修复删除正在编辑Memory后旧表单会继续挂着旧ID的错误，保证后续reaccept的新ID不会显示先前被删除正文。实际验证数字：Rust workspace **205**、Vue **20 files/149**、Node client **24**均PASS，strict Clippy/typecheck/format通过；详细实际命令及此能力特有的限制见[受限观察与审阅说明](tests/observations/README.md)。
+>
+> 当前仅验证很小的**来源可查人工偏好审阅**子集：明确选择的真实同项目Source Ticket可形成最多32个引用链接的候选，来源去重/过期、明确接受/稍后/不再建议、精确派生Memory及撤回可恢复且有审计。 SQLite新增schema11 `candidate_memory_links`；当前根storage仍为schema15，无需为本次候选文字修订迁移。原始fingerprint表示raw observation group，不是修订后文字digest或授权。`node tests/observations/candidates.mjs --browser`、`node tests/skills/read-replay.mjs`为当前证据，详见[受限观察与审阅说明](tests/observations/README.md)。 尚未通过**真实沟通中的自动观察/有效抽象、候选作用域调整、冲突、批量历史整理、自然语言偏好质量、通用Skill归纳**，所以不把M5或N3标为完成。
 
 
 

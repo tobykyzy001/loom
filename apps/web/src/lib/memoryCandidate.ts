@@ -58,6 +58,24 @@ export function memoryText(candidate: SkillCandidate): string | null {
   return value.length > 0 && value.length <= 500 ? value : null
 }
 
+export function canEditMemoryCandidate(candidate: MemoryCandidate): boolean {
+  if (!['pending', 'later'].includes(candidate.status)
+    || memoryProvenance(candidate) !== 'tickets'
+    || candidateSchema(candidate) !== 'loom.memory-candidate.v1'
+    || !Number.isSafeInteger(candidate.version) || candidate.version < 1
+    || !memoryText(candidate)?.trim()) return false
+  try {
+    const content: unknown = JSON.parse(candidate.content)
+    const fingerprint = content && typeof content === 'object'
+      ? (content as { fingerprint?: unknown }).fingerprint : null
+    // A visible edit affordance requires the existing source-group identity.
+    // This is not an authorization decision; the server validates it again.
+    return typeof fingerprint === 'string' && /^[0-9a-f]{64}$/.test(fingerprint)
+  } catch {
+    return false
+  }
+}
+
 export function memoryDecision(decision: ReviewDecision, candidate: MemoryCandidate): ReviewDecision | null {
   if (decision === 'undo' && candidate.status === 'accepted' && candidate.derived_memory_id) return 'undo'
   if (decision === 'undo' && candidate.status === 'never') return 'undo'

@@ -38,6 +38,7 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     const controller = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken })
     const reviewRequests = []
     let failCandidatesReadOnce = false
+    let failCandidateReadAfterEdit = false
     let expectedRefreshFailures = 0
     let ignoredExpectedFailures = 0
     await page.route('**/*', async route => {
@@ -45,8 +46,9 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
       if (![origin, server.baseUrl].includes(url.origin) || url.protocol !== 'http:') {
         logs.push(`blocked external ${url.origin}`); return route.abort('blockedbyclient')
       }
-      if (failCandidatesReadOnce && url.pathname === '/api/v1/candidates' && route.request().method() === 'GET') {
+      if ((failCandidatesReadOnce || failCandidateReadAfterEdit) && url.pathname === '/api/v1/candidates' && route.request().method() === 'GET') {
         failCandidatesReadOnce = false
+        failCandidateReadAfterEdit = false
         expectedRefreshFailures++
         return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'fixture_refresh_failed', message: 'Source candidate read intentionally failed' } }) })
       }
@@ -91,6 +93,7 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
       return row
     }
     const card = text => page.locator('.candidate-card').filter({ hasText: text }).first()
+    const rootCard = () => page.locator(`.candidate-card[data-candidate-id="${rootId}"]`)
     async function review(candidateCard, button, confirmation) {
       await candidateCard.getByRole('button', { name: button, exact: true }).click()
       await dialog.waitFor()
@@ -106,9 +109,64 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
       return (await controller.get('/api/v1/audit')).audit.filter(entry => entry.action === action
         && JSON.parse(entry.evidence).evidence.memory_id === memoryId)
     }
-    await review(card('Concise reports with citations'), '审阅后保存', '确认保存这条偏好')
+    const originalCandidate = await readCandidate(rootId)
+    const originalProposal = JSON.parse(originalCandidate.content)
+    const candidateOriginalSourceRefs = typeof originalCandidate.source_refs === 'string' ? JSON.parse(originalCandidate.source_refs) : originalCandidate.source_refs
+    const correctedCandidateText = 'Human-reviewed project preference: concise visible evidence'
+    await rootCard().getByRole('button', { name: '编辑候选', exact: true }).click()
+    const editor = page.getByRole('textbox', { name: '编辑候选内容', exact: true })
+    await editor.waitFor()
+    assert.equal(await editor.inputValue(), originalProposal.content)
+    await editor.fill('An unsaved candidate draft')
+    await rootCard().getByRole('button', { name: '取消候选编辑', exact: true }).click()
+    assert.equal(reviewRequests.length, 0, 'Cancelling an unconfirmed draft sends no candidate write')
+    assert.equal((await readCandidate(rootId)).content, originalCandidate.content)
+
+    await rootCard().getByRole('button', { name: '编辑候选', exact: true }).click()
+    await editor.fill(correctedCandidateText)
+    const editResponsePromise = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === path && response.request().postDataJSON().decision === 'edit')
+    failCandidateReadAfterEdit = true
+    await rootCard().getByRole('button', { name: '保存候选修改', exact: true }).click()
+    const candidateEditResponse = await editResponsePromise
+    assert.equal(candidateEditResponse.status(), 200)
+    assert.deepEqual(candidateEditResponse.request().postDataJSON(), {
+      decision: 'edit', expected_version: originalCandidate.version, content: correctedCandidateText,
+    })
+    await page.getByRole('alert').filter({ hasText: '服务端已接受这次操作，但最新状态尚未刷新' }).waitFor()
+    assert.equal(await editor.inputValue(), correctedCandidateText, 'A failed resource refresh leaves the actual draft visible instead of falsely saving or discarding it')
+    assert.equal(failCandidateReadAfterEdit, false, 'The dedicated edit-read failure was really injected')
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.locator('.loom-app').waitFor()
+    await page.locator('.main-nav').getByRole('button', { name: '记忆', exact: true }).click()
+    await editor.waitFor({ state: 'hidden' }, { timeout: 5000 }).catch(error => { throw new Error('Editor must close only after genuine memory-page resource refresh', { cause: error }) })
+    const editedCandidate = await readCandidate(rootId)
+    const editedProposal = JSON.parse(editedCandidate.content)
+    assert.equal(editedCandidate.status, 'pending')
+    assert.equal(editedCandidate.version, originalCandidate.version + 1)
+    assert.equal(editedProposal.content, correctedCandidateText)
+    assert.equal(editedProposal.fingerprint, originalProposal.fingerprint)
+    assert.deepEqual(JSON.parse(editedCandidate.source_refs), candidateOriginalSourceRefs)
+    assert.equal(editedCandidate.scope, originalCandidate.scope)
+    assert.deepEqual(await memories(), [], 'A candidate text edit alone is not acceptance')
+    assert.equal(await dialog.count(), 0)
+    const candidateEditAudits = (await controller.get('/api/v1/audit')).audit.filter(entry => entry.action === 'candidate.memory.edited'
+      && JSON.parse(entry.evidence).evidence.candidate_id === rootId)
+    assert.equal(candidateEditAudits.length, 1)
+    const candidateEditEvidence = JSON.parse(candidateEditAudits[0].evidence).evidence
+    assert.equal(candidateEditEvidence.fingerprint, originalProposal.fingerprint)
+    assert.equal(candidateEditEvidence.scope, originalCandidate.scope)
+    assert.equal(candidateEditEvidence.accepted_memory_created, false)
+    assert.equal(candidateEditEvidence.authority_created, false)
+    assert.equal(JSON.stringify(candidateEditAudits).includes(correctedCandidateText), false)
+    await rootCard().getByText(correctedCandidateText, { exact: true }).waitFor()
+    assert.ok(!(await page.locator('body').innerText()).includes(server.clientToken))
+    await page.screenshot({ path: join(root, 'memory-candidate-edited.png'), fullPage: true })
+
+    await review(rootCard(), '审阅后保存', '确认保存这条偏好')
     assert.equal((await readCandidate(rootId)).status, 'accepted')
     assert.equal((await memories()).length, 1)
+    assert.equal((await memories())[0].content, correctedCandidateText, 'The separate explicit acceptance saves the corrected proposal')
     await dialog.waitFor({ state: 'hidden' })
     // The preference is explicitly edited after candidate acceptance. Its original
     // provenance and exact link are not silently rewritten into a new origin.
@@ -160,17 +218,23 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.equal((await removal.json()).candidate_withdrawal, true)
     assert.deepEqual(await memories(), [])
     assert.equal((await readCandidate(rootId)).status, 'pending')
-    const reopened = await review(card('Concise reports with citations'), '审阅后保存', '确认保存这条偏好')
+    const reopened = await review(rootCard(), '审阅后保存', '确认保存这条偏好')
     assert.equal(reopened.status, 'accepted')
     assert.notEqual(reopened.derived_memory_id, savedBeforeEdit.id)
+    await page.getByRole('heading', { name: '记住什么？', exact: true }).waitFor()
+    assert.equal(await page.locator('#memory-content').inputValue(), '', 'Deleting the currently edited Memory clears its submitted identity instead of retaining stale private text')
+    assert.equal(await page.locator('#memory-scope').inputValue(), 'project')
+    assert.equal(await page.locator('#memory-project').inputValue(), '')
+    assert.equal(await page.getByRole('button', { name: '保存记忆', exact: true }).isDisabled(), true, 'The cleared form cannot accidentally recreate a preference under no selected project')
     assert.deepEqual(await memoryAudits('memory.explicit_deleted', savedBeforeEdit.id), [], 'Linked UI deletion must never write an ordinary deletion audit')
     const linkedDeleteWithdrawals = await memoryAudits('candidate.memory.withdrawn', savedBeforeEdit.id)
     assert.equal(linkedDeleteWithdrawals.length, 1, 'The linked deletion retains exactly its established candidate withdrawal event')
     assert.equal((await memories()).length, 1)
     assert.equal((await memories())[0].source_ticket_id, firstSourceId)
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('accepted')
-    const accepted = card('Concise reports with citations')
+    const accepted = rootCard()
     await accepted.getByRole('button', { name: '撤回保存的偏好', exact: true }).waitFor()
+    assert.equal(await accepted.getByRole('button', { name: '编辑候选', exact: true }).count(), 0)
     assert.equal(await accepted.getByRole('button', { name: '拒绝来源建议', exact: true }).count(), 0)
     const safeText = await page.locator('body').innerText()
     assert.ok(!safeText.includes(server.clientToken))
@@ -193,17 +257,18 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.equal((await readCandidate(auxiliaryId)).status, 'pending')
 
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('pending')
-    const later = await review(card('Concise reports with citations'), '稍后审阅', '确认稍后审阅')
+    const later = await review(rootCard(), '稍后审阅', '确认稍后审阅')
     assert.equal(later.status, 'later')
     assert.deepEqual(await memories(), [])
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('later')
     assert.match((await readCandidate(rootId)).status, /later/)
-    await review(card('Concise reports with citations'), '不再建议', '确认不再建议')
+    await review(rootCard(), '不再建议', '确认不再建议')
     assert.equal((await readCandidate(rootId)).status, 'never')
     assert.deepEqual(await memories(), [])
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('never')
-    const neverCard = card('Concise reports with citations')
+    const neverCard = rootCard()
     await neverCard.getByRole('button', { name: '恢复候选', exact: true }).waitFor()
+    assert.equal(await neverCard.getByRole('button', { name: '编辑候选', exact: true }).count(), 0)
     assert.equal(await neverCard.getByRole('button', { name: '拒绝来源建议', exact: true }).count(), 0)
     await neverCard.getByRole('button', { name: '恢复候选', exact: true }).click()
     await dialog.waitFor()
@@ -216,7 +281,7 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
 
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('pending')
     failCandidatesReadOnce = true
-    const nextCard = card('Concise reports with citations')
+    const nextCard = rootCard()
     await nextCard.getByRole('button', { name: '审阅后保存', exact: true }).click()
     await dialog.waitFor()
       const acceptedResponse = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === path)
@@ -235,10 +300,12 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     await dialog.waitFor({ state: 'hidden' })
     await page.locator('.main-nav').getByRole('button', { name: '记忆', exact: true }).click()
       await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('accepted')
-    await review(card('Concise reports with citations'), '撤回保存的偏好', '确认撤回保存偏好')
+    await review(rootCard(), '撤回保存的偏好', '确认撤回保存偏好')
     assert.equal((await readCandidate(rootId)).status, 'pending')
     assert.deepEqual(await memories(), [])
-    assert.equal(expectedRefreshFailures, 1)
+    assert.equal(expectedRefreshFailures, 2, 'One edit-read and one accept-read failure are both actually exercised')
+    assert.equal(ignoredExpectedFailures, expectedRefreshFailures)
+    assert.equal(failCandidateReadAfterEdit, false)
     assert.equal(failCandidatesReadOnce, false)
 
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('pending')
@@ -253,6 +320,7 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     const rejectedCard = card(auxiliaryText)
     await rejectedCard.waitFor()
     assert.doesNotMatch(await rejectedCard.innerText(), /撤回保存的偏好|恢复候选/)
+    assert.equal(await rejectedCard.getByRole('button', { name: '编辑候选', exact: true }).count(), 0)
     for (const action of ['审阅后保存', '不再建议', '拒绝来源建议', '恢复候选', '撤回保存的偏好']) {
       assert.equal(await rejectedCard.getByRole('button', { name: action, exact: true }).count(), 0)
     }
@@ -262,15 +330,24 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     await page.locator('.main-nav').getByRole('button', { name: '记忆', exact: true }).click()
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.locator('.loom-app').waitFor()
-    const reloaded = card('Concise reports with citations')
+    const reloaded = rootCard()
+    const reloadedCandidateVersion = (await readCandidate(rootId)).version
     await reloaded.waitFor()
     assert.match(await reloaded.innerText(), /pending/)
     await page.setViewportSize({ width: 390, height: 844 })
+    await reloaded.getByRole('button', { name: '编辑候选', exact: true }).click()
+    const narrowEditor = page.getByRole('textbox', { name: '编辑候选内容', exact: true })
+    await narrowEditor.waitFor()
+    assert.equal(await narrowEditor.inputValue(), correctedCandidateText)
+    const narrowEditorBounds = await narrowEditor.boundingBox()
+    assert.ok(narrowEditorBounds && narrowEditorBounds.x >= 0 && narrowEditorBounds.x + narrowEditorBounds.width <= 390, 'The actual draft input must fit the narrow viewport')
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 390), 'Narrow viewport must remain readable after direct-page reload')
     const body = await page.locator('body').innerText()
     assert.ok(!body.includes(server.clientToken))
     await page.screenshot({ path: join(root, 'memory-pending-narrow.png'), fullPage: true })
-    assert.deepEqual(reviewRequests.map(request => request.decision), ['accept', 'accept', 'undo', 'later', 'never', 'undo', 'accept', 'undo'])
+    await reloaded.getByRole('button', { name: '取消候选编辑', exact: true }).click()
+    assert.equal((await readCandidate(rootId)).version, reloadedCandidateVersion, 'Narrow-preview cancellation must not issue another edit')
+    assert.deepEqual(reviewRequests.map(request => request.decision), ['edit', 'accept', 'accept', 'undo', 'later', 'never', 'undo', 'accept', 'undo'])
     assert.deepEqual(logs, [], `Unexpected browser error: ${logs.join('\n')}`)
     assert.equal((await controller.get('/api/v1/grants')).grants.length, 2, 'No review action invents a new Grant')
     assert.deepEqual(await memoryAudits('memory.explicit_deleted', reopened.derived_memory_id), [], 'Repeated re-accept/undo never fabricates ordinary deletion history')
@@ -278,14 +355,19 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.equal(undoWithdrawals.length, 1, 'The last re-accepted linked Memory has one and only one candidate withdrawal')
     assert.equal((await memoryAudits('memory.explicit_updated', savedBeforeEdit.id)).length, 1, 'No later UI action duplicates the original explicit edit')
     return { actual_ui_candidate_accept: true, actual_ui_withdraw: true,
+      actual_ui_candidate_edit_before_accept: true, cancelled_candidate_draft_no_write: true,
+      candidate_edit_preserves_fingerprint_and_sources: true, candidate_edit_alone_creates_no_memory: true,
+      candidate_edit_refresh_failure_keeps_draft_until_real_reload: true,
+      explicit_accept_after_candidate_edit_saves_corrected_text: true,
       explicit_ui_edit_preserves_original_source_link: true,
+      deleted_memory_editor_resets_before_next_accept: true,
       ordinary_edit_and_linked_delete_audited_without_duplicate: true,
       explicit_ui_delete_withdraws_only_same_linked_memory: true,
       later_and_never_restore: true, rejected_history_read_only: true,
       refresh_failure_remains_visible_and_recovers: true,
       actual_backend_snapshot_matches_ui: true,
       isolated_edge: true, no_grant_or_ticket_created: true, narrow_no_overflow: true,
-      screenshots: ['memory-accepted-desktop.png', 'memory-pending-narrow.png'], status_restored_to_pending: true }
+      screenshots: ['memory-candidate-edited.png', 'memory-accepted-desktop.png', 'memory-pending-narrow.png'], status_restored_to_pending: true }
 
   } finally {
     if (page && !page.isClosed()) await page.evaluate(() => localStorage.clear()).catch(() => {})

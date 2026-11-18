@@ -2993,7 +2993,9 @@ impl From<anyhow::Error> for ApiError {
             return error.clone();
         }
         let lower = error.to_string();
-        if lower.contains("not found") {
+        if lower.contains("MemoryCandidate version conflict") {
+            Self::conflict("candidate_version_conflict", lower)
+        } else if lower.contains("not found") {
             Self::missing(lower)
         } else {
             Self::bad(lower)

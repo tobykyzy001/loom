@@ -476,6 +476,12 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 
 普通显式 Memory 的编辑与无候选关联的删除必须在同一次现有 Store 事务中同时完成实际 UPDATE/DELETE 和对应 `memory.explicit_updated` / `memory.explicit_deleted` 记录。编辑从原行计算实际旧／新scope、版本和变更标记，复核持久的新行与source原貌；审计保留原始出处、动作及界限明确的元数据，而不把偏好正文、下一次请求的秘密或直接代码/工具执行混入记录。 审计失败则回滚本次Memory变更并向调用者明确报错，不能在只完成Memory变更时却向调用者谎称完整成功；这也不自动赋予跨机操作exactly-once。普通删除也不能抹除Ticket、Grant、Artifact、以前的观察历史或实际外部 Effect。
 
+**候选文字纠正不是接受。** 对完整、仍有非空原Ticket来源且 `schema=loom.memory-candidate.v1` 的项目MemoryCandidate，只有pending/later状态可以使用现有 `PATCH /candidates/{id}` 的 `{decision:"edit",content,expected_version}`。action只接受这三个字段：content必须是非空、最多500 UTF-8 bytes的公开文本，并沿用Memory接受时的禁止凭据/资源定位符检查；另一个scope/project/source_refs或额外字段不会混入这次修改。服务端重新检查实际project与每个现有来源Ticket，保留候选id、status、scope、project、schema、source以及**原始observation-group fingerprint**，只替换候选proposal中的文本。fingerprint代表原输入的观察群组，不是新文字的hash、新授权或Artifact/工作digest；后续同组的observations按原规则合并真实来源和次数，不自动把人工文字改回初稿或晋升成Memory。已有候选自己的source_refs仍是它已持久化的来源投影，不把随后观察到的新票自动补入candidate或后来已生成的link中伪装为当时证据。
+
+编辑要求精确的当前JSON整数version。若同版本文本完全没有变化，这是不改version/updated_at、不写新审计的no-op；但旧版本请求即使文字相同，也返回409 `candidate_version_conflict`，不能靠内容相同绕过fence。accepted/rejected/never与其它kind保留各自原有状态规则，不能通过编辑直接复活，旧的无source legacy也不能被这个动作补造成已证实来源。实际`BEGIN IMMEDIATE`内重读整行，再按id/version/status条件更新content、version与updated_at，同一事务写唯一一条`candidate.memory.edited`；审计记录真实candidate id、scope/fingerprint/sources、前后version、无Memory/Grant被创建，**不包含修改前后的偏好正文**。任一步失败不能留下内容与审计各自部分成功。
+
+前端以开始编辑的候选version发请求，只有权威的候选和资源读取回传当前版本后才关闭草稿。刷新或编辑失败时保留草稿与可见错误，不用自己的本地字数或未验证快照声称已保存。此文字保存与另一明确的accept操作独立；编辑本身不创建Memory/link/Grant/Ticket/Artifact/Effect，用户随后仍需单独确认，accept才由原投影和校验过的来源创建exact-linked派生Memory。此能力不包括把候选scope转到别的project/User/Host、语义去重、自动习惯/secret判定或冲突消解；accepted之后Memory自身的显式改scope/编辑走原有Memory操作，不能借用candidate编辑偷偷替换它。
+
 候选关联Memory删除走的是既有的 exact-link 撤回事务，**不能同样再写一条普通删除**来伪造第二笔事实。原候选仍只回到pending，来源Ticket/Grant/Artifact/源代码不变；下一次接受再按已验证引用创建新ID。后续真正编辑已存在的Memory复用其原有变更层与审计，source本身不被客户端PATCH重写。具备显式操作的审计并不等于已经实现通用 transcript 历史重放、模型自动归纳或用户/Worker协作冲突消解。
 ### 5.3 从使用习惯形成 Memory / Skill 建议
 

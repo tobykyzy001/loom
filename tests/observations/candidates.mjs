@@ -130,6 +130,7 @@ try {
   assert.equal(candidate.status, 'pending')
   assert.deepEqual(JSON.parse(candidate.source_refs), [firstSource, second, third])
   const candidateId = candidate.id
+  const rawObservation = JSON.parse(candidate.content)
   assert.ok((await post('/candidates', { project_id: projectId, kind: 'memory', value: 'Concise reports with citations', source_refs: [firstSource] })).observations >= 1)
   assert.equal((await get('/candidates')).candidates.length, 1)
   assert.equal((await get('/memories')).memories.length, 0)
@@ -140,6 +141,85 @@ try {
     assert.equal((await get('/grants')).grants.length, 2, 'UI review never creates authority')
   }
 
+  // Correcting a proposal is distinct from accepting it. The source-group
+  // fingerprint belongs to the raw observation, not to the revised human text.
+  const beforeCandidateEdit = (await get('/candidates')).candidates.find(row => row.id === candidateId)
+  const proposalBeforeHttpEdit = JSON.parse(beforeCandidateEdit.content)
+  const correctedCandidateText = 'Reviewed project preference: keep concise evidence visible'
+  const candidateEditAudits = async () => (await auditRecords()).filter(entry => entry.action === 'candidate.memory.edited'
+    && JSON.parse(entry.evidence).evidence.candidate_id === candidateId)
+  const candidateEdit = (version, content) => patch(`/candidates/${candidateId}`, { decision: 'edit', expected_version: version, content })
+  const editedCandidate = await candidateEdit(beforeCandidateEdit.version, correctedCandidateText)
+  const correctedProposal = JSON.parse(editedCandidate.content)
+  assert.equal(editedCandidate.id, candidateId)
+  assert.equal(editedCandidate.status, beforeCandidateEdit.status)
+  assert.equal(editedCandidate.scope, projectId)
+  assert.equal(editedCandidate.version, beforeCandidateEdit.version + 1)
+  assert.equal(correctedProposal.content, correctedCandidateText)
+  assert.equal(proposalBeforeHttpEdit.fingerprint, rawObservation.fingerprint)
+  assert.equal(correctedProposal.fingerprint, rawObservation.fingerprint, 'Human correction must not change its observation-group identity')
+  for (const field of ['schema', 'source', 'project_id', 'kind', 'replay_state']) {
+    assert.deepEqual(correctedProposal[field], proposalBeforeHttpEdit[field], `${field} stays the original source projection`)
+  }
+  assert.deepEqual(JSON.parse(editedCandidate.source_refs), JSON.parse(beforeCandidateEdit.source_refs))
+  assert.equal((await get('/memories')).memories.length, 0, 'Editing a candidate must not accept it or create a Memory')
+  assert.equal((await get('/grants')).grants.length, 2)
+
+  const repeatedEdit = await candidateEdit(editedCandidate.version, correctedCandidateText)
+  assert.equal(repeatedEdit.version, editedCandidate.version)
+  assert.equal(repeatedEdit.content, editedCandidate.content)
+  const exactHttpEditAudits = (await candidateEditAudits()).filter(entry => {
+    const evidence = JSON.parse(entry.evidence).evidence
+    return evidence.previous_version === beforeCandidateEdit.version && evidence.version === editedCandidate.version
+  })
+  assert.equal(exactHttpEditAudits.length, 1, 'An identical proposal correction on the same version cannot create another audit; earlier browser versions remain valid history')
+  const candidateEditAudit = exactHttpEditAudits[0]
+  assert.equal(candidateEditAudit.actor, 'client')
+  const candidateEditEnvelope = JSON.parse(candidateEditAudit.evidence)
+  assert.equal(candidateEditEnvelope.event_type, 'candidate.memory.edited')
+  assert.deepEqual(candidateEditEnvelope.evidence, {
+    candidate_id: candidateId, scope: projectId, fingerprint: rawObservation.fingerprint,
+    source_refs: JSON.parse(beforeCandidateEdit.source_refs),
+    previous_version: beforeCandidateEdit.version, version: editedCandidate.version,
+    content_changed: true, accepted_memory_created: false, authority_created: false,
+  })
+  assert.equal(JSON.stringify(candidateEditEnvelope).includes(correctedCandidateText), false, 'Audit does not copy preference text into a second record')
+
+  await assert.rejects(() => candidateEdit(beforeCandidateEdit.version, correctedCandidateText), error => {
+    assert.equal(error.status, 409)
+    assert.match(error.message, /MemoryCandidate version conflict/)
+    return true
+  }, 'Even identical old-version text cannot overwrite a later revision')
+  const auditsBeforeInvalidEdits = await auditRecords()
+  for (const content of [null, true, { text: correctedCandidateText }, '', '   ', 'x'.repeat(501), '记'.repeat(251), 'SECRET must not be copied', 'api_key=copy-not-allowed', 'private_key=copy-not-allowed', 'https://resource.example/private']) {
+    await assert.rejects(() => candidateEdit(editedCandidate.version, content), error => error.status === 400)
+  }
+  for (const expected_version of [null, true, '2', 1.5]) {
+    await assert.rejects(() => patch(`/candidates/${candidateId}`, { decision: 'edit', content: correctedCandidateText, expected_version }), error => error.status === 400)
+  }
+  await assert.rejects(() => patch(`/candidates/${candidateId}`, { decision: 'edit', content: correctedCandidateText, expected_version: editedCandidate.version, scope: otherProject }), error => error.status === 400)
+  await assert.rejects(() => patch(`/candidates/${candidateId}`, { decision: 'edit', content: correctedCandidateText, expected_version: editedCandidate.version, source_refs: [other.id] }), error => error.status === 400)
+  await assert.rejects(() => patch('/candidates/candidate_missing', { decision: 'edit', expected_version: 1, content: correctedCandidateText }), error => error.status === 404)
+  assert.deepEqual(await auditRecords(), auditsBeforeInvalidEdits, 'Every rejected candidate correction leaves original content and successful audit history unchanged')
+  assert.deepEqual((await get('/candidates')).candidates.find(row => row.id === candidateId).content, editedCandidate.content)
+  assert.equal((await get('/memories')).memories.length, 0)
+
+  const addedSourceAfterEdit = await makeTicket(4)
+  // Re-observe the actual original raw input. A UI-edited proposal is not a
+  // substitute observation value and must not silently define a semantic merge.
+  const mergedAfterEdit = await post('/candidates', { project_id: projectId, kind: 'memory', value: rawObservation.content, source_refs: [addedSourceAfterEdit] })
+  assert.equal(mergedAfterEdit.candidate.id, candidateId)
+  assert.equal(mergedAfterEdit.candidate.version, editedCandidate.version, 'Observing another source does not rewrite or promote the human-edited candidate')
+  assert.equal(JSON.parse(mergedAfterEdit.candidate.content).content, correctedCandidateText)
+  assert.equal(JSON.parse(mergedAfterEdit.candidate.content).fingerprint, rawObservation.fingerprint)
+  assert.equal(mergedAfterEdit.existing_candidate, true)
+  assert.equal(mergedAfterEdit.promotion, 'retained_history_not_auto_promoted')
+  assert.deepEqual(JSON.parse(mergedAfterEdit.candidate.source_refs), JSON.parse(beforeCandidateEdit.source_refs), 'The stored candidate keeps its own original source projection, instead of claiming the later source was already attached')
+  const mergedObservation = JSON.parse(await sql(join(server.dataDir, 'loom.sqlite3'), `SELECT json_object('occurrences',occurrences,'source_refs',source_refs) FROM observations WHERE fingerprint='${rawObservation.fingerprint}'`))
+  assert.equal(mergedObservation.occurrences, 4)
+  assert.deepEqual(JSON.parse(mergedObservation.source_refs), [...JSON.parse(beforeCandidateEdit.source_refs), addedSourceAfterEdit], 'The observation history itself gains the exact validated new source in first-seen order')
+  assert.equal((await get('/memories')).memories.length, 0)
+
   const accepted = await patch(`/candidates/${candidateId}`, { decision: 'accept', scope: projectId })
   assert.equal(accepted.status, 'accepted')
   let memories = (await get('/memories')).memories
@@ -148,7 +228,10 @@ try {
   assert.equal(memories[0].scope, 'project')
   assert.equal(memories[0].project_id, projectId)
   assert.equal(memories[0].source_ticket_id, firstSource)
-  assert.equal(memories[0].content, 'Concise reports with citations')
+  assert.equal(memories[0].content, correctedCandidateText)
+  await assert.rejects(() => candidateEdit(accepted.version, 'A second candidate edit must not overwrite the accepted Memory'), error => error.status === 400, 'Editing an accepted proposal cannot rewrite its derived Memory')
+  assert.equal((await get('/memories')).memories[0].content, correctedCandidateText)
+  assert.equal((await candidateEditAudits()).length, 1 + Number(process.argv.includes('--browser')), 'Only the one HTTP edit and, when exercised, the one real browser edit are present; terminal-history attempts add none')
   assert.equal((await get('/grants')).grants.length, 2, 'Reviewing candidates must not create new permissions')
   const linkedMemoryId = memories[0].id
   const edited = await patch(`/memories/${linkedMemoryId}`, { content: memories[0].content, scope: 'user', project_id: null })
@@ -235,6 +318,8 @@ try {
   const { candidate: routeCandidate } = await post('/candidates', { project_id: projectId, kind: 'route', value: 'Concise reports with citations', source_refs: [routeSources[2]] })
   assert.equal(routeCandidate.kind, 'route')
   await assert.rejects(() => patch(`/candidates/${routeCandidate.id}`, { decision: 'accept' }), /route candidate is not a portable memory/)
+  await assert.rejects(() => patch(`/candidates/${routeCandidate.id}`, { decision: 'edit', expected_version: routeCandidate.version, content: 'A route must not become a reviewed preference through text editing' }), error => error.status === 400)
+  assert.equal((await get('/candidates')).candidates.find(row => row.id === routeCandidate.id).content, routeCandidate.content)
   assert.equal((await get('/memories')).memories.length, 1)
   await assert.rejects(() => patch(`/candidates/${candidateId}`, { decision: 'never' }), /accepted Memory|explicit undo/)
   let suppressionCandidate
@@ -336,6 +421,8 @@ try {
   assert.deepEqual((await reopenAdmin.get('/api/v1/audit')).audit.filter(entry => ['memory.explicit_updated', 'memory.explicit_deleted'].includes(entry.action)), durableMemoryAudits, 'Explicit Memory write audits survive a real Concierge restart unchanged')
   console.log(JSON.stringify({ overall: 'PASS', source_and_expiry_checks: true, real_derived_memory_and_link: true, ordinary_edit_and_delete_audit: true, audit_failure_rolls_back_memory_mutation: true, missing_ids_do_not_audit: true, undo_does_not_duplicate: true, never_does_not_suggest_again: true,
     route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: 15,
+    candidate_edit_preserves_source_identity: true, stale_candidate_edit_rejected: true,
+    repeated_candidate_sources_keep_edited_text: true, candidate_edit_is_not_memory_acceptance: true,
     no_generic_learning_or_automatic_listener: true, uses_real_registered_node_and_http: true, browser: browserProof, root }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: String(error.stack || error), fixture_root: root, controller: server?.diagnostics() }, null, 2))

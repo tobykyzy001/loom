@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { MemoryCandidate } from '../src/lib/memoryCandidate'
-import { memoryCandidates, memoryDecision, memoryProvenance, memoryText } from '../src/lib/memoryCandidate'
+import { canEditMemoryCandidate, memoryCandidates, memoryDecision, memoryProvenance, memoryText } from '../src/lib/memoryCandidate'
 import { skillSourceRefs } from '../src/lib/skillProof'
 
 const valid = { id: 'candidate_abc', kind: 'memory', scope: 'project_real', status: 'pending', content: JSON.stringify({ content: 'Use explicit source references' }), source_refs: JSON.stringify(['tkt_1']), version: 1 }
@@ -54,6 +54,22 @@ describe('explicit project MemoryCandidate preview', () => {
       if (decision !== 'accept') expect(memoryDecision(decision, { ...valid, status: 'later' }), `later/${decision}`).toBe(expected)
       expect(memoryDecision(decision, accepted), `accepted/${decision}`).toBe(decision === 'undo' ? 'undo' : null)
     }
+  })
+  it('only exposes proposal editing for intact, versioned source-bound pending or later candidates', () => {
+    const content = JSON.stringify({ schema: 'loom.memory-candidate.v1', content: 'Correctable project draft', fingerprint: 'a'.repeat(64), project_id: 'project_real' })
+    const current = { ...valid, content }
+    expect(canEditMemoryCandidate(current)).toBe(true)
+    expect(canEditMemoryCandidate({ ...current, status: 'later' })).toBe(true)
+    for (const status of ['accepted', 'rejected', 'never']) {
+      expect(canEditMemoryCandidate({ ...current, status })).toBe(false)
+    }
+    for (const version of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', null, undefined]) {
+      expect(canEditMemoryCandidate({ ...current, version } as MemoryCandidate)).toBe(false)
+    }
+    expect(canEditMemoryCandidate({ ...current, source_refs: JSON.stringify([]) })).toBe(false)
+    expect(canEditMemoryCandidate(valid)).toBe(false)
+    expect(canEditMemoryCandidate({ ...current, content: JSON.stringify({ ...JSON.parse(content), fingerprint: 'stale' }) })).toBe(false)
+    expect(canEditMemoryCandidate({ ...current, content: JSON.stringify({ ...JSON.parse(content), content: '   ' }) })).toBe(false)
   })
   it('does not hide unknown or non-string schema behind legacy evidence', () => {
     for (const schema of [null, 1, false, '', 'other', ' loom.memory-candidate.v1 ']) {

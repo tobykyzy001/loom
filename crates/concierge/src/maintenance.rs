@@ -862,6 +862,12 @@ pub fn observation_candidate(store: &Store, body: &Value) -> Result<Value> {
 pub fn review_candidate(store: &Store, candidate_id: &str, body: &Value) -> Result<Value> {
     let rows = store.query("SELECT * FROM candidates WHERE id=?1", [candidate_id])?;
     let candidate = rows.first().context("candidate not found")?;
+    if body["decision"].as_str() == Some("edit") {
+        if candidate["kind"] != "memory" {
+            bail!("Only a source-bound MemoryCandidate supports text editing");
+        }
+        return edit_memory_candidate(store, candidate, body);
+    }
     if candidate["kind"] == "memory" {
         return review_memory_candidate(store, candidate, body);
     }
@@ -1006,6 +1012,155 @@ pub fn review_candidate(store: &Store, candidate_id: &str, body: &Value) -> Resu
             .first()
             .cloned()
             .unwrap_or(json!(null)))
+    }
+}
+
+fn edit_memory_candidate(store: &Store, candidate: &Value, body: &Value) -> Result<Value> {
+    const TEXT_ERROR: &str = "Memory candidate edit requires nonempty public text of at most 500 bytes, without credentials or resource locators";
+    const VERSION_ERROR: &str =
+        "MemoryCandidate version conflict; refresh the candidate before editing";
+
+    let payload = body
+        .as_object()
+        .context("MemoryCandidate edit requires an object payload")?;
+    if payload.len() != 3
+        || payload
+            .keys()
+            .any(|key| !matches!(key.as_str(), "decision" | "content" | "expected_version"))
+    {
+        bail!("MemoryCandidate edit accepts only decision, content and expected_version; scope and source evidence cannot be changed");
+    }
+    let content = payload["content"].as_str().context(TEXT_ERROR)?;
+    if content.trim().is_empty()
+        || content.len() > 500
+        || ["SECRET", "api_key", "private_key", "http://", "https://"]
+            .iter()
+            .any(|fragment| content.contains(fragment))
+    {
+        bail!(TEXT_ERROR);
+    }
+    let expected_version = payload["expected_version"]
+        .as_i64()
+        .filter(|_| payload["expected_version"].is_i64())
+        .context("MemoryCandidate edit expected_version must be a JSON integer")?;
+    let id = candidate["id"]
+        .as_str()
+        .context("MemoryCandidate identity required")?;
+    if !matches!(candidate["status"].as_str(), Some("pending" | "later")) {
+        bail!("Only a pending or postponed MemoryCandidate can be edited; accepted, rejected and never history requires its separate review semantics");
+    }
+    if candidate["version"].as_i64() != Some(expected_version) {
+        return Err(
+            crate::api::ApiError::conflict("candidate_version_conflict", VERSION_ERROR).into(),
+        );
+    }
+
+    let mut parsed: Value = serde_json::from_str(
+        candidate["content"]
+            .as_str()
+            .context("MemoryCandidate content proof is invalid")?,
+    )
+    .context("MemoryCandidate content proof is invalid")?;
+    let scope = candidate["scope"]
+        .as_str()
+        .filter(|scope| !scope.is_empty())
+        .context("MemoryCandidate source scope is invalid")?;
+    if !parsed.is_object()
+        || parsed["schema"] != "loom.memory-candidate.v1"
+        || parsed["source"] != "repeated_explicit_choices"
+        || parsed["project_id"].as_str() != Some(scope)
+        || parsed["fingerprint"]
+            .as_str()
+            .is_none_or(|fingerprint| fingerprint.is_empty())
+    {
+        bail!("Only an intact source-bound loom.memory-candidate.v1 can be edited");
+    }
+    let refs: Value = serde_json::from_str(
+        candidate["source_refs"]
+            .as_str()
+            .context("MemoryCandidate source proof is invalid")?,
+    )
+    .context("MemoryCandidate source proof is invalid")?;
+    let refs = refs
+        .as_array()
+        .filter(|refs| !refs.is_empty())
+        .context("MemoryCandidate editing requires its original nonempty source proof")?;
+    for reference in refs {
+        let ticket_id = reference
+            .as_str()
+            .context("MemoryCandidate source proof is invalid")?;
+        let ticket = store
+            .get("tickets", ticket_id)?
+            .context("MemoryCandidate source Ticket not found")?;
+        if ticket["project_id"].as_str() != Some(scope) {
+            bail!("MemoryCandidate editing cannot transfer evidence to another project");
+        }
+    }
+    if parsed["content"] == content {
+        return store
+            .get("candidates", id)?
+            .context("MemoryCandidate not found after review");
+    }
+    parsed["content"] = json!(content);
+    let serialized = serde_json::to_string(&parsed)?;
+    let updated_at = crate::now();
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> Result<Value> {
+        // The optimistic fence is rechecked inside the same immediate transaction
+        // as the content write and its single provenance-only audit event.
+        let current = store
+            .get("candidates", id)?
+            .context("MemoryCandidate not found during edit")?;
+        if current != *candidate {
+            return Err(crate::api::ApiError::conflict(
+                "candidate_version_conflict",
+                VERSION_ERROR,
+            )
+            .into());
+        }
+        let changed = store.conn().execute(
+            "UPDATE candidates SET content=?1,version=version+1,updated_at=?2 WHERE id=?3 AND version=?4 AND status IN ('pending','later')",
+            params![serialized,updated_at,id,expected_version],
+        )?;
+        if changed != 1 {
+            return Err(crate::api::ApiError::conflict(
+                "candidate_version_conflict",
+                VERSION_ERROR,
+            )
+            .into());
+        }
+        store.audit(
+            None,
+            "client",
+            "candidate.memory.edited",
+            &json!({
+                "candidate_id":id,
+                "scope":scope,
+                "fingerprint":parsed["fingerprint"],
+                "source_refs":refs,
+                "previous_version":expected_version,
+                "version":expected_version+1,
+                "content_changed":true,
+                "accepted_memory_created":false,
+                "authority_created":false
+            }),
+        )?;
+        store.conn().execute("COMMIT", [])?;
+        store
+            .get("candidates", id)?
+            .context("Edited MemoryCandidate not found after commit")
+    })();
+    match result {
+        Ok(candidate) => Ok(candidate),
+        Err(error) => {
+            let rollback = store.conn().execute("ROLLBACK", []);
+            match rollback {
+                Ok(_) => Err(error),
+                Err(rollback) => {
+                    Err(error.context(format!("MemoryCandidate edit rollback failed: {rollback}")))
+                }
+            }
+        }
     }
 }
 
@@ -1423,6 +1578,334 @@ mod observation_tests {
             "Only real accepted/retracted and reviewed commands are audited"
         );
         assert!(store.verify_audit().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod memory_candidate_edit_tests {
+    use super::*;
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        store: Store,
+        candidate: Value,
+    }
+
+    fn source_fixture() -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let time = crate::now();
+        store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project-a','Source-bound edit','/synthetic/project-a','read_only',1,'2026-01-01T00:00:00Z','{}'),('project-b','Other project','/synthetic/project-b','read_only',1,'2026-01-01T00:00:00Z','{}'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant-a','project-a','node-a','worker-a','installation-a','[\"read\"]',1,'grant-digest','2026-01-01T00:00:00Z');").unwrap();
+        for source in ["source-a", "source-b", "source-c"] {
+            store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES(?1,'project-a','Fixture source evidence','read_summary','input.txt','succeeded','grant-a','grant-digest','node-a','installation-a','worker-a',1,?2,?2)",params![source,time]).unwrap();
+        }
+        for source in ["source-a", "source-b", "source-c"] {
+            let result = observation_candidate(
+                &store,
+                &json!({"project_id":"project-a","kind":"memory","value":"  Original bounded preference\n","source_refs":[source]}),
+            )
+            .unwrap();
+            if source != "source-c" {
+                assert_eq!(result["candidate"], Value::Null);
+            } else {
+                let candidate = result["candidate"].clone();
+                assert_eq!(candidate["version"], 1);
+                return Fixture {
+                    _directory: directory,
+                    store,
+                    candidate,
+                };
+            }
+        }
+        unreachable!("three real observation sources create a bounded candidate")
+    }
+
+    fn id(fixture: &Fixture) -> &str {
+        fixture.candidate["id"].as_str().unwrap()
+    }
+
+    fn edit_body(fixture: &Fixture, content: Value) -> Value {
+        json!({"decision":"edit","content":content,"expected_version":fixture.candidate["version"]})
+    }
+
+    fn edit_audits(store: &Store) -> Vec<Value> {
+        store
+            .audits(None)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry["action"] == "candidate.memory.edited")
+            .collect()
+    }
+
+    fn assert_unchanged(fixture: &Fixture, before: &Value, result: Result<Value>) {
+        assert!(result.is_err());
+        assert_eq!(
+            fixture.store.get("candidates", id(fixture)).unwrap(),
+            Some(before.clone())
+        );
+        assert!(edit_audits(&fixture.store).is_empty());
+        assert!(fixture.store.list("memories").unwrap().is_empty());
+        assert_eq!(fixture.store.list("grants").unwrap().len(), 1);
+        assert!(fixture
+            .store
+            .query("SELECT * FROM candidate_memory_links", [])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn source_bound_pending_edit_preserves_identity_and_writes_one_audit() {
+        let fixture = source_fixture();
+        let original = fixture.candidate.clone();
+        let original_parsed: Value =
+            serde_json::from_str(original["content"].as_str().unwrap()).unwrap();
+        let before_audits = fixture.store.audits(None).unwrap();
+        let updated = review_candidate(
+            &fixture.store,
+            id(&fixture),
+            &edit_body(&fixture, json!("  Human reviewed preference\n")),
+        )
+        .unwrap();
+        assert_eq!(updated["id"], original["id"]);
+        assert_eq!(updated["version"], 2);
+        assert_eq!(updated["status"], "pending");
+        assert_eq!(updated["scope"], original["scope"]);
+        assert_eq!(updated["source_refs"], original["source_refs"]);
+        assert_eq!(updated["kind"], original["kind"]);
+        assert!(
+            updated["updated_at"].as_str().unwrap() >= original["updated_at"].as_str().unwrap()
+        );
+        let parsed: Value = serde_json::from_str(updated["content"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed["content"], "  Human reviewed preference\n");
+        for key in [
+            "schema",
+            "source",
+            "project_id",
+            "fingerprint",
+            "kind",
+            "replay_state",
+        ] {
+            assert_eq!(parsed[key], original_parsed[key], "immutable {key}");
+        }
+        assert_eq!(fixture.store.list("memories").unwrap().len(), 0);
+        assert_eq!(fixture.store.list("grants").unwrap().len(), 1);
+        assert!(fixture
+            .store
+            .query("SELECT * FROM candidate_memory_links", [])
+            .unwrap()
+            .is_empty());
+        let audits = fixture.store.audits(None).unwrap();
+        assert_eq!(audits.len(), before_audits.len() + 1);
+        let edits = edit_audits(&fixture.store);
+        assert_eq!(edits.len(), 1);
+        let stored_audit: Value =
+            serde_json::from_str(edits[0]["evidence"].as_str().unwrap()).unwrap();
+        let evidence = &stored_audit["evidence"];
+        for (key, expected) in [
+            ("candidate_id", original["id"].clone()),
+            ("scope", original["scope"].clone()),
+            ("fingerprint", original_parsed["fingerprint"].clone()),
+            ("source_refs", json!(["source-a", "source-b", "source-c"])),
+            ("previous_version", json!(1)),
+            ("version", json!(2)),
+            ("content_changed", json!(true)),
+            ("accepted_memory_created", json!(false)),
+            ("authority_created", json!(false)),
+        ] {
+            assert_eq!(evidence[key], expected, "audit {key}");
+        }
+        let details = evidence.to_string();
+        assert!(!details.contains("Human reviewed preference"));
+        assert!(!details.contains("Original bounded preference"));
+        assert!(fixture.store.verify_audit().unwrap());
+    }
+
+    #[test]
+    fn postponed_edit_and_identical_content_idempotence_keep_separate_semantics() {
+        let mut fixture = source_fixture();
+        fixture.candidate =
+            review_candidate(&fixture.store, id(&fixture), &json!({"decision":"later"})).unwrap();
+        assert_eq!(fixture.candidate["status"], "later");
+        assert_eq!(fixture.candidate["version"], 2);
+        let updated = review_candidate(
+            &fixture.store,
+            id(&fixture),
+            &edit_body(&fixture, json!("Postponed human edit")),
+        )
+        .unwrap();
+        assert_eq!(updated["status"], "later");
+        assert_eq!(updated["version"], 3);
+        let before_audits = fixture.store.audits(None).unwrap();
+        let noop = review_candidate(&fixture.store, id(&fixture), &json!({"decision":"edit","content":"  Original bounded preference\n","expected_version":2})).unwrap_err();
+        assert!(noop
+            .downcast_ref::<crate::api::ApiError>()
+            .is_some_and(|error| error.status == axum::http::StatusCode::CONFLICT));
+        assert_eq!(
+            fixture
+                .store
+                .get("candidates", id(&fixture))
+                .unwrap()
+                .unwrap(),
+            updated
+        );
+        assert_eq!(fixture.store.audits(None).unwrap(), before_audits);
+        let noop = review_candidate(
+            &fixture.store,
+            id(&fixture),
+            &json!({"decision":"edit","content":"Postponed human edit","expected_version":3}),
+        )
+        .unwrap();
+        assert_eq!(noop, updated);
+        assert_eq!(fixture.store.audits(None).unwrap(), before_audits);
+    }
+
+    #[test]
+    fn stale_version_and_terminal_status_never_write_or_revive() {
+        let fixture = source_fixture();
+        let before = fixture
+            .store
+            .get("candidates", id(&fixture))
+            .unwrap()
+            .unwrap();
+        let stale = review_candidate(
+            &fixture.store,
+            id(&fixture),
+            &json!({"decision":"edit","content":"stale edit","expected_version":0}),
+        );
+        assert_unchanged(&fixture, &before, stale);
+        for status in ["accepted", "rejected", "never"] {
+            let mut fixture = source_fixture();
+            fixture.candidate = review_candidate(
+                &fixture.store,
+                id(&fixture),
+                &json!({"decision":match status { "accepted" => "accept", "rejected" => "reject", _ => "never" }}),
+            )
+            .unwrap();
+            let before = fixture
+                .store
+                .get("candidates", id(&fixture))
+                .unwrap()
+                .unwrap();
+            let before_audits = fixture.store.audits(None).unwrap();
+            let error = review_candidate(
+                &fixture.store,
+                id(&fixture),
+                &edit_body(&fixture, json!("Cannot revive by edit")),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "Only a pending or postponed MemoryCandidate can be edited; accepted, rejected and never history requires its separate review semantics");
+            assert_eq!(
+                fixture
+                    .store
+                    .get("candidates", id(&fixture))
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            assert_eq!(fixture.store.audits(None).unwrap(), before_audits);
+            let memories = fixture.store.list("memories").unwrap();
+            assert_eq!(memories.len(), usize::from(status == "accepted"));
+            assert_eq!(fixture.store.list("grants").unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn edit_rejects_missing_bad_or_sensitive_text_and_unauthorized_payloads() {
+        let fixture = source_fixture();
+        let before = fixture
+            .store
+            .get("candidates", id(&fixture))
+            .unwrap()
+            .unwrap();
+        for body in [
+            json!({"decision":"edit","expected_version":1}),
+            json!({"decision":"edit","content":null,"expected_version":1}),
+            json!({"decision":"edit","content":1,"expected_version":1}),
+            json!({"decision":"edit","content":" \n\t ","expected_version":1}),
+            json!({"decision":"edit","content":"x".repeat(501),"expected_version":1}),
+            json!({"decision":"edit","content":"SECRET","expected_version":1}),
+            json!({"decision":"edit","content":"api_key","expected_version":1}),
+            json!({"decision":"edit","content":"private_key","expected_version":1}),
+            json!({"decision":"edit","content":"http://example.invalid","expected_version":1}),
+            json!({"decision":"edit","content":"https://example.invalid","expected_version":1}),
+            json!({"decision":"edit","content":"valid","expected_version":1.0}),
+            json!({"decision":"edit","content":"valid","expected_version":"1"}),
+            json!({"decision":"edit","content":"valid","expected_version":null}),
+            json!({"decision":"edit","content":"valid","expected_version":1,"scope":"project-b"}),
+            json!({"decision":"edit","content":"valid","expected_version":1,"project_id":"project-a"}),
+            json!({"decision":"edit","content":"valid","expected_version":1,"source_refs":["source-a"]}),
+            json!({"decision":"edit","content":"valid","expected_version":1,"status":"accepted"}),
+            json!({"decision":"edit","content":"valid","expected_version":1,"grant_created":true}),
+        ] {
+            let result = review_candidate(&fixture.store, id(&fixture), &body);
+            assert_unchanged(&fixture, &before, result);
+        }
+    }
+
+    #[test]
+    fn edit_refuses_non_memory_and_invalid_or_unbound_memory_provenance() {
+        let fixture = source_fixture();
+        let time = crate::now();
+        for (index, kind) in ["route", "skill"].iter().enumerate() {
+            let candidate_id = format!("non-memory-{index}");
+            fixture.store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES(?1,?2,'project-a','{\"content\":\"unchanged\"}','[]','pending',1,?3,?3)",params![candidate_id,kind,time]).unwrap();
+            let result = review_candidate(
+                &fixture.store,
+                &candidate_id,
+                &json!({"decision":"edit","content":"Human text","expected_version":1}),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                fixture
+                    .store
+                    .get("candidates", &candidate_id)
+                    .unwrap()
+                    .unwrap()["version"],
+                1
+            );
+        }
+        let valid: Value =
+            serde_json::from_str(fixture.candidate["content"].as_str().unwrap()).unwrap();
+        for (index, content, refs) in [
+            (0, "{malformed".to_owned(), "[\"source-a\"]".to_owned()),
+            (1, json!(["not an object"]).to_string(), "[\"source-a\"]".to_owned()),
+            (2, json!({"content":"no schema","fingerprint":valid["fingerprint"],"source":"repeated_explicit_choices","project_id":"project-a"}).to_string(), "[\"source-a\"]".to_owned()),
+            (3, valid.to_string(), "[]".to_owned()),
+            (4, valid.to_string(), "{malformed".to_owned()),
+            (5, json!({"schema":"loom.memory-candidate.v1","content":"bad project","fingerprint":valid["fingerprint"],"source":"repeated_explicit_choices","project_id":"project-b"}).to_string(), "[\"source-a\"]".to_owned()),
+        ] {
+            let candidate_id = format!("invalid-proof-{index}");
+            fixture.store.conn().execute("INSERT INTO candidates(id,kind,scope,content,source_refs,status,version,created_at,updated_at) VALUES(?1,'memory','project-a',?2,?3,'pending',1,?4,?4)",params![candidate_id,content,refs,time]).unwrap();
+            let before = fixture.store.get("candidates", &candidate_id).unwrap().unwrap();
+            let result = review_candidate(&fixture.store, &candidate_id, &json!({"decision":"edit","content":"Human text","expected_version":1}));
+            assert!(result.is_err());
+            assert_eq!(fixture.store.get("candidates", &candidate_id).unwrap().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn injected_edit_audit_failure_rolls_back_content_version_and_timestamp() {
+        let fixture = source_fixture();
+        let before = fixture
+            .store
+            .get("candidates", id(&fixture))
+            .unwrap()
+            .unwrap();
+        let before_audits = fixture.store.audits(None).unwrap();
+        fixture.store.conn().execute("CREATE TRIGGER fail_memory_candidate_edit_audit BEFORE INSERT ON audits WHEN NEW.action='candidate.memory.edited' BEGIN SELECT RAISE(ABORT,'owned candidate edit audit failure'); END", []).unwrap();
+        let result = review_candidate(
+            &fixture.store,
+            id(&fixture),
+            &edit_body(&fixture, json!("Rolled back human edit")),
+        );
+        assert_unchanged(&fixture, &before, result);
+        assert_eq!(fixture.store.audits(None).unwrap(), before_audits);
+        fixture
+            .store
+            .conn()
+            .execute("DROP TRIGGER fail_memory_candidate_edit_audit", [])
+            .unwrap();
+        assert!(fixture.store.verify_audit().unwrap());
     }
 }
 
