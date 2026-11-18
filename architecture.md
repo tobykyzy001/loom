@@ -434,7 +434,9 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 
 当前已用本机Edge 154.0.4258.53、native production build和Rust公开静态Root完成 online→offline→online：实际激活sw.js后，CacheStorage里恰为root index、manifest、favicon、实际hash JS/CSS共5项，逐项SHA等于构建bytes，无`/api`。`browserContext.setOffline`后以真实controller返回页面、可解析CSS及390px工作区，实际API fetch失败且已有未连接/旧快照提示出现，不存在以缓存登入或当前Grant有效的假象。fresh `browser.newContext`无安装历史时，离线首访仍得到真实`ERR_INTERNET_DISCONNECTED`。恢复在线并完成bootstrap、projects、tickets、nodes、grants、memories和preferences所有读取后状态恢复。
 
-这只是**先前联网安装过同一Origin静态壳之后的回访**，而非首访可离线发现、浏览器/OS重启全过程、真手机安装/锁屏/杀进程、离线Task持久缓存、后台执行、离线审批或任意Host能力。见[真实结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/result.json)、[源码绑定manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/manifest.json)及[实际离线截图](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/offline-shell.png)。
+**同一浏览器profile的真实进程关闭/重开也实际完成。** 在已有online/offline/online之后，driver通过公开 `browser.newBrowserCDPSession()`及`SystemInfo.getProcessInfo`读得旧browser的精确PID `96887`，完整`browser.close()`并确认Disconnected；再以同一owned profile和offline:true启动新browser，取得另一PID `96936`。其浏览器命令行由`Browser.getBrowserCommandLine`验证同一私有临时目录，而非凭已有worker ID或route伪断言重开。命令行接口所需的`--enable-automation`仅加入此测试profile，不要求生产用户改安全设置，也绝不枚举系统进程。新进程的确通过同源active worker返回页面，五项原资源的bytes/hash与初次构建完全相同；受保护API仍失败，再恢复联网后bootstrap及其它权限读取重新真实成功。这补足的是**owned桌面浏览器profile在一次完整关闭/离线重开后 的静态storage生存期**，不是移动OS或原生App进程重启保证。
+
+这整体仍只是**先前联网安装过同一Origin静态壳之后的回访**，不是第一次从未安装时的离线发现，更不是整个手机OS生命周期，离线Task持久缓存、后台执行、离线审批或任意Host能力。这一新模式没有打开额外服务或更改Grant/Lease/数据结构。最新[完整结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-1U9o2X/result.json)、[源码绑定manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-1U9o2X/manifest.json)及[实际离线截图](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-1U9o2X/offline-shell.png)包含两次真实PID/profile记录；临时curve只在结束验证后删除。
 
 ### 4.2 展示与协议边界
 

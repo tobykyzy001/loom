@@ -45,7 +45,17 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 - 独立**从未安装**的fresh `browser.newContext`在首次offline导航中要得到真实 `ERR_INTERNET_DISCONNECTED`，明确不支持无线访问直接发明冷启动快照。这个隔离负例发生在实际warm刷新之前，避免错误页与主线 navigation交错。Chrome的error-page race不再次被误计为PWA缺失。
 - **恢复在线** 点击原生重新读取按钮后，要检查bootstrap、projects、tickets、nodes、grants、memories与preferences的**整套**读取逐个成功，并等真实connected节点状态恢复，而不是遇bootstrap 200就提前断言。临时fixture token不提供业务或Session授权，也没有生产浏览器/Playwright route伪业务响应。
 
-[真实完整结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/result.json)、[源码绑定manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/manifest.json)和[390px离线页面](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/offline-shell.png)记录了实际Edge版本、asset hashes、no-API cache、controller导航、读取失败与恢复序列。真实Vue壳的见页面截图并不替代浏览器/手机OS进程重开、首访离线发现、生产HTTPS入口、移动真机锁屏/杀进程、离线业务快照、后台任务或新Harness能力。它也只覆盖同一个同源反射静态壳已经联网安装之后；**不能**宣称离线Ticket、Grant、Artifact/Effect授权或后台执行已可工作。测试结束只停止/清理owned server与context、删除临时profile，保留不含凭据的结果/截图。
+### 同一owned profile真实浏览器进程关闭后离线重开
+
+在上述online/offline/online完整回归之后，当前driver还真正执行`browser.close()`，等待真实 Disconnected，并派生**同一`warm-profile`的新进程，且以`offline:true`启动**。这不是把唤起一个新context或已有worker注册称为进程级重启。
+
+采用本安装公开`browser.newBrowserCDPSession()`接入浏览器级CDP：以`SystemInfo.getProcessInfo`读取type=browser的进程ID，以`Browser.getBrowserCommandLine`核实profile参数。Chromium的该命令行getter需要实例启动参数`--enable-automation`，这里**只在owned临时浏览器进程**提供给Playwright，不把自动化控制面暴露给其他用户进程；也不借用某上层不存在的`browser.process()`或猜测全局PID。当前结果确实分别读到旧PID 96887与新PID 96936，命令行指向同一个owned `warm-profile`，随后该进程的导航确由Service Worker返回。
+
+所有先前允许的**五项静态资源**在新进程的CacheStorage中仍保持完全相同的bytes/hash；原build的root index到对应JS/CSS内容及`DOM/CSS`渲染再次通过。它不提供离线工作身份：重启后的`bootstrap` API仍只在实时离线故障返回，而不是造出中心成功。随后真正`setOffline(false)`恢复受保护读取。生成的proof保留新旧PID以及同一profile（临时路径），没有读取/扫描宿主其他进程，也没有注入业务缓存。
+
+此项是对§4.1.3静态壳在**owned桌面浏览器完整关闭＋离线重开**的额外验证，不是手机OS锁屏/杀掉原生应用、后台服务恢复、离线Ticket/Grant或完整移动生命周期。临时浏览器contexts与Rust最终都关闭，owned profile删除后才仅保留proof，不把认证目录提交给仓库。
+
+[最新的完整进程重开结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-1U9o2X/result.json)、[绑定当前driver的manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-1U9o2X/manifest.json)及[390px离线页面](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-1U9o2X/offline-shell.png)记录了实际Edge版本、asset hashes、no-API cache、controller导航、读取失败、两次进程身份与恢复。真实Vue壳的见页面截图并不替代浏览器/手机OS进程重开、首访离线发现、生产HTTPS入口、移动真机锁屏/杀进程、离线业务快照、后台任务或新Harness能力。它也只覆盖同一个同源反射静态壳已经联网安装之后；**不能**宣称离线Ticket、Grant、Artifact/Effect授权或后台执行已可工作。测试结束只停止/清理owned server与context、删除临时profile，保留不含凭据的结果/截图。
 
 ## 真实任务步骤
 

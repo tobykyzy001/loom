@@ -54,16 +54,40 @@ async function checked(command, args) {
   assert.equal(code, 0, chunks.join(''))
   return chunks.join('')
 }
-async function launchContext(label) {
+async function launchContext(label, { offline = false } = {}) {
   const profile = join(root, label)
-  await mkdir(profile, { mode: 0o700 })
+  await mkdir(profile, { recursive: true, mode: 0o700 })
   const context = await chromium.launchPersistentContext(profile, {
-    executablePath: executable, headless: true, viewport: { width: 390, height: 844 },
-    args: ['--no-first-run', '--no-default-browser-check', '--no-default-search', '--disable-sync', '--disable-default-apps', '--disable-background-networking', '--disable-component-update', '--metrics-recording-only', '--no-service-autorun', '--no-proxy-server'],
+    executablePath: executable, headless: true, viewport: { width: 390, height: 844 }, offline,
+    args: ['--enable-automation', '--no-first-run', '--no-default-browser-check', '--no-default-search', '--disable-sync', '--disable-default-apps', '--disable-background-networking', '--disable-component-update', '--metrics-recording-only', '--no-service-autorun', '--no-proxy-server'],
     env: { PATH: process.env.PATH, HOME: root, TMPDIR: root }, timeout: 25000,
   })
   contexts.push(context)
   return context
+}
+async function browserIdentity(browser) {
+  const session = await browser.newBrowserCDPSession()
+  try {
+    const info = await session.send('SystemInfo.getProcessInfo')
+    const candidates = info.processInfo.filter(entry => entry.type === 'browser' && Number.isSafeInteger(entry.id) && entry.id > 0)
+    assert.equal(candidates.length, 1, 'Expected the exact owned Chromium browser PID')
+    const command = await session.send('Browser.getBrowserCommandLine')
+    const profile = command.arguments.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length)
+    assert.ok(profile, 'The real browser command must identify its owned persistent profile')
+    return { pid: candidates[0].id, profile }
+  } finally {
+    await session.detach().catch(() => {})
+  }
+}
+async function fullyCloseBrowser(context) {
+  const browser = context.browser()
+  assert.ok(browser?.isConnected(), 'Reopen test requires a live initial browser')
+  const identity = await browserIdentity(browser)
+  const disconnected = new Promise(resolve => browser.once('disconnected', resolve))
+  await bounded(browser.close(), 'Close entire initial persistent browser', 15000)
+  await bounded(disconnected, 'Verify the initial browser actually disconnected', 15000)
+  assert.equal(browser.isConnected(), false)
+  return identity
 }
 async function cachedState(page, origin) {
   return page.evaluate(async targetOrigin => {
@@ -250,6 +274,57 @@ try {
   }
   assert.equal(restoredReads.some(row => row.status === 401), false, 'The fixture token accepted before the outage must remain the valid current token')
   report.online_recovery = { real_bootstrap_read: true, workspace_reads: restoredReads, connection_pill: await page.locator('.connection-pill').innerText(), cached_shell_does_not_replace_authoritative_read: true }
+
+  // The prepared origin/profile is the only inherited state. Close the real browser,
+  // verify its actual exit, and launch a different process with the same owned profile offline.
+  const closedBrowser = await fullyCloseBrowser(context)
+  const reopenedOfflineContext = await launchContext('warm-profile', { offline: true })
+  const reopenedBrowser = reopenedOfflineContext.browser()
+  assert.ok(reopenedBrowser?.isConnected())
+  const reopenedIdentity = await browserIdentity(reopenedBrowser)
+  assert.notEqual(reopenedIdentity.pid, closedBrowser.pid, 'The offline reopen really uses another owned browser process')
+  const reusedProfileArgument = (await browserIdentity(reopenedBrowser)).profile
+  assert.equal(await realpath(reusedProfileArgument), await realpath(join(root, 'warm-profile')), 'Only the actual prepared profile can be reused')
+  const reopenedPage = await reopenedOfflineContext.newPage()
+  activePage = reopenedPage
+  let restartNavigation = null
+  reopenedPage.on('response', response => {
+    if (response.request().resourceType() === 'document') restartNavigation = { url: response.url(), fromServiceWorker: response.fromServiceWorker() }
+  })
+  await reopenedPage.goto(origin, { waitUntil: 'load' })
+  assert.equal(new URL(reopenedPage.url()).origin, origin)
+  assert.equal(restartNavigation?.fromServiceWorker, true, 'The reopened process must use the inherited real ServiceWorker, not a page-level simulation')
+  const restartedStructure = await appVisible(reopenedPage, origin)
+  const reopenedCache = await cachedState(reopenedPage, origin)
+  const canonical = rows => rows.map(entry => ({ cache: entry.cache, pathname: entry.pathname, sha256: entry.sha256, bytes: entry.bytes, type: entry.type }))
+    .sort((a, b) => a.pathname.localeCompare(b.pathname))
+  assert.deepEqual(canonical(reopenedCache), canonical(initialCache), 'The previously validated five resource bodies persist byte-for-byte across the real browser process reopen')
+  await reopenedPage.waitForFunction(() => document.querySelector('.connection-pill')?.textContent.includes('未连接'))
+  const reopenedApiOutcome = await reopenedPage.evaluate(async () => {
+    try { const response = await fetch('/api/v1/bootstrap', { cache: 'no-store' }); return { type: 'response', status: response.status } }
+    catch (error) { return { type: 'network_failure', name: error.name } }
+  })
+  assert.equal(reopenedApiOutcome.type, 'network_failure')
+  report.process_reopen = {
+    old_process: closedBrowser,
+    new_process: reopenedIdentity,
+    actually_different_browser_process: true,
+    same_owned_profile_reused: true,
+    starts_with_offline: true,
+    navigation: restartNavigation,
+    dom: restartedStructure,
+    cache_preserved_sha_and_bytes: true,
+    api_failure: reopenedApiOutcome,
+    no_business_or_credential_cache: reopenedCache.every(entry => !entry.pathname.startsWith('/api/')),
+    not_mobile_os_lifecycle: true,
+  }
+
+  await reopenedOfflineContext.setOffline(false)
+  const freshRead = reopenedPage.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/bootstrap' && response.status() === 200)
+  await reopenedPage.getByRole('button', { name: '重新读取最新状态', exact: true }).click()
+  assert.equal((await freshRead).status(), 200)
+  await reopenedPage.waitForFunction(() => document.querySelector('.connection-pill')?.textContent === '未注册节点')
+  report.process_reopen.online_read_restored = { real_bootstrap_read: true, connection_pill: await reopenedPage.locator('.connection-pill').innerText() }
   report.overall = 'PASS'
 } catch (error) {
   report.error = String(error.stack || error).replaceAll(server?.clientToken || '\u0000', '[fixture-credential]')
