@@ -115,7 +115,11 @@ pub fn create_ticket(
     capability: Option<&str>,
     model_resource: Option<(&str, &str, Option<Value>)>,
     source_work: Option<SourceWork>,
+    priority: i64,
 ) -> Result<Value> {
+    if !(-100..=100).contains(&priority) {
+        bail!("Ticket priority must be an integer between -100 and 100");
+    }
     if let Some(work) = &source_work {
         if kind != "read_summary"
             || content.is_some()
@@ -131,6 +135,7 @@ pub fn create_ticket(
                     .as_str()
                     .unwrap_or_default()
             || work.spec.value["grant_id"] != grant_id
+            || priority != 0
         {
             bail!("The frozen Source task specification does not match this Ticket request");
         }
@@ -237,13 +242,13 @@ pub fn create_ticket(
             node
         };
         let tx = store.conn_mut().savepoint()?;
-        tx.execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'waiting_approval',?7,?8,?9,?10,?11,?12,?12)",params![ticket,project_id,objective,kind,path,content,grant_id,source_work.as_ref().map(|work| work.spec.value["grant_digest"].as_str().unwrap_or_default()).unwrap_or_default(),placement_node,source_work.as_ref().map(|work| work.spec.value["installation_id"].as_str().unwrap_or_default()).unwrap_or_default(),worker,now])?;
+        tx.execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at,priority) VALUES(?1,?2,?3,?4,?5,?6,'waiting_approval',?7,?8,?9,?10,?11,?12,?12,?13)",params![ticket,project_id,objective,kind,path,content,grant_id,source_work.as_ref().map(|work| work.spec.value["grant_digest"].as_str().unwrap_or_default()).unwrap_or_default(),placement_node,source_work.as_ref().map(|work| work.spec.value["installation_id"].as_str().unwrap_or_default()).unwrap_or_default(),worker,now,priority])?;
         crate::store::audit_tx(
             &tx,
             Some(&ticket),
             "controller",
             "assignment.waiting",
-            &json!({"required_capability":capability.unwrap_or(kind),"grant_id":grant_id,"hint":"Wait for a covered node or explicitly reassign with a new Grant.","placement":&placement}),
+            &json!({"required_capability":capability.unwrap_or(kind),"grant_id":grant_id,"priority":priority,"hint":"Wait for a covered node or explicitly reassign with a new Grant.","placement":&placement}),
         )?;
         if let Some(work) = source_work {
             crate::source_events::attach_event_to_ticket(&tx, &work)
@@ -263,7 +268,7 @@ pub fn create_ticket(
     let at = now;
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(75)).to_rfc3339();
     let tx = store.conn_mut().savepoint()?;
-    tx.execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,(SELECT digest FROM grants WHERE id=?7),?8,?9,?10,1,?11,?11)",params![ticket,project_id,objective,kind,path,content,grant_id,node_id["id"].as_str(),node_id["installation_id"].as_str(),worker,at])?;
+    tx.execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at,priority) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,(SELECT digest FROM grants WHERE id=?7),?8,?9,?10,1,?11,?11,?12)",params![ticket,project_id,objective,kind,path,content,grant_id,node_id["id"].as_str(),node_id["installation_id"].as_str(),worker,at,priority])?;
     tx.execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES(?1,?2,?3,?4,1,?5,1,?6,?7)",params![assignment,ticket,node_id["id"].as_str(),worker,id("lease"),expires,at])?;
     tx.execute("INSERT INTO messages(id,ticket_id,sender,recipient,kind,content,visibility,created_at) VALUES(?1,?2,'user','concierge','activity',?3,'summary',?4)",params![crate::id("msg"),ticket,"Ticket saved; an authorized assignment and lease were issued.",at])?;
     crate::store::audit_tx(
@@ -271,7 +276,7 @@ pub fn create_ticket(
         Some(&ticket),
         "controller",
         "assignment.leased",
-        &json!({"assignment_id":assignment,"node_id":node_id["id"],"grant_id":grant_id,"placement":&placement}),
+        &json!({"assignment_id":assignment,"node_id":node_id["id"],"grant_id":grant_id,"priority":priority,"placement":&placement}),
     )?;
     if let Some(work) = source_work {
         if work.event_digest
@@ -297,9 +302,48 @@ pub fn create_ticket(
     store.detail(&ticket)
 }
 
+const ELIGIBLE_ASSIGNMENTS: &str = r#"
+WITH eligible AS (
+    SELECT t.id AS ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,
+           t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,
+           t.cancel_requested,t.priority,a.id AS assignment_id,a.lease_id,a.lease_epoch,
+           a.lease_expires_at,g.operations AS grant_operations,
+           g.revoked_at AS grant_revoked_at,a.created_at AS assignment_created_at,
+           a.acknowledged_at
+    FROM assignments a
+    JOIN tickets t ON t.id=a.ticket_id
+    JOIN grants g ON g.id=t.grant_id
+    WHERE a.node_id=?1 AND t.attempt=a.lease_epoch
+      AND (t.status IN ('running','cancel_requested')
+           OR (t.status IN ('reconciling') AND a.last_report_at IS NULL))
+      AND (g.revoked_at IS NULL
+           OR (t.status='reconciling' AND t.kind='edit_file' AND t.cancel_requested=0
+               AND a.acknowledged_at IS NOT NULL AND a.last_report_at IS NULL
+               AND g.version=2 AND t.grant_digest=g.digest))
+      AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling')
+)
+SELECT ticket_id,project_id,kind,objective,relative_path,content,status,node_id,
+       installation_id,worker_id,attempt,grant_digest,cancel_requested,assignment_id,
+       lease_id,lease_epoch,lease_expires_at,grant_operations,grant_revoked_at
+FROM eligible
+WHERE TRUE"#;
+
 pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Value>> {
     crate::pipeline::advance_all(store)?;
-    let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at,g.operations as grant_operations,g.revoked_at as grant_revoked_at FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND (g.revoked_at IS NULL OR (t.status='reconciling' AND t.kind='edit_file' AND t.cancel_requested=0 AND a.acknowledged_at IS NOT NULL AND a.last_report_at IS NULL AND g.version=2 AND t.grant_digest=g.digest)) AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling') ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
+    let stop = store.query(
+        &format!("{ELIGIBLE_ASSIGNMENTS} AND (status='reconciling' OR cancel_requested=1) ORDER BY assignment_created_at DESC LIMIT 1"),
+        [node_id],
+    )?;
+    let assignment = if let Some(stop) = stop.into_iter().next() {
+        Some(stop)
+    } else {
+        store.query(
+            &format!("{ELIGIBLE_ASSIGNMENTS} AND acknowledged_at IS NULL AND status='running' AND cancel_requested=0 ORDER BY priority DESC,assignment_created_at DESC LIMIT 1"),
+            [node_id],
+        )?
+        .into_iter()
+        .next()
+    };
     if let Some(mut assignment) = assignment {
         crate::source_events::ensure_source_work_approval(
             store,
@@ -1580,6 +1624,41 @@ mod retry_tests {
     }
 
     #[test]
+    fn negative_priority_retry_retains_ticket_value_and_all_immutable_history() {
+        let fixture = fixture("failed", 1, false);
+        let store = fixture.store;
+        store
+            .conn()
+            .execute(
+                "INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at,priority) SELECT 'negative-priority',project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at,-37 FROM tickets WHERE id='ticket-a'",
+                [],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,acknowledged_at,created_at,last_report_at) SELECT 'negative-original','negative-priority',node_id,worker_id,1,'negative-lease',1,lease_expires_at,acknowledged_at,created_at,last_report_at FROM assignments WHERE id='original-assignment'", [])
+            .unwrap();
+        store
+            .conn()
+            .execute("INSERT INTO reports(id,assignment_id,ticket_id,node_id,lease_epoch,request_id,state,summary,evidence,session_ref,cancel_acknowledged,created_at) SELECT 'negative-report','negative-original','negative-priority',node_id,1,'negative-request',state,summary,evidence,session_ref,0,created_at FROM reports WHERE id='original-report'", [])
+            .unwrap();
+        let before = store.detail("negative-priority").unwrap();
+        let grant = store.get("grants", "grant-a").unwrap().unwrap();
+        assert_eq!(before["priority"], -37);
+        retry(&store, "negative-priority").unwrap();
+        let after = store.detail("negative-priority").unwrap();
+        assert_eq!(after["priority"], -37);
+        assert_eq!(after["attempt"], 2);
+        assert_eq!(after["grant_digest"], grant["digest"]);
+        assert_eq!(after["reports"], before["reports"]);
+        assert_eq!(after["artifacts"], before["artifacts"]);
+        assert_eq!(after["effects"], before["effects"]);
+        assert_eq!(after["assignments"].as_array().unwrap().len(), 2);
+        assert_eq!(store.audits(Some("negative-priority")).unwrap().len(), 2);
+        assert!(store.verify_audit().unwrap());
+    }
+
+    #[test]
     fn approval_audits_roll_back_ticket_assignment_and_lease_together() {
         for action in ["assignment.retried", "task.approval_granted"] {
             let fixture = fixture("waiting_approval", 0, false);
@@ -1755,6 +1834,131 @@ mod retry_tests {
                 "ticket-a",
                 Some("Grant revoked; cannot reactivate authorization through retry"),
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        store: Store,
+    }
+
+    fn insert_ticket(store: &Store, id: &str, priority: i64) {
+        store
+            .conn()
+            .execute(
+                "INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at,priority) VALUES(?1,'project',?1,'read_summary','README.md',NULL,'running','grant','grant-digest','node','installation','default',1,0,?2,?2,?3)",
+                params![id, format!("2026-01-01T00:00:{id}Z"), priority],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) SELECT 'assignment-' || id,id,'node','default',1,'lease-' || id,1,'2100-01-01T00:00:00Z',created_at FROM tickets WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+    }
+
+    fn fixture() -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let at = crate::now();
+        store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Priority fixture','/owned/priority','read_only',1,'2026-01-01T00:00:00Z','{}'); INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default','/owned/priority','binding-digest','2026-01-01T00:00:00Z'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"read\"]',1,'grant-digest','2026-01-01T00:00:00Z','binding');").unwrap();
+        store
+            .conn()
+            .execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','public','token','online','[\"read_summary\"]','[]','{}',?1,?1)", [&at])
+            .unwrap();
+        Fixture {
+            _directory: directory,
+            store,
+        }
+    }
+
+    fn acknowledge(store: &Store, assignment: &Value) {
+        assert_eq!(
+            store
+                .conn()
+                .execute(
+                    "UPDATE assignments SET acknowledged_at=?1 WHERE id=?2 AND acknowledged_at IS NULL",
+                    params![crate::now(), assignment["assignment_id"].as_str().unwrap()],
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn priority_orders_only_unacknowledged_normal_assignments_with_zero_tie_unchanged() {
+        let mut fixture = fixture();
+        insert_ticket(&fixture.store, "01", 80);
+        insert_ticket(&fixture.store, "02", 0);
+        insert_ticket(&fixture.store, "03", 0);
+        let selected = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected["ticket_id"], "01");
+        assert!(selected.get("priority").is_none());
+        assert!(selected["operation"].get("priority").is_none());
+        acknowledge(&fixture.store, &selected);
+        let selected = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected["ticket_id"], "03",
+            "newer zero remains newest first"
+        );
+        acknowledge(&fixture.store, &selected);
+        let selected = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected["ticket_id"], "02");
+        acknowledge(&fixture.store, &selected);
+        assert!(assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn stop_first_includes_acknowledged_and_first_delivery_pre_cancel() {
+        for acknowledged in [true, false] {
+            let mut fixture = fixture();
+            insert_ticket(&fixture.store, "01", -100);
+            insert_ticket(&fixture.store, "02", 100);
+            if acknowledged {
+                fixture.store.conn().execute("UPDATE assignments SET acknowledged_at='2026-01-01T00:01:00Z' WHERE ticket_id='01'", []).unwrap();
+            }
+            fixture
+                .store
+                .conn()
+                .execute(
+                    "UPDATE tickets SET status='cancel_requested',cancel_requested=1 WHERE id='01'",
+                    [],
+                )
+                .unwrap();
+            let selected = assignment_for_poll(&mut fixture.store, "node")
+                .unwrap()
+                .unwrap();
+            assert_eq!(selected["ticket_id"], "01", "acknowledged={acknowledged}");
+            assert_eq!(selected["cancel_requested"], true);
+            assert!(selected.get("priority").is_none());
+            fixture.store.conn().execute("UPDATE assignments SET last_report_at='2026-01-01T00:02:00Z' WHERE ticket_id='01'", []).unwrap();
+            fixture
+                .store
+                .conn()
+                .execute("UPDATE tickets SET status='cancelled' WHERE id='01'", [])
+                .unwrap();
+            let selected = assignment_for_poll(&mut fixture.store, "node")
+                .unwrap()
+                .unwrap();
+            assert_eq!(selected["ticket_id"], "02");
+            assert!(assignment_for_poll(&mut fixture.store, "intruder")
+                .unwrap()
+                .is_none());
         }
     }
 }

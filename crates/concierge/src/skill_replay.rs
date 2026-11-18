@@ -141,6 +141,7 @@ pub fn create_or_get(store: &mut Store, candidate_id: &str, body: &Value) -> Res
             Some("read_summary"),
             None,
             None,
+            0,
         )?;
         if replay_ticket["kind"] != "read_summary"
             || replay_ticket["status"] != "running"

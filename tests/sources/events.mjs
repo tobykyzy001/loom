@@ -209,7 +209,7 @@ try {
   assert.equal(recovered.events[0].id, first.id)
   assert.equal(recovered.source_cursor, 4)
   assert.equal(recovered.thread.last_sequence, 4)
-  assert.equal(scalar("SELECT user_version FROM pragma_user_version"), 14)
+  assert.equal(scalar("SELECT user_version FROM pragma_user_version"), 15)
   assert.equal(scalar("SELECT COUNT(*) FROM source_work_specs"), 0)
   for (const request of [firstInput, eventBody(sourceId, 'event-linked', 'Link this immutable message to already authorized work', { ticket_id: ticket.id })]) {
     const actual = await admin.post('/api/v1/source-events', request)

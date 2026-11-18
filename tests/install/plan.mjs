@@ -110,18 +110,18 @@ try {
   await expectReject(observe('fixture-healthy', 'rollback', 'healthy'), e => e.status === 501)
   const doctor = await promisify(execFile)('cargo', ['run', '-q', '-p', 'loom-concierge', '--bin', 'loom', '--', '--data-dir', server.dataDir, 'doctor'], { env: { ...process.env, LOOM_CLIENT_TOKEN: server.clientToken }, timeout: 120000 })
   const persistence = JSON.parse(doctor.stdout)
-  assert.equal(persistence.schema_version, 14)
+  assert.equal(persistence.schema_version, 15)
   assert.equal(persistence.integrity[0].integrity_check, 'ok')
   assert.equal(persistence.audit_valid, true)
   assert.equal((await client.get('/api/v1/audit/verify')).valid, true)
-  pass('real restart preserves exact plan; disabled observe fails closed with schema 8 and valid audit')
+  pass('real restart preserves exact plan; disabled observe fails closed with current storage schema 15 and valid audit', { storage_schema: persistence.schema_version })
 
   const incompatible = await client.post('/api/v1/install-plans', manifest([{ ...target('fixture-linux'), os: 'linux' }]))
   assert.equal(incompatible.plan.targets[0].status, 'incompatible')
   await expectReject(client.post(`/api/v1/install-plans/${incompatible.plan.id}/approve`, { target_id: incompatible.plan.targets[0].id, reviewed_plan_digest: incompatible.plan.plan_digest }), e => e.status === 400)
   pass('incompatible fixture never receives approval')
 
-  console.log(JSON.stringify({ overall: 'PASS', schema: 8, proof_kind: 'synthetic_plan_only', host_execution: false, checks }, null, 2))
+  console.log(JSON.stringify({ overall: 'PASS', schema: 15, protocol_schema: 'loom.install-plan.v1', proof_kind: 'synthetic_plan_only', host_execution: false, checks }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: error.stack, cause: error.cause, checks }, null, 2))
   process.exitCode = 1

@@ -320,7 +320,7 @@ try {
   assert.equal((await get('/memories')).memories.length, 0)
   assert.equal((await get('/candidates')).candidates.filter(row => row.id.startsWith('candidate_')).length, 3 + Number(process.argv.includes('--browser')))
   assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'SELECT COUNT(*) FROM candidate_memory_links'), 0)
-  assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 14)
+  assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 15)
   assert.equal((await get('/audit/verify')).valid, true)
 
   const durableMemoryAudits = (await auditRecords()).filter(entry => ['memory.explicit_updated', 'memory.explicit_deleted'].includes(entry.action))
@@ -335,7 +335,7 @@ try {
   assert.equal((await reopenAdmin.get('/api/v1/audit/verify')).valid, true)
   assert.deepEqual((await reopenAdmin.get('/api/v1/audit')).audit.filter(entry => ['memory.explicit_updated', 'memory.explicit_deleted'].includes(entry.action)), durableMemoryAudits, 'Explicit Memory write audits survive a real Concierge restart unchanged')
   console.log(JSON.stringify({ overall: 'PASS', source_and_expiry_checks: true, real_derived_memory_and_link: true, ordinary_edit_and_delete_audit: true, audit_failure_rolls_back_memory_mutation: true, missing_ids_do_not_audit: true, undo_does_not_duplicate: true, never_does_not_suggest_again: true,
-    route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: 14,
+    route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: 15,
     no_generic_learning_or_automatic_listener: true, uses_real_registered_node_and_http: true, browser: browserProof, root }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: String(error.stack || error), fixture_root: root, controller: server?.diagnostics() }, null, 2))

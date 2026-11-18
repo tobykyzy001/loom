@@ -302,6 +302,7 @@ pub fn create(store: &mut Store, body: &Value) -> Result<Value> {
             Some("read_summary"),
             None,
             None,
+            0,
         )?;
         let ticket_id = ticket["id"].as_str().context("First stage has no Ticket")?;
         store.conn().execute(
@@ -525,6 +526,7 @@ fn descend(store: &mut Store, definition: &Definition) -> Result<()> {
                 Some("edit_file"),
                 None,
                 None,
+                0,
             )?;
             let child_id = ticket["id"]
                 .as_str()
@@ -556,6 +558,7 @@ fn descend(store: &mut Store, definition: &Definition) -> Result<()> {
             Some("edit_file"),
             None,
             None,
+            0,
         )?;
         let child_id = ticket["id"]
             .as_str()

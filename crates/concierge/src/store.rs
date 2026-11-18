@@ -45,9 +45,9 @@ impl Store {
         let current: i64 = self
             .connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if current > 14 {
+        if current > 15 {
             anyhow::bail!(
-                "database schema is from a newer Loom release (found {current}, supported 14)"
+                "database schema is from a newer Loom release (found {current}, supported 15)"
             )
         }
         if current == 0 {
@@ -391,6 +391,22 @@ CREATE TRIGGER IF NOT EXISTS source_work_specs_no_update BEFORE UPDATE ON source
             tx.execute("PRAGMA user_version=14", [])?;
             tx.commit()?;
         }
+        if current < 15 {
+            let column_present: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tickets') WHERE name='priority'",
+                [],
+                |row| row.get(0),
+            )?;
+            let tx = self.connection.unchecked_transaction()?;
+            if column_present == 0 {
+                tx.execute(
+                    "ALTER TABLE tickets ADD COLUMN priority INTEGER NOT NULL DEFAULT 0 CHECK(priority BETWEEN -100 AND 100)",
+                    [],
+                )?;
+            }
+            tx.execute("PRAGMA user_version=15", [])?;
+            tx.commit()?;
+        }
         Ok(())
     }
     pub fn conn(&self) -> &Connection {
@@ -677,6 +693,63 @@ mod tests {
     }
 
     #[test]
+    fn v14_ticket_history_gains_only_a_bounded_integer_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(tmp.path()).unwrap();
+            store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('legacy-project','legacy','legacy-root','read_only',1,'2026-01-01T00:00:00Z','{}'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('legacy-grant','legacy-project','legacy-node','default','legacy-installation','[\"read\"]',1,'original-grant-digest','2026-01-01T00:00:00Z'); INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES('legacy-ticket','legacy-project','unchanged objective','read_summary','README.md','succeeded','legacy-grant','original-grant-digest','legacy-node','legacy-installation','default',2,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'); ALTER TABLE tickets DROP COLUMN priority; PRAGMA user_version=14;").unwrap();
+        }
+        let store = Store::open(tmp.path()).unwrap();
+        assert_eq!(
+            store
+                .conn()
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            15
+        );
+        let ticket = store.get("tickets", "legacy-ticket").unwrap().unwrap();
+        assert_eq!(ticket["priority"], 0);
+        assert_eq!(ticket["objective"], "unchanged objective");
+        assert_eq!(
+            store.get("grants", "legacy-grant").unwrap().unwrap()["digest"],
+            "original-grant-digest"
+        );
+        let columns = store.query("SELECT name,type,\"notnull\",dflt_value FROM pragma_table_info('tickets') WHERE name='priority'", []).unwrap();
+        assert_eq!(
+            columns,
+            vec![json!({"name":"priority","type":"INTEGER","notnull":1,"dflt_value":"0"})]
+        );
+        for invalid in [-101, 101] {
+            let error = store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at,priority) SELECT 'invalid-' || ?1,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,created_at,updated_at,?1 FROM tickets WHERE id='legacy-ticket'", [invalid]).unwrap_err();
+            assert!(
+                error.to_string().contains("CHECK constraint failed"),
+                "{error}"
+            );
+        }
+        assert_eq!(store.list("tickets").unwrap().len(), 1);
+        drop(store);
+        let reopened = Store::open(tmp.path()).unwrap();
+        assert_eq!(
+            reopened.get("tickets", "legacy-ticket").unwrap().unwrap()["priority"],
+            0
+        );
+    }
+
+    #[test]
+    fn future_schema_remains_an_explicit_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(tmp.path()).unwrap();
+            store.conn().execute("PRAGMA user_version=16", []).unwrap();
+        }
+        let error = match Store::open(tmp.path()) {
+            Ok(_) => panic!("future database schema must not be accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("found 16, supported 15"), "{error}");
+    }
+
+    #[test]
     fn fresh_store_has_optional_code_evidence_without_backfill() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path()).unwrap();
@@ -684,7 +757,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let columns = store
             .query("SELECT name FROM pragma_table_info('artifacts')", [])
             .unwrap();
@@ -731,7 +804,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         assert_eq!(
             store.get("tickets", "legacy-ticket").unwrap().unwrap()["grant_id"],
             "legacy-grant"
@@ -805,7 +878,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let models = store
             .query(
                 "SELECT id,assignment_digest,source_assignment_id FROM models",
@@ -863,7 +936,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let artifact = reopened.get("artifacts", &artifact_id).unwrap().unwrap();
         assert_eq!(artifact["ticket_id"], "tkt-legacy");
         assert_eq!(artifact["sha256"], digest);
@@ -871,6 +944,7 @@ mod tests {
         let ticket = reopened.get("tickets", "tkt-legacy").unwrap().unwrap();
         assert_eq!(ticket["grant_id"], "grant-legacy");
         assert_eq!(ticket["status"], "succeeded");
+        assert_eq!(ticket["priority"], 0);
         assert!(reopened.verify_audit().unwrap());
         assert_eq!(
             std::fs::read(

@@ -70,6 +70,24 @@ node tests/runner/node-event-receipt.mjs
 
 原生Native Driver是事实交付的代表，受限document fixture则仅证明模型内source关系的保存与读取；**均不是实际DSH Provider/Agent/多Host或全球exactly-once承诺**。当前Lease始终先于读回执，过期、撤权或取消仍按既有规则，不能在receipt层复权。本次未启动用户明确暂缓的1+3 Compose。最终测试的总数以主控实际完整workspace日志为准，不把写脚本时的稳定性估算当成正式结果。
 
+## 有界Ticket priority与pending stop的真实调度
+
+```sh
+node tests/runner/task-priority.mjs
+```
+
+普通认证客户端创建Ticket时可以明确指定 **[-100,100]的整数priority**，当前Node的合法**未ack普通execute候选**按较大值优先；省略为0，显null、布尔、字符串、小数、越界数字都400且不新建工作。同一默认0仍保持原来的 `assignment.created_at DESC`，不是改成FIFO。failed retry沿用原票的preference，Source event/frozen Spec不能自行提级，Node自报也不能修改中心排程。priority**没有放在Node assignment或operation中，不进入工作digest**。
+
+**停止/对账先于数字比较。** poll先以同一Node/epoch/current Grant和这些租约状态的基本CTE查找当前待处理 `cancel_requested`或 `reconciling`；包括合法首次发放且尚未ack的预取消，keep original created_at order。找到则交出待处理对象，不拾取另一个高priority普通ticket。没有这种待处理时才按 `priority DESC, assignment_created_at DESC` 取一个普通execute。当前不会因此抢占已经开始执行的SDK Agent，也不会因为紧急tag就授权另一physical Node/binding root。 Acknowledge仍不是完成结果，报告与实际工作效果各自成立。
+
+此driver仅以**一个真实enrolled LocalNode +own临时Project/Binding/root**展示：旧80先于新0，未ack重投不消失，ack之后才取另一个真实Assignment；两个同为0的候选以真实创建时间验证**近者先**。无效六个输入均实际400且SQL没有新票据。对未ack的低值 `pending`作业真正发出cancel后，先收到该停止意图；未报告前重复stop不自动消失，随后只有当前assignment的合法`cancelled+cancel_acknowledged:true` outbox report被接受，才把urgent推进。这里的取消是这一支未启动执行的事实链，**不是SDK active-job abort**。
+
+使用对自有中心数据库的owned SQL把Node改offline创建waiting task，priority 47仍在`waiting_approval`存下；用该Node的真正heartbeat恢复后，人工approval**只发一次**Assignment，client poll才收到作业。普通非Source的waiting ticket果然可能延用旧空`installation_id`和`grant_digest`，driver不伪造这些字段的backfill；它单独核实真实poll的Node SQL installation、wrapped Grant、原binding/root与作业ID。此步仅证明主机可用性选择与审批持久，不是物理离线/手机切网验证。
+
+另有priority40的真实missing-file **failed** 后，用户显式retry且在同一owned project创建retry.txt，新Assignment读取真实bytes成功，保留原失败report、原权限、原priority，还带实际Artifact/Effect及其SHA。最终计数是节点1、Project/Binding各1、Grant 2（一份独立撤权）、Ticket 9、Assignment 10、Report 3（cancelled/failed/succeeded各一）、Artifact与Effect各1。撤销另一个priority100 Grant后，current Node poll不再给出该Assignment，未知Node仍是403，不被高值绕过。
+
+当前Storage为**schema15**，仅添加 `tickets.priority INTEGER DEFAULT 0 CHECK(-100..100)`，旧行默认0，Grant、TaskDigest、scope及所有Source迁移不重置。原Node event/acknowledge/revoke、memory/schema14code-evidence、Source/安装计划/Skill和documentflow保持原scope；本轮仅把**当前版本断言**更新到15，另在真实运行中抓获两处document/install断言和多处evidence标签遗留旧号均修正。后续未知>15仍拒绝。此proof是**候选领取偏向**，不承诺排队公平性、避免饿死、跨Node全局排序、真实SDK中止、general DAG/Graph、live provider或用户暂缓的1+3 Compose。最新主控实际证据：[report](/tmp/loom-task-priority-final-vCwQDQ/result.json)，[manifest](/tmp/loom-task-priority-final-vCwQDQ/manifest.json)。形式化执行止于owned proof，不能把潜在未知效果重新说成成功完成。
+
 ## 实际中心的撤权停止帧、旧证据围栏与审计
 
 ```sh

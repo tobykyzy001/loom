@@ -118,6 +118,7 @@ pub(crate) fn create(store: &mut Store, project_id: &str, body: &Value) -> Resul
         Some("credential_ref"),
         None,
         None,
+        0,
     )?;
     Ok(json!({"ticket":request, "credential_ref":reference, "lookup_performed":false}))
 }

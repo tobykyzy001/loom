@@ -582,7 +582,7 @@ mod skill_replay_regressions {
     }
 
     #[test]
-    fn real_v6_snapshot_migrates_to_v14_without_rewriting_grant_artifact_or_audit() {
+    fn real_v6_snapshot_migrates_to_v15_without_rewriting_grant_artifact_or_audit() {
         let directory = tempfile::tempdir().unwrap();
         let db = rusqlite::Connection::open(directory.path().join("loom.sqlite3")).unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON;
@@ -606,7 +606,7 @@ mod skill_replay_regressions {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         assert!(store
             .query("SELECT * FROM skill_replays", [])
             .unwrap()

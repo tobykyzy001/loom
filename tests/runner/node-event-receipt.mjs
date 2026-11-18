@@ -192,7 +192,7 @@ try {
   assert.equal(body.activity, body.content)
 
   openDatabase()
-  assert.equal(one('PRAGMA user_version').user_version, 14)
+  assert.equal(one('PRAGMA user_version').user_version, 15)
   const originalReceipt = receiptRow(runner.nodeId, firstRequestId)
   const originalMessage = matchingMessage(firstRequestId)
   // Record the direct logical-body digest as diagnostic contrast; the contract
@@ -317,7 +317,7 @@ try {
   Object.assign(result, {
     overall: 'PASS', first_request_id: firstRequestId, node_id: runner.nodeId,
     assignment_id: assignment.id, initial_message_id: initialMessageId,
-    registered_local_node: true, real_rust_concierge: true, http_sqlite_schema: 14,
+    registered_local_node: true, real_rust_concierge: true, http_sqlite_schema: 15,
     first_delivery_accepted: true, first_receipt_duplicate: false,
     exact_replay_duplicate_after_restart: true,
     formatting_equivalence_replay: true,

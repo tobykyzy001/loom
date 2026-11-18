@@ -1623,6 +1623,237 @@ mod tests {
             .unwrap()
     }
 
+    fn priority_test_state(online: bool) -> (tempfile::TempDir, Arc<State>, &'static str) {
+        const TOKEN: &str = "ticket-priority-test-token-12345";
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let store = crate::store::Store::open(directory.path().join("db")).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        let now = crate::now();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Priority fixture',?1,'read_only',1,?2,'{}')",
+                params![root.to_string_lossy(), now],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default',?1,'binding-digest',?2)",
+                params![root.to_string_lossy(), now],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"read\"]',1,'grant-digest',?1,'binding')",
+                [&now],
+            )
+            .unwrap();
+        let heartbeat = if online {
+            now.as_str()
+        } else {
+            "2026-01-01T00:00:00Z"
+        };
+        store
+            .conn()
+            .execute(
+                "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','public','token',?1,?2,?3,?4,?5,?5)",
+                params![
+                    if online { "online" } else { "registered" },
+                    json!([{"ticket_kind":"read_summary","permission":"read"}]).to_string(),
+                    json!([{"worker_id":"default","status":"online"}]).to_string(),
+                    json!({"project_roots":{"project":root}}).to_string(),
+                    heartbeat,
+                ],
+            )
+            .unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        (directory, state, TOKEN)
+    }
+
+    fn priority_ticket(priority: Option<Value>) -> Value {
+        let mut ticket = json!({
+            "project_id":"project", "objective":"ordinary priority fixture",
+            "kind":"read_summary", "relative_path":"README.md",
+            "grant_id":"grant", "node_id":"node", "worker_id":"default"
+        });
+        if let Some(priority) = priority {
+            ticket["priority"] = priority;
+        }
+        ticket
+    }
+
+    #[tokio::test]
+    async fn ordinary_ticket_priority_is_strict_and_persisted_through_real_http() {
+        let (_directory, state, token) = priority_test_state(true);
+        let app = router(state.clone());
+        for invalid in [
+            json!(null),
+            json!(true),
+            json!("80"),
+            json!(1.5),
+            json!(101),
+            json!(-101),
+        ] {
+            let before = state.lock().unwrap().list("tickets").unwrap().len();
+            let response = post_json(
+                &app,
+                "/api/v1/tickets".into(),
+                token,
+                priority_ticket(Some(invalid.clone())),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{invalid}");
+            assert_eq!(state.lock().unwrap().list("tickets").unwrap().len(), before);
+        }
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tickets")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(priority_ticket(Some(json!(80))).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        for priority in [80, -100, 100, 0] {
+            let response = post_json(
+                &app,
+                "/api/v1/tickets".into(),
+                token,
+                priority_ticket(Some(json!(priority))),
+            )
+            .await;
+            let (status, body) = response_json(response).await;
+            assert_eq!(status, StatusCode::OK, "{priority}: {body}");
+            assert_eq!(body["priority"], priority);
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .detail(body["id"].as_str().unwrap())
+                    .unwrap()["priority"],
+                priority
+            );
+        }
+        let response =
+            post_json(&app, "/api/v1/tickets".into(), token, priority_ticket(None)).await;
+        let (status, body) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["priority"], 0);
+        assert_eq!(
+            state.lock().unwrap().list("grants").unwrap()[0]["operations"],
+            json!(["read"])
+        );
+        assert_eq!(state.lock().unwrap().list("tickets").unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn source_ticket_rejects_any_priority_without_touching_frozen_provenance() {
+        let (_directory, state, token) = priority_test_state(true);
+        let app = router(state.clone());
+        let source = crate::source_events::register(
+            &mut state.lock().unwrap(),
+            serde_json::from_value(json!({"source_key":"priority-source"})).unwrap(),
+        )
+        .unwrap();
+        let source_id = source["source"]["id"].as_str().unwrap();
+        for (index, priority) in [json!(80), json!(0), json!(-100)].into_iter().enumerate() {
+            let event_id = format!("source-priority-{index}");
+            let event = crate::source_events::ingest(
+                &mut state.lock().unwrap(),
+                serde_json::from_value(json!({"source_id":source_id,"thread_id":"read","event_id":event_id,"content":"Source prompt cannot tune scheduling"})).unwrap(),
+            )
+            .unwrap();
+            let response = post_json(
+                &app,
+                "/api/v1/tickets".into(),
+                token,
+                json!({
+                    "project_id":"project", "objective":"Source prompt cannot tune scheduling",
+                    "kind":"read_summary", "relative_path":"README.md", "grant_id":"grant",
+                    "node_id":"node", "worker_id":"default", "source_event_id":event["id"],
+                    "priority":priority
+                }),
+            )
+            .await;
+            let (status, body) = response_json(response).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{priority}: {body}");
+            assert_eq!(body["error"]["code"], "source_task_scope");
+            let event = crate::source_events::lookup_client_event(
+                &state.lock().unwrap(),
+                event["id"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(event["task_ticket_id"], Value::Null);
+            assert_eq!(event["task_spec"], Value::Null);
+        }
+        assert_eq!(state.lock().unwrap().list("tickets").unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn waiting_approval_retains_signed_priority_until_explicit_approval() {
+        let (_directory, state, token) = priority_test_state(false);
+        let app = router(state.clone());
+        let response = post_json(
+            &app,
+            "/api/v1/tickets".into(),
+            token,
+            priority_ticket(Some(json!(-70))),
+        )
+        .await;
+        let (status, body) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "waiting_approval");
+        assert_eq!(body["priority"], -70);
+        let ticket_id = body["id"].as_str().unwrap().to_owned();
+        let stored = state.lock().unwrap().detail(&ticket_id).unwrap();
+        assert_eq!(stored["priority"], -70);
+        assert!(stored["assignments"].as_array().unwrap().is_empty());
+        let waiting = state.lock().unwrap().audits(Some(&ticket_id)).unwrap();
+        let evidence: Value =
+            serde_json::from_str(waiting[0]["evidence"].as_str().unwrap()).unwrap();
+        assert_eq!(evidence["evidence"]["priority"], -70);
+        let grant_before = state
+            .lock()
+            .unwrap()
+            .get("grants", "grant")
+            .unwrap()
+            .unwrap();
+        let approved = post_json(
+            &app,
+            format!("/api/v1/tickets/{ticket_id}/approval"),
+            token,
+            json!({"decision":"approve","approval_id":"priority-approval","reason":"Explicitly authorize this already saved Ticket"}),
+        )
+        .await;
+        let (status, approved) = response_json(approved).await;
+        assert_eq!(status, StatusCode::OK, "{approved}");
+        assert_eq!(approved["priority"], -70);
+        assert_eq!(approved["assignments"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .get("grants", "grant")
+                .unwrap()
+                .unwrap(),
+            grant_before
+        );
+    }
+
     #[tokio::test]
     async fn public_retry_refuses_waiting_ticket_but_exact_approval_issues_first_attempt() {
         const TOKEN: &str = "test-client-token-123456789012345";
@@ -2007,7 +2238,7 @@ mod tests {
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            14,
+            15,
             "preference reads require no schema migration"
         );
         let now = crate::now();
@@ -5259,6 +5490,24 @@ async fn ticket(
         .map_or(Value::Null, |entry| json!(entry));
     Ok(Json(detail))
 }
+fn deserialize_ticket_priority<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let Some(Value::Number(number)) = value else {
+        return Err(serde::de::Error::custom(
+            "priority must be an integer between -100 and 100, not null",
+        ));
+    };
+    match number.as_i64() {
+        Some(priority @ -100..=100) => Ok(Some(priority)),
+        _ => Err(serde::de::Error::custom(
+            "priority must be an integer between -100 and 100, not null",
+        )),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TicketRequest {
@@ -5283,6 +5532,8 @@ struct TicketRequest {
     placement_id: Option<String>,
     #[serde(default)]
     source_event_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_ticket_priority")]
+    priority: Option<i64>,
 }
 #[allow(clippy::too_many_arguments)]
 async fn create_ticket(
@@ -5502,6 +5753,7 @@ async fn create_ticket(
         body.capability.as_deref(),
         model_resource,
         None,
+        body.priority.unwrap_or(0),
     )?;
     Ok(Json(request))
 }
@@ -5519,6 +5771,7 @@ fn create_ticket_from_source_event(
         || body.model.is_some()
         || body.model_id.is_some()
         || body.placement_id.is_some()
+        || body.priority.is_some()
         || body
             .capability
             .as_deref()
@@ -5593,7 +5846,7 @@ fn create_ticket_from_source_event(
         let task_digest = work.spec.digest.clone();
         let ticket = crate::maintenance::create_ticket(
             &mut *store, &body.project_id, "read_summary", &objective,
-            &path.to_string_lossy(), None, grant_id, Some(&node_id), Some(worker), Some("read_summary"), None, Some(work),
+            &path.to_string_lossy(), None, grant_id, Some(&node_id), Some(worker), Some("read_summary"), None, Some(work), 0,
         ).map_err(|_| ApiError::denied("source_task_scope", "The frozen spec, physical capability or root authorization is unavailable or incompatible"))?;
         let ticket_id = ticket["id"].as_str().ok_or_else(|| {
             ApiError::conflict("source_task_identity_conflict", "New Ticket ID missing")
