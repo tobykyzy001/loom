@@ -808,6 +808,12 @@ queued → leased → confirmed
 
 无法证明是否成功的敏感效果，询问用户而非盲目重跑。模型“先检查一下再决定”可辅助恢复，但不能代替确定性证据。
 
+**当前公共重试的正常语义窄于任何历史状态的继续执行**。只有当前已明确 `failed` 且没有停止意图的Ticket，才能沿其原Grant（未撤销）签发一个新的Assignment/epoch。它保留本Ticket的内容、原Grant digest、Node/worker/binding等既有范围及旧Report/Artifact/Effect，而不是换Grant、冒充换机或自动回滚。新的尝试有自己的Assignment、Epoch和相应实际执行/报告证据。
+
+`reconciling`/未知结果必须先核对已有副作用，`pending`、`running`、`cancelled`、`succeeded`、已有停止意图或撤销的资源都不能由公共 `/retry` 另建执行**或记录一次虚假的“已重试”审计**。这不能靠UI禁用按钮代替后端限制。`waiting_approval` 的批准动作只通过已有人工审批门及当前Grant/Source校验后调用共享签发逻辑，仍产生合法的首次Attempt；不能把这条专门入口混同为任意直接 retry，也不能让普通 retry 成为绕过审批的变道。
+
+用户可见按钮同样只允许真正failed；未知结果提示先核对现场。确认框提交前还会重新核对选中Ticket的类型及是否同一对象，防止当前选择已经转成reconciling、running或另一张Ticket时仍由旧页面发起后续动作。最终是否再签发Attempt始终由Concierge判定，前端不存在create-Attempt/cloned-Grant/service-cancellation权限。
+
 ### 9.4 调度失败与离线
 
 - 无符合 Host：排队、等待指定设备上线，或向用户提供替代方案；

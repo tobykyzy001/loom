@@ -18,6 +18,12 @@ node tests/runner/coordinator-admission.mjs
 
 这些场景使用临时 owned inputs、真实本地文件读写和受限返回数据。新进程/新 runner 重开同一 Native State 不等于 `kill -9` 发生在 DSH Tool 投入外部效果的精确时刻，也不是一中心三工作者 Compose。
 
+### failed-only公共重试与独立审批
+
+`maintenance::retry` 不再让 pending/running/cancelled/succeeded/等待审批等状态借用原Grant新增Assignment或生成no-op成功校验日志；public retry仅接受已完成 `failed` 且没有停止意图的Ticket，沿原Grant/digest、Node/worker/binding生成独立下一Attempt（epoch递增，原历史不改）。已与reconciling、revoke Grant等拒绝场景逐状态比较原Assignment/Report/Artifact/Effect及审计不变。`retry_after_approval` 仅服务现有waiting_approval入口，继续先做source/human审批校验再调用共同签发逻辑，保留合法首Attempt 0→1。它不是任意公开 retry 的审批绕过。Node自身的 `validateAssignment`/admission仍需逐项核对当前作用域，这不是让UI拥有更强的执行权。
+
+正向源码编程样例进一步通过真实Vue点击failed retry后由真实DSH完成下一Attempt，旧失败的diff/test在前后下载保持bytes/hash不变；reconciling在普通Edge的按钮已不可提交，force-click零retry POST，直接后端仍拒绝。整体证据见[真实代码 worker](../../../tmp/loom-failed-retry-evidence-Z3FLpO/result.json)与[普通浏览器证明](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-z9Mzwf/result.json)，而不是把mock状态/禁止按钮当作后端权限保证。
+
 ## 用户 UI 撤权 + 两次未领取空poll的补充证据
 
 在普通生产浏览器驱动 `tests/browser/run.mjs --keep-evidence` 内，用户通过权限页精确Grant的确认按钮撤回授权，做的是现有Concierge的真实 `POST /grants/{id}/revoke`，而不是 Node 直接访问管理路由。此 Ticket 已签发 Assignment，却从未被 Node acknowledged；撤权后不调用executor，连续两次原LocalNodeRunner的正常poll通过同一注册身份拿到真实 `assignment:null`。对待原响应只做只读记录、保留认证上下文和返回形状，不把缺轮询或短路包装为空poll当作通过。

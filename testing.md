@@ -168,6 +168,7 @@ Compose driver 确认后再发任务：
 | 重复事件 | 同一 Report / Effect 重放不会重复外部副作用 |
 | 中心 / Node 重启 | 可从持久证据恢复；SessionRef / ArtifactRef 保持关联 |
 | Unknown Outcome | 不可证明的成功进入对账或人工处理，不无条件重跑 |
+| 仅失败重试（当前Rust+真实UI） | public retry仅failed且无停止意图，原Grant/digest/Node/worker/binding保持不变，产生新的Attempt；pending/running/cancelled/succeeded/reconciling均不新增作业或retry审计。审批首Attempt走独立审批校验。failed UI点明确重试后必须实际执行，旧失败的下载bytes/Report/Effect不能被覆盖；未知只提示先对账、不得提交确认框。证据：`tests/harness/real-code-task.mjs`、`tests/sources/browser.mjs` |
 | 权限负例 | 越权路径、伪造 Node、错误 Grant digest、过期 Token 和跨 Profile 读取被拒绝并记录 |
 | 撤权的普通未领取工作（当前真实 Edge 子集） | 用户 UI 确认同一Grant撤销，版本/revoked_at与权威资源刷新一致，而不是只看按钮消失。 Ticket保持reconciling且cancel_requested=false，Assignment尚未acknowledged，旧Lease不续、旧报告/字节仍在。连续两次Node poll均返回assignment:null，executor/outbox/Report/Artifact/Effect/目标文件均无新产生。旧Grant的合法形状复用必须403且不新增Ticket。快照刷新失败不能回收中心已确认撤权的语义或声称列表当前有效；见`tests/browser/run.mjs` |
 | 会话可见性 | 默认折叠、单任务展开不改变数据；消息可见性与 Artifact 访问权限各自成立 |

@@ -94,6 +94,10 @@
 
 前端修复了真实Grant SQL不返回独立status却让卡片仍显示有效的问题，状态徽标以revoked_at优先；`revokeGrant()`也只在确认id正确的撤销receipt且读取到最新资源后完成。读取失败要明确区分“中心确认撤权但还没有最新快照”，不把旧有效badge当作实时权限。确认操作在POST后的资源刷新中也不会重复进入。普通已受理源码撤权阶段与此**未acknowledged**的正常用户权限收回不是一回事，不能把后者误宣为取消/终止/自动重启Agent。原有普通cancelled Ticket和401 credential recovery在同一完整真实浏览器回归中仍通过，10阶段详细证据见 `tests/browser/README.md`。
 
+**真正失败才允许重新尝试，Unknown结果不能重放成新执行。** 公开retry现仅面向已failed且没有停止意图的原Ticket，仍要求在它的原Grant未撤销时创建新Assignment/epoch，digest、Node/worker/binding与历史Report/Artifact/Effect不被替换。pending、running、cancelled、succeeded、reconciling等直接retry不再签发多余作业或伪造retry审计。等待人工批准的首Attempt走单独approved/source校验后共享签发路径，未被误包进failed-only电网。前端对未知对账提供不可提交的说明/禁用操作，并在用户确认前重新核对当前failed对象和选中ID，不以隐藏按钮代替服务端权限。
+
+真实DSH源码单元已经在UI中完成这一条闭环：先以真实`node:test`的失败结果和diff/verification Artifact核对earlier failed，再由production Vue的重试按钮产生**恰好一次**retry，故后得到独立的第二次Agent执行与验证exit 0，第一笔失败的原始报告、Effect和两个Artifact在前后下载都保持原bytes/hash/ID。该种重试不是静默回滚，也不以最新总体成功掩盖历史失败；完整脚本仍保持取消、宿主/中心重开、原撤权隔离和真 实片段节点不可重试的证据。普通Edge里的reconciling按钮也已改为先对账，force-click不会发起retry或确认框，直接API照样拒绝而没有新Assignment。报告与固定场景见 [CODE_TASK](tests/harness/CODE_TASK.md)、`tests/browser/run.mjs` 以及真实source失败的UI retry链。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。

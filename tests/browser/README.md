@@ -73,6 +73,9 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
    旧Grant实际得到403 `grant_scope`，没有新增 Ticket。再运行现有
    `/audit/verify`，保存完整审计链；这里的 Grant.revoked 属全局审计而非该
    Ticket的取消回执。此阶段不是正在执行的Agent撤权取消或多Grant清场。
+   同一未知状态在 UI 中给的是真正禁用的「先处理对账」而非可确认重试，force-click
+   不产生确认框或 `/retry` 请求；直接调用该 URL 仍为400，原Assignment/Attempt
+   和零Effects不变。保存的凭证明确包含这三项，而不是在汇总赋值时覆盖。
    恢复时回到对话页，并显式选定最初被取消的另一张Ticket，完成原401/
    认证恢复路径，避免把“当前最新 的reconciling”当成先前的取消。
 10. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
@@ -83,7 +86,7 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 读取/写入/取消及两次撤权后的空闲 poll 均各有一次显式 heartbeat：加上最初
 注册后的heartbeat，共 **6次heartbeat、5次有界Node poll**。新增 revoked
 Assignment 的 executor 调用数必须为 0。没有自动付费模型调用或长期loop。
-[当前完整10阶段PASS报告](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-Q86Qf1/result.json)。
+[当前完整10阶段PASS报告（含reconciling不可retry证明）](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-z9Mzwf/result.json)。
 
 ## 截图、日志、进程回收
 
