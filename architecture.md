@@ -424,6 +424,18 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 - 恢复采用**以实际受保护读取成功作证据**，不是`navigator.onLine`。真实owned Edge通过`browserContext.setOffline`触发实际 `net::ERR_INTERNET_DISCONNECTED`；此时新警示出现。恢复Online之后警示仍在，用户点击才发出新的GET并收回原Ticket ID/currentstate，继而才能收起。原Ticket的Report、Artifact、Effect、Assignment、GrantID/digest、原写文件SHA和原Grant未撤销状态都独立比对；这条case的记录中**没有POST/PUT/PATCH/DELETE**。中心audit链仍可验证。浏览器周边没有暗造一次核发、取消或重复执行作为“refresh”效果。
 - 这是**当前已加载的浏览器工作区**在客户端断网/恢复时的只读快照及访问真实性，不是全量Service Worker离线库、关闭浏览器后持久示图、任意写入already delivered判定、跨机exactly-once或真实移动OS的锁屏/进程被杀/网络切换。真手机与其他Host OS能力另需设备及宿主验证，不能用desktop context取代。
 
+### 4.1.3 同源PWA静态壳：可离线打开，不提供离线业务事实
+
+`apps/web/public/manifest.webmanifest`提供`zh-CN`、同源根scope/start_url、standalone显示模式和已有SVG图标；`index.html`正常link。由`ServeFile`按扩展名和实际文件返回manifest，`public_web_path`额外允许唯一的`.webmanifest`扩展，不改变其他路径扩展、根canonicalization、常规文件检查或2MiB限制。它落在**后台无需认证解释的已有公开静态资源**中，不向API公开目录。
+
+前端mount之后通过`startOfflineShell`为当前同源注册`sw.js`，`prepareOfflineShell`对缺功能、注册失败或`ready`失败返回`unsupported/unavailable`，不中止Vue挂载也不把失败写成ready。Service Worker在首次真实联网安装时读取并校验HTML，保存同源构建后的**有hash的`/assets/*.js|mjs|css`、manifest与favicon**，要求basic 200、严格MIME/canonical path和不含凭证的URL。安装失败删除当前v1部分缓存；激活仅清理`loom-shell-`前缀里的旧版本，不清理其他域或业务存储。后续document导航以网络优先并只更新合法的canonical `/`HTML，失败后只能读已经准备的该入口；受hash命名的资源和规定公开文件才cache-first。缓存值不授权读取项目数据。
+
+`/api`、所有带Authorization头请求、non-GET以及其它origin均不经其缓存/伪造回包。Ticket、Grant、Assignment、Artifact、Effect、Connect状态和credentials不会被它写入业务CacheStorage。带Auth或Foreign获取只能使用原传输结果；离线时走原失败处理。旧localStorage使用约定另按认证和近期读取数据验真，不冒充PWA数据可用或任务已完成。运行注册helper本身不启动新的server，也不替换现有DSH GUI。
+
+当前已用本机Edge 154.0.4258.53、native production build和Rust公开静态Root完成 online→offline→online：实际激活sw.js后，CacheStorage里恰为root index、manifest、favicon、实际hash JS/CSS共5项，逐项SHA等于构建bytes，无`/api`。`browserContext.setOffline`后以真实controller返回页面、可解析CSS及390px工作区，实际API fetch失败且已有未连接/旧快照提示出现，不存在以缓存登入或当前Grant有效的假象。fresh `browser.newContext`无安装历史时，离线首访仍得到真实`ERR_INTERNET_DISCONNECTED`。恢复在线并完成bootstrap、projects、tickets、nodes、grants、memories和preferences所有读取后状态恢复。
+
+这只是**先前联网安装过同一Origin静态壳之后的回访**，而非首访可离线发现、浏览器/OS重启全过程、真手机安装/锁屏/杀进程、离线Task持久缓存、后台执行、离线审批或任意Host能力。见[真实结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/result.json)、[源码绑定manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/manifest.json)及[实际离线截图](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/offline-shell.png)。
+
 ### 4.2 展示与协议边界
 
 - 不把所有 Agent / Worker 之间消息转发到用户主聊天流。

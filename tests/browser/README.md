@@ -35,6 +35,18 @@ node tests/browser/run.mjs --vite --keep-evidence
 尝试修复/删除厂商 updater 或用户全局数据，也不把厂商自己 updater 当作 owned
 Loom child 来清理。标准 Playwright path 不执行这段支线。
 
+## M0同源PWA静态壳的online / offline / online实测
+
+执行 `node tests/browser/offline-shell.mjs`。代码先build真实`apps/web`；Rust需先用 `cargo build --locked -p loom-concierge --bin loom` 更新当前bin，因为真实WebRoot fixture采用显式命令包装以附加`--web-dir`，不会隐式重编译旧bin。服务只在owned的随机loopback port开原生Concierge；不借用当前 DSH GUI/desktop profile。它通过标准 `launchPersistentContext` 从另一个独立owned Edge profile打开同源页面，并实际完成原生连接设置，不靠注入localStorage或修改业务fetch。
+
+校验包含：`/manifest.webmanifest`真实HTTP 200和`application/manifest+json`、`/sw.js` JavaScript MIME、注册scope/activated controller，以及真实CacheStorage中只有**root HTML、manifest、favicon和Vite生成的hash JS/CSS五份**公开静态资源。每项内容hash都必须与当前实际dist中对应bytes相符，不允许`/api`、跨源或token缓存。通用资源MIME和`public_web_path('.webmanifest')`的快速后端检查之外，browser构成最终安装证明，并非用假Cache替代品。
+
+- **`setOffline(true)` 后真实reload**必须从控制器取回缓存入口，`response.fromServiceWorker()`确实成立。进一步校验Vue挂载后的标题、CSS解析结果及390视口不横向溢出；已有“客户端读取已中断/此前快照/不等同Worker离线或Host停止”也必须仍由原始网络错误展示。另一次API `fetch`必须真失败，不能拿离线opened shell当数据读取成功。
+- 独立**从未安装**的fresh `browser.newContext`在首次offline导航中要得到真实 `ERR_INTERNET_DISCONNECTED`，明确不支持无线访问直接发明冷启动快照。这个隔离负例发生在实际warm刷新之前，避免错误页与主线 navigation交错。Chrome的error-page race不再次被误计为PWA缺失。
+- **恢复在线** 点击原生重新读取按钮后，要检查bootstrap、projects、tickets、nodes、grants、memories与preferences的**整套**读取逐个成功，并等真实connected节点状态恢复，而不是遇bootstrap 200就提前断言。临时fixture token不提供业务或Session授权，也没有生产浏览器/Playwright route伪业务响应。
+
+[真实完整结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/result.json)、[源码绑定manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/manifest.json)和[390px离线页面](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-mzlVF8/offline-shell.png)记录了实际Edge版本、asset hashes、no-API cache、controller导航、读取失败与恢复序列。真实Vue壳的见页面截图并不替代浏览器/手机OS进程重开、首访离线发现、生产HTTPS入口、移动真机锁屏/杀进程、离线业务快照、后台任务或新Harness能力。它也只覆盖同一个同源反射静态壳已经联网安装之后；**不能**宣称离线Ticket、Grant、Artifact/Effect授权或后台执行已可工作。测试结束只停止/清理owned server与context、删除临时profile，保留不含凭据的结果/截图。
+
 ## 真实任务步骤
 
 1. 构建现有 Vue。`scripts/fixtures/rust-server.mjs` 编译并启动独立 Rust。

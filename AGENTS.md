@@ -19,6 +19,7 @@
 | `tests/runner/README.md` | LocalNode 启动取消/注册凭据恢复、持久 admission、内容稳定回执、HTTP限流、首达预取消、篡改/缺digest负例与真实回放的验证入口和限制 | 只在这些围栏、输入快照和 receipt/耐久恢复契约改变时更新；区分 SyntheticCoordinator、本地文件、真实socket和真实DSH，不替代多机验收 |
 | `tests/sources/README.md` | 受限 SourceInstance / Thread / Trigger 入站身份、幂等事件、游标、认证与重启恢复的真实 Rust 验证入口及边界 | 只在来源协议、持久化、入口授权、事件与游标语义或测试覆盖变化时更新；不代替业务触发/审批、真实 IM、跨进程或多宿主验收。当前 Vue `SourceWorkPanel` 是明确run/read摘要消息流：`tests/sources/browser.mjs` 真实Edge验证消息→用户选existing精确Grant/内部file/worker→Artifact，不自动解释或授权 |
 | `tests/harness/CODE_TASK.md` | M0 受限示例源码修改、真实 DSH 工具、diff/真实 test Artifact、失败/retry/unknown 与恢复的本机证据 | 仅在受限代码工具、Grant scope、Session reuse、证据或生命周期变化时更新；不是开放代码编辑器、通用 Pipeline 或生产 Provider 支持 |
+| `tests/browser/README.md` 的“同源PWA静态壳”节 | 真实Edge的公开壳pre-cache、缓存类型/API隔离、离线导航及完整业务读取恢复 | 仅在manifest、Service Worker、静态Root规则或offline工作区契约变更时同步；只覆盖首次联网安装后同源静态shell，不代表离线业务、真手机或Host恢复 |
 | `tests/harness/ACK_REPLAY.md` | vendored DSH普通ACK响应丢失、独立持久outbox、真实SDK工具effect、Host重启与原准入恢复 | 仅在ACK投递、默认NodeState隔离或真实SDK回放契约变化时更新；不代替取消/撤权、任意Agent中断或跨Host/lifecycle验收 |
 | `tests/observations/README.md` | 受限 MemoryObservation 的来源/审阅证据、本地真实HTTP/浏览器入口和边界 | 只在来源/审阅契约、关联存储或验收变化时更新；不代替完整习惯学习架构 |
 

@@ -1,0 +1,18 @@
+{
+  "name": "Loom · 你的工作空间",
+  "short_name": "Loom",
+  "description": "Loom，把工作交给你的计算网络。清晰、可控、有据可查。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#f6f7f9",
+  "background_color": "#f6f7f9",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any"
+    }
+  ]
+}

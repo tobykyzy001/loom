@@ -2286,6 +2286,10 @@ mod tests {
             public_web_path("assets/index.js"),
             Some(PathBuf::from("assets/index.js"))
         );
+        assert_eq!(
+            public_web_path("manifest.webmanifest"),
+            Some(PathBuf::from("manifest.webmanifest"))
+        );
         for input in [
             "../../foo.js",
             ".env",
@@ -3357,8 +3361,21 @@ fn public_web_path(path: &str) -> Option<PathBuf> {
         relative.push(part);
     }
     let allowed = [
-        "html", "js", "mjs", "css", "svg", "png", "jpg", "jpeg", "webp", "ico", "woff", "woff2",
-        "json", "map",
+        "html",
+        "js",
+        "mjs",
+        "css",
+        "svg",
+        "png",
+        "jpg",
+        "jpeg",
+        "webp",
+        "ico",
+        "woff",
+        "woff2",
+        "json",
+        "map",
+        "webmanifest",
     ];
     relative
         .extension()?
