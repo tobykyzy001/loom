@@ -55,6 +55,7 @@ const client = new LoomClient({
 const skillActions = new SkillActions(client)
 const installActions = new InstallPlanActions(client)
 let detailVersion = 0
+let runDetailVersion = 0
 let sourceIdentityEpoch = 0
 const retainedSourceIds = new Map<string, string>()
 const rememberedSourceThreads = new Map<string, { source_id: string; client_thread_id: string }>()
@@ -66,17 +67,30 @@ function rethrowCredentialFailure(error: unknown): void {
 }
 let poll: ReturnType<typeof setInterval> | undefined
 
-const writesNeedingCredentials = new Set(['project', 'composer', 'source-write', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'preferences', 'enrollment'])
+const writesNeedingCredentials = new Set(['project', 'composer', 'source-write', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'enrollment'])
+function preferenceScope(ticketId?: string) { return ticketId ? `ticket:${ticketId}` : 'global' }
+function preferenceWriteKey(ticketId?: string) { return ticketId ? `preferences:ticket:${ticketId}` : 'preferences:global' }
+function preferenceReadKey(ticketId?: string) { return `${preferenceWriteKey(ticketId)}:read` }
+function preferenceCacheKey(ticketId?: string) { return `loom.preferences:${ticketId ?? 'global'}` }
+function writeNeedsCredentials(key: string): boolean {
+  // A preference read must still run against the authenticated server even when
+  // a candidate token is being checked. It only becomes a rejection after the
+  // actual 401, rather than blocking that read as though it were a write.
+  if (key.startsWith('preferences:') && key.endsWith(':read')) return false
+  return writesNeedingCredentials.has(key) || key === 'preferences:global' || key.startsWith('preferences:ticket:')
+}
 
 async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefined> {
   if (state.busy[key]) return undefined
-  if (writesNeedingCredentials.has(key) && state.credentialState !== 'valid') {
-    state.errors[key] = '请先完成连接认证，再发起这个操作。旧任务未被取消，新的执行也未被创建。'
+  const busyKey = key.startsWith('detail:') ? 'detail' : key
+  if (writeNeedsCredentials(key) && state.credentialState !== 'valid') {
+    state.errors[busyKey] = '请先完成连接认证，再发起这个操作。旧任务未被取消，新的执行也未被创建。'
     return undefined
   }
   const epoch = credentialEpoch
   // Existing run preserves accepted write responses while rejecting stale reads.
   state.busy[key] = true
+  state.busy[busyKey] = true
   state.errors[key] = ''
   try {
     const result = await action()
@@ -89,7 +103,7 @@ async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefi
     return result
   } catch (error) {
     if (epoch !== credentialEpoch || (error instanceof ApiError && error.code === 'credential_epoch_changed')) {
-      if (writesNeedingCredentials.has(key)) state.errors[key] = '凭据已变化。若服务端曾接受写入，只能使用相同的 Source event 与完整冻结参数明确重放；不能改绑或假定执行状态。'
+      if (writeNeedsCredentials(key)) state.errors[key] = '凭据已变化。若服务端曾接受写入，只能使用相同的 Source event 与完整冻结参数明确重放；不能改绑或假定执行状态。'
       return undefined
     }
     state.errors[key] = error instanceof Error ? error.message : '操作未完成，请稍后重试。'
@@ -106,61 +120,172 @@ async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefi
       }
     }
     return undefined
-  } finally { state.busy[key] = false }
+  } finally {
+    state.busy[key] = false
+    if (busyKey === key || !Object.entries(state.busy).some(([name, busy]) => name.startsWith('detail:') && busy)) state.busy[busyKey] = false
+  }
 }
 
 export async function loadAudit(id: string) {
-  const result = await run('audit', async () => auditFrom(await client.get<unknown>(`/audit?ticket_id=${encodeURIComponent(id)}`)))
-  if (result) state.audit = result
-  return result !== undefined
+  const version = detailVersion
+  const result = await run('audit', async () => client.get<unknown>(`/audit?ticket_id=${encodeURIComponent(id)}`))
+  if (result === undefined) return false
+  if (version !== detailVersion || state.selectedTicketId !== id || state.ticket?.id !== id) return false
+  state.audit = auditFrom(result)
+  return true
 }
 
-async function fetchPreferences(ticketId?: string) {
-  const suffix = ticketId ? `?ticket_id=${encodeURIComponent(ticketId)}` : ''
-  const value = await client.get<unknown>(`/preferences${suffix}`)
-  state.preferences = preferencesFrom(value)
-  state.expanded = state.preferences.expanded
-  localWrite(`loom.preferences:${ticketId ?? 'global'}`, String(state.expanded))
+// `state.expanded` is only the global default. `state.preferences` is the
+// effective view for the selected Ticket (or the global view when none is selected).
+let globalPreferenceVersion = 0
+const ticketPreferenceVersions = new Map<string, number>()
+interface AcceptedPreference extends Preferences { has_override: boolean }
+const acceptedPreferences = new Map<string, AcceptedPreference>()
+const preferenceReads = new Map<string, Promise<void>>()
+const preferenceWrites = new Map<string, PreferenceWrite>()
+interface PreferenceWrite {
+  promise: Promise<boolean>
+  previous: Preferences
+}
+function acceptedPreference(scope: string): AcceptedPreference {
+  const existing = acceptedPreferences.get(scope)
+  if (existing?.has_override || scope === 'global') {
+    return existing ? { ...existing } : { expanded: state.expanded, sender_filter: null, has_override: false }
+  }
+  // An effective no-row view must follow the current default. Its old bool is
+  // only an inherited display snapshot, never a user's per-Ticket override.
+  return { expanded: state.expanded, sender_filter: existing?.sender_filter ?? null, has_override: false }
+}
+function commitPreference(scope: string, value: Preferences, hasOverride: boolean) {
+  acceptedPreferences.set(scope, { ...value, has_override: hasOverride })
+  const ticketId = scope.startsWith('ticket:') ? scope.slice('ticket:'.length) : undefined
+  // Only an actual explicit override can be cached as a task-specific choice.
+  // A default effective value is not manufactured into a task override/permission.
+  if (ticketId) localWrite(preferenceCacheKey(ticketId), hasOverride ? String(value.expanded) : null)
+  else localWrite(preferenceCacheKey(), String(value.expanded))
+}
+function ticketPreferenceIsCurrent(ticketId: string): boolean {
+  return state.selectedTicketId === ticketId && state.ticket?.id === ticketId
+}
+function installPreferenceRead(scope: string, action: () => Promise<void>): Promise<void> {
+  const previous = preferenceReads.get(scope) ?? Promise.resolve()
+  const current = previous.then(action, action)
+  preferenceReads.set(scope, current)
+  const cleanup = () => { if (preferenceReads.get(scope) === current) preferenceReads.delete(scope) }
+  void current.then(cleanup, cleanup)
+  return current
+}
+export async function readPreferences(ticketId?: string, readVersion?: number): Promise<void> {
+  const scope = preferenceScope(ticketId)
+  let version = readVersion
+  if (ticketId) {
+    if (version === undefined || !ticketPreferenceVersions.has(ticketId)) version = (ticketPreferenceVersions.get(ticketId) ?? 0) + 1
+    if (version > (ticketPreferenceVersions.get(ticketId) ?? 0)) ticketPreferenceVersions.set(ticketId, version)
+  } else version ??= ++globalPreferenceVersion
+  // Queue only same-scope retries. The ordinary credential/run path handles
+  // real direct 401 responses and preserves per-scope read errors independently.
+  return installPreferenceRead(scope, () => run(preferenceReadKey(ticketId), () => fetchPreferences(version!, ticketId)))
 }
 
-async function readPreferences(ticketId?: string) {
-  state.expanded = cachedExpanded(ticketId)
-  state.preferences = { expanded: state.expanded, sender_filter: null }
-  state.errors.preferences = ''
-  try { await fetchPreferences(ticketId) } catch (error) {
+function preferencePayload(ticketId: string | undefined, raw: unknown): { data: Preferences; hasOverride: boolean } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new TypeError('Preference response must be an object')
+  const payload = raw as Record<string, unknown>
+  if (typeof payload.has_override !== 'boolean') throw new TypeError('Preference response must identify the real per-Ticket override')
+  if (ticketId) {
+    if (payload.scope !== 'ticket' || payload.ticket_id !== ticketId) {
+      throw new TypeError('Preference response does not belong to the selected Ticket')
+    }
+  } else if (payload.scope !== 'global' || payload.ticket_id !== null) {
+    throw new TypeError('Global preference response must carry its own scope identity')
+  }
+  // Never translate an inherited effective bool into an implicit Ticket override.
+  // Only an actual row/tested global default can map into has_override truthiness.
+  return { data: preferencesFrom(raw), hasOverride: ticketId ? payload.has_override as boolean : false }
+}
+
+async function fetchPreferences(version: number, ticketId?: string) {
+  const scope = preferenceScope(ticketId)
+  const key = preferenceReadKey(ticketId)
+  const currentVersion = ticketId ? ticketPreferenceVersions.get(ticketId) : globalPreferenceVersion
+  if (version !== currentVersion) return
+  // Outer run() owns this read key's busy lifecycle; do not lock it here twice.
+  if (!ticketId) {
+    const fallback = acceptedPreference(scope)
+    state.expanded = fallback.expanded
+    if (!state.selectedTicketId) state.preferences = fallback
+  } else if (ticketPreferenceIsCurrent(ticketId)) state.preferences = acceptedPreference(scope)
+  try {
+    const suffix = ticketId ? `?ticket_id=${encodeURIComponent(ticketId)}` : ''
+    const { data: value, hasOverride } = preferencePayload(ticketId,
+      await client.get<unknown>(`/preferences${suffix}`))
+    const currentVersion = ticketId ? ticketPreferenceVersions.get(ticketId) : globalPreferenceVersion
+    // An older read in the same Ticket must not replace a newer response.
+    // A current non-selected Ticket may update only its own verified cache,
+    // never the selected Ticket or another scope below.
+    if (version !== currentVersion) return
+    // An actual explicit PUT in the same scope wins over this older GET snapshot.
+    if (!state.busy[preferenceWriteKey(ticketId)]) {
+      commitPreference(scope, value, hasOverride)
+      if (ticketId) {
+        if (ticketPreferenceIsCurrent(ticketId)) state.preferences = { ...value }
+      } else {
+        state.expanded = value.expanded
+        state.preferences = state.selectedTicketId
+          ? acceptedPreference(preferenceScope(state.selectedTicketId))
+          : { ...value }
+      }
+    }
+  } catch (error) {
+    // Real 401/credential epoch errors go through common authentication handling;
+    // non-credential errors such as 403 or malformed identity remain scoped degrade.
     rethrowCredentialFailure(error)
-    // Other display-only degradations do not rewrite Ticket state or hide an auth failure.
-    state.errors.preferences = '显示偏好暂不可用，正在使用本地显示设置。'
+    const currentVersion = ticketId ? ticketPreferenceVersions.get(ticketId) : globalPreferenceVersion
+    if (version === currentVersion && (!ticketId || ticketPreferenceIsCurrent(ticketId))) {
+      const detail = error instanceof Error ? error.message : String(error)
+      state.errors[key] = `显示偏好暂不可用，保留当前显示快照，不把它保存为该任务或全局的同步选择。${detail}`
+    }
   }
 }
 
 export async function loadTicket(id: string) {
   const version = ++detailVersion
+  const preferenceVersion = (ticketPreferenceVersions.get(id) ?? 0) + 1
+  ticketPreferenceVersions.set(id, preferenceVersion)
   const value = await client.get<unknown>(`/tickets/${encodeURIComponent(id)}`)
   if (version !== detailVersion) return
-  state.ticket = ticketFrom(value)
+  const ticket = ticketFrom(value)
+  if (ticket.id !== id || state.selectedTicketId && state.selectedTicketId !== id) return
+  state.ticket = ticket
   state.selectedTicketId = id
   localWrite(TICKET_KEY, id)
-  await readPreferences(id)
-  state.errors.detail = ''
+  await readPreferences(id, preferenceVersion)
+  if (version === detailVersion && ticketPreferenceIsCurrent(id)) state.errors.detail = ''
 }
 
 export async function selectTicket(id: string, page: Page = 'conversation') {
-  if (state.busy.detail) return
+  if (state.busy[`detail:${id}`]) return
+  detailVersion++
   localWrite(TICKET_KEY, id)
   state.selectedTicketId = id
   state.ticket = null
+  // Before the server verifies a Ticket override, this view merely inherits the
+  // global default. Never treat a prior effective GET or fallback as a user choice.
+  state.preferences = acceptedPreference(preferenceScope(id))
   state.errors.detail = ''
   state.artifacts = {}
   navigate(page)
-  await run('detail', async () => {
+  const version = ++runDetailVersion
+  await run(`detail:${id}`, async () => {
     await loadTicket(id)
+    if (version !== runDetailVersion || state.selectedTicketId !== id) return
     try {
       const value = await client.get<unknown>(`/audit?ticket_id=${encodeURIComponent(id)}`)
+      if (version !== runDetailVersion || state.selectedTicketId !== id || state.ticket?.id !== id) return
       state.audit = auditFrom(value)
       state.errors.audit = ''
     } catch (error) {
       rethrowCredentialFailure(error)
+      if (version !== runDetailVersion || state.selectedTicketId !== id || state.ticket?.id !== id) return
       state.audit = []; state.errors.audit = '此任务的审计暂不可用，不能据此认定没有审计记录。'
     }
   })
@@ -186,12 +311,16 @@ export async function refreshWorkspace() {
     const id = preferred && state.tickets.some(ticket => ticket.id === preferred) ? preferred : null
     if (id) {
       await loadTicket(id)
+      if (state.credentialState === 'required') throw new ApiError(401, 'unauthorized', state.errors[preferenceReadKey(id)] || '客户端凭据已失效。', '/preferences')
+      const auditVersion = detailVersion
       try {
         const value = await client.get<unknown>(`/audit?ticket_id=${encodeURIComponent(id)}`)
+        if (auditVersion !== detailVersion || state.selectedTicketId !== id || state.ticket?.id !== id || state.ticket?.id !== id) return
         state.audit = auditFrom(value)
         state.errors.audit = ''
       } catch (error) {
         rethrowCredentialFailure(error)
+        if (auditVersion !== detailVersion || state.selectedTicketId !== id || state.ticket?.id !== id || state.ticket?.id !== id) return
         state.audit = []; state.errors.audit = '此任务的审计暂不可用，不能据此认定没有审计记录。'
       }
     } else {
@@ -201,6 +330,7 @@ export async function refreshWorkspace() {
       state.ticket = null
       state.audit = []
       await readPreferences()
+      if (state.credentialState === 'required') throw new ApiError(401, 'unauthorized', state.errors[preferenceReadKey()] || '客户端凭据已失效。', '/preferences')
     }
   })
 }
@@ -250,7 +380,7 @@ export function startPolling() {
   poll = setInterval(() => {
     const id = state.selectedTicketId
     const status = state.ticket?.status
-    if (state.credentialState !== 'required' && document.visibilityState === 'visible' && state.page === 'conversation' && id && status && ['pending', 'running', 'waiting_approval', 'cancel_requested', 'reconciling'].includes(status)) {
+    if (state.credentialState !== 'required' && document.visibilityState === 'visible' && state.page === 'conversation' && id && state.ticket?.id === id && status && ['pending', 'running', 'waiting_approval', 'cancel_requested', 'reconciling'].includes(status)) {
       void run('background', async () => {
         await loadTicket(id)
         const index = state.tickets.findIndex(ticket => ticket.id === id)
@@ -266,9 +396,12 @@ export function navigate(page: Page) {
 }
 export function startNewTicket() {
   detailVersion++
-   localWrite(TICKET_KEY, null)
+  runDetailVersion++
+  localWrite(TICKET_KEY, null)
   state.selectedTicketId = null
   state.ticket = null
+  // New Tickets have no row until an explicit PUT, so only show the global default.
+  state.preferences = { ...acceptedPreference('global'), expanded: state.expanded }
   void readPreferences()
   navigate('conversation')
 }
@@ -607,19 +740,56 @@ export async function loadArtifact(ticketId: string, artifact: ArtifactRef) {
 }
 
 export async function updatePreferences(expanded: boolean, senderFilter: string, ticketId?: string) {
-  const previous = { ...state.preferences }
-  state.expanded = expanded
-  state.preferences = { ...state.preferences, expanded, sender_filter: senderFilter || null }
-  localWrite(`loom.preferences:${ticketId ?? 'global'}`, String(expanded))
-  const suffix = ticketId ? `?ticket_id=${encodeURIComponent(ticketId)}` : ''
-  const result = await run('preferences', () => client.put<unknown>(`/preferences${suffix}`, { expanded, sender_filter: senderFilter || null }))
-  if (result === undefined) {
-    state.preferences = previous
-    state.expanded = previous.expanded
-    localWrite(`loom.preferences:${ticketId ?? 'global'}`, String(previous.expanded))
-    return false
+  const scope = preferenceScope(ticketId)
+  const key = preferenceWriteKey(ticketId)
+  // The per-scope writer starts from its own confirmed state snapshot.
+  if (state.busy[key] || preferenceWrites.has(scope)) return false
+  const previous = acceptedPreference(scope)
+  const value: Preferences = { ...previous, expanded, sender_filter: senderFilter || null }
+  if (ticketId) {
+    if (state.selectedTicketId === ticketId) state.preferences = { ...value }
+  } else {
+    state.expanded = expanded
+    state.preferences = state.selectedTicketId
+      ? acceptedPreference(preferenceScope(state.selectedTicketId))
+      : { ...value }
   }
-  return true
+  localWrite(preferenceCacheKey(ticketId), String(expanded))
+  const suffix = ticketId ? `?ticket_id=${encodeURIComponent(ticketId)}` : ''
+  // Capture the fixed request state. A later selection or an independent global PUT
+  // must not change this operation's rollback target.
+  let promise: Promise<boolean>
+  promise = run(key, () => client.put<unknown>(`/preferences${suffix}`, { expanded, sender_filter: senderFilter || null }))
+    .then(result => {
+      // run reports a pending HTTP result or an undefined failed request.
+      const write = preferenceWrites.get(scope)
+      // Ignore the unrelated scope while completing a deferred request.
+      state.busy[key] = false
+      if (write?.promise !== promise) return result !== undefined
+      preferenceWrites.delete(scope)
+      if (result !== undefined) {
+        // A completed explicit PUT is the user's override, not an inherited fallback.
+        commitPreference(scope, value, ticketId !== undefined)
+        if (!ticketId && state.selectedTicketId) state.preferences = acceptedPreference(preferenceScope(state.selectedTicketId))
+        return true
+      }
+      // Roll back this exact scope and only its actual prior override (if any).
+      acceptedPreferences.set(scope, previous)
+      const cachedNow = cachedExpanded(ticketId)
+      if (cachedNow === value.expanded) {
+        if (ticketId && previous.has_override) localWrite(preferenceCacheKey(ticketId), String(previous.expanded))
+        else if (ticketId) localWrite(preferenceCacheKey(ticketId), null)
+        else localWrite(preferenceCacheKey(), String(previous.expanded))
+      }
+      if (!ticketId) {
+        state.expanded = previous.expanded
+        if (state.selectedTicketId) state.preferences = acceptedPreference(preferenceScope(state.selectedTicketId))
+      }
+      if (ticketId ? state.selectedTicketId === ticketId : !state.selectedTicketId) state.preferences = { ...previous }
+      return false
+    })
+  preferenceWrites.set(scope, { previous, promise })
+  return promise
 }
 
 async function applyMemoryChange(action: () => Promise<unknown>) {

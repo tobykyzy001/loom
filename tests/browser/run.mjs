@@ -300,6 +300,9 @@ async function run() {
       await screenshot('03-desktop-write-artifact-confirmed-effect')
       result.actual_write = { byte_length: bytes.length, content_sha256: artifact.target_hash, effect_state: detail.effects[0].status, effect_id: evidence.effect_id, ticket_id: writeId }
     })
+    await phase('process-display-preferences-keep-global-and-ticket-distinct', async () => {
+      await verifyDisplayPreferences({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess })
+    })
     await phase('real-cancel-intent-before-Node-acknowledgement', async () => {
       const cancelId = await createTask({ objective: 'Synthetic browser stop intent', kind: 'edit_file', path: 'must-not-write.txt', content: 'No effect allowed.' })
       await page.getByRole('button', { name: '取消任务', exact: true }).click(); await page.getByRole('button', { name: '确认取消任务', exact: true }).click()
@@ -459,5 +462,136 @@ async function run() {
     return layout
   }
   async function reloadSuccess() { await page.reload(); await page.waitForFunction(() => document.querySelector('.next-action-card.success-action')?.textContent.includes('收到成功报告')) }
+}
+async function verifyDisplayPreferences({ page, admin, node, server, projectRoot, result, refreshTicket }) {
+  // Individual/global expected routes are asserted at their own PUT responses below,
+  // without forbidding the legitimate global (null ticket_id) write.
+  const ticketId = result.actual_write.ticket_id
+  const ticketBefore = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(ticketBefore.status, 'succeeded')
+  assert.equal(ticketBefore.assignments.length, 1)
+  // Exact response scope/payload is asserted below; no sensitive HTTP headers
+  // or transcript contents need to be emitted to the browser evidence log.
+  const owner = ticketBefore.assignments[0]
+  assert.equal(owner.lease_epoch, 1)
+  const sessionId = randomUUID()
+  const content = 'Node-authored bounded process message for display preference verification.'
+  const sessionRef = { harness: 'deterministic-local-node', host_api: 'loom.node.v1', protocol: 'loom.node.v1', session_id: sessionId, observed_seq: 1 }
+  await node.client.event({ ticketId, assignmentId: owner.id, leaseEpoch: owner.lease_epoch,
+    kind: 'session_link', sessionRef, summary: content })
+  const delivered = await node.client.dispatchOutbox()
+  assert.ok(delivered.some(item => item.kind === 'event' && item.status === 'delivered'), 'The actual node event must reach the authenticated Rust coordinator')
+  const withMessage = await admin.get(`/api/v1/tickets/${ticketId}`)
+  const matching = withMessage.messages.filter(message => message.kind === 'session_link' && message.content === content)
+  assert.equal(matching.length, 1)
+  assert.equal(matching[0].sender, 'worker')
+  const reference = typeof matching[0].session_ref === 'string' ? JSON.parse(matching[0].session_ref) : matching[0].session_ref
+  assert.deepEqual(reference, sessionRef)
+  await refreshTicket()
+
+  const activityTabs = page.getByRole('tablist', { name: '任务过程视图', exact: true })
+  await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
+  const localToggle = page.getByRole('checkbox', { name: '展开过程消息', exact: true })
+  // Switch labels are the real click targets: their native inputs are intentionally
+  // transparent and must not be treated as ordinary large clickable checkboxes.
+  assert.equal(await localToggle.isChecked(), false, 'The default selected ticket must keep process collapsed')
+  assert.equal(await page.locator('.collab-message').count(), 0)
+  await page.getByText('过程已折叠', { exact: true }).waitFor()
+  const oldGlobal = (await admin.get('/api/v1/preferences')).expanded
+  assert.equal(await localToggle.isChecked(), oldGlobal, 'A newly selected ticket follows the global default until it gets its own local choice')
+
+  const preferenceWrites = []
+  page.on('response', response => {
+    const url = new URL(response.url())
+    if (url.pathname === '/api/v1/preferences' && response.request().method() === 'PUT') {
+      preferenceWrites.push({ id: url.searchParams.get('ticket_id'), expanded: response.request().postDataJSON().expanded, status: response.status() })
+    }
+  })
+  const readyForToggle = async () => {
+    await page.waitForFunction(() => document.querySelector('.display-settings input[type="checkbox"]')?.disabled === false)
+  }
+  const expectPut = async (expanded, scopeId) => {
+    await readyForToggle()
+    const pending = page.waitForResponse(response => {
+      if (response.request().method() !== 'PUT') return false
+      const url = new URL(response.url())
+      return url.pathname === '/api/v1/preferences' && url.searchParams.get('ticket_id') === scopeId
+    })
+    // Wait for the actual enabled checkbox, then click its visible switch label.
+    if ((await localToggle.isChecked()) !== expanded) await localToggle.locator('xpath=parent::label').click()
+    assert.equal(await localToggle.isChecked(), expanded, 'The task checkbox and intended persist state must agree')
+    // The pending response must still arrive from the exact expected save scope.
+    const response = await pending
+    assert.equal(response.status(), 200)
+    const payload = response.request().postDataJSON()
+    assert.equal(payload.expanded, expanded)
+    assert.equal(payload.sender_filter, null)
+  }
+  const assertMessageCount = async (count) => {
+    assert.equal(await page.locator('.collab-message').count(), count)
+    if (count) assert.match(await page.locator('.collab-message').innerText(), /bounded process message for display preference verification/)
+    else await page.getByText('过程已折叠', { exact: true }).waitFor()
+  }
+  await expectPut(true, ticketId)
+  await localToggle.waitFor({ state: 'visible' })
+  await page.locator('.collab-message').waitFor()
+  await assertMessageCount(1)
+  await expectPut(false, ticketId)
+  await assertMessageCount(0)
+  await expectPut(true, ticketId)
+  await assertMessageCount(1)
+  await page.locator('.main-nav').getByRole('button', { name: '项目', exact: true }).click()
+  const globalToggle = page.getByRole('checkbox', { name: '默认展开过程消息', exact: true })
+  assert.equal(await globalToggle.isChecked(), false, 'A task-level override must not change the global default checkbox')
+  const globalPut = page.waitForResponse(response => response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/v1/preferences' && new URL(response.url()).searchParams.get('ticket_id') === null)
+  await globalToggle.locator('xpath=parent::label').click()
+  assert.equal((await globalPut).status(), 200, 'The explicit global preference request must complete its real persist step')
+  await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
+  await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
+  assert.equal(await localToggle.isChecked(), true, 'Global expansion cannot erase an explicit task expansion')
+  await assertMessageCount(1)
+  await page.locator('.main-nav').getByRole('button', { name: '项目', exact: true }).click()
+  await globalToggle.locator('xpath=parent::label').click()
+  await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
+  await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
+  assert.equal(await localToggle.isChecked(), true)
+  await assertMessageCount(1)
+  await refreshTicket()
+  await activityTabs.getByRole('tab', { name: '协作', exact: true }).click()
+  assert.equal(await localToggle.isChecked(), true, 'A reload must restore task preference from authorized persistence, not shared UI state')
+  await assertMessageCount(1)
+  await expectPut(false, ticketId)
+  await assertMessageCount(0)
+
+  const db = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'), { readOnly: true })
+  try {
+    assert.equal(db.prepare('SELECT value FROM settings WHERE key=?1').get('global_expanded').value, 'false', 'Global default was never modified by the task-only override')
+    assert.equal(db.prepare('SELECT expanded FROM preferences WHERE ticket_id=?1').get(ticketId).expanded, 0)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM messages WHERE ticket_id=?1 AND kind=?2').get(ticketId, 'session_link').count, 1, 'Collapsing a view never deletes authorized collaboration messages')
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM reports WHERE ticket_id=?1').get(ticketId).count, 1)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM artifacts WHERE ticket_id=?1').get(ticketId).count, 1)
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM effects WHERE ticket_id=?1').get(ticketId).count, 1)
+  } finally { db.close() }
+  const ticketAfter = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.deepEqual(ticketAfter.reports.map(row => row.id), withMessage.reports.map(row => row.id))
+  assert.deepEqual(ticketAfter.artifacts.map(row => row.id), withMessage.artifacts.map(row => row.id))
+  assert.deepEqual(ticketAfter.effects.map(row => row.effect_id || row.id), withMessage.effects.map(row => row.effect_id || row.id))
+  const bytes = await readFile(join(projectRoot, 'nested/browser-result.txt'))
+  assert.equal(sha256(bytes), result.actual_write.content_sha256, 'Display preferences cannot change the real file effect')
+  assert.equal(preferenceWrites.filter(row => row.id === ticketId).length, 4)
+  assert.equal(preferenceWrites.filter(row => row.id === null).length, 2)
+  assert.ok(preferenceWrites.every(row => row.status === 200 && typeof row.expanded === 'boolean'))
+  result.checks.push({
+    name: 'global folded default, per-Ticket expansion/collapse/reload preserve messages and file effects',
+    status: 'PASS',
+    detail: {
+      ticket_id: ticketId, session_id: sessionId, event_kind: 'session_link', sender: 'worker',
+      initial_global: false, explicit_ticket_expansion: true, final_task_expanded: false,
+      reports: ticketAfter.reports.length, artifacts: ticketAfter.artifacts.length, effects: ticketAfter.effects.length,
+      process_message_count: withMessage.messages.length, file_sha256: result.actual_write.content_sha256,
+      scoped_preference_put_responses: preferenceWrites,
+      event_provenance: `actual node-authored event through node.client.event for assignment=${owner.id}, not a claimed DSH transcript`,
+    },
+  })
 }
 await run()

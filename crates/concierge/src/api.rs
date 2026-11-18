@@ -165,6 +165,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preferences_report_exact_scope_and_explicit_override() {
+        const TOKEN: &str = "test-client-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let project_root = directory.path().join("project");
+        std::fs::create_dir(&project_root).unwrap();
+        let store = crate::store::Store::open(directory.path().join("db")).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        assert_eq!(
+            store
+                .conn()
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14,
+            "preference reads require no schema migration"
+        );
+        let now = crate::now();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','fixture',?1,'read_only',1,?2,'{}')",
+                params![project_root.to_string_lossy(), now],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default',?1,'binding-proof',?2)",
+                params![project_root.to_string_lossy(), now],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"read\"]',1,'digest',?1,'binding')",
+                [&now],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','public','token','online',?1,?2,?3,?4,?4)",
+                params![
+                    json!([{"ticket_kind":"read_summary","permission":"read"}]).to_string(),
+                    json!([{"worker_id":"default","status":"online"}]).to_string(),
+                    json!({"project_roots":{"project":project_root}}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+        let app = router(Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        }));
+        let request = |method: &str, uri: String, body: Option<Value>| {
+            let mut builder = axum::extract::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+            if body.is_some() {
+                builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
+            }
+            builder
+                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                .unwrap()
+        };
+        async fn json(response: axum::response::Response) -> Value {
+            assert_eq!(response.status(), 200);
+            serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+        let global = json(
+            app.clone()
+                .oneshot(request("GET", "/api/v1/preferences".into(), None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(global["scope"], "global");
+        assert_eq!(global["ticket_id"], Value::Null);
+        assert_eq!(global["has_override"], false);
+        assert_eq!(global["expanded"], false);
+        assert_eq!(global["sender_filter"], Value::Null);
+        assert_eq!(global.as_object().unwrap().len(), 5);
+
+        let mut tickets = Vec::new();
+        for objective in ["first preference fixture", "second preference fixture"] {
+            let ticket = json(
+                app.clone()
+                    .oneshot(request(
+                        "POST",
+                        "/api/v1/tickets".into(),
+                        Some(json!({
+                            "project_id":"project", "objective":objective,
+                            "kind":"read_summary", "relative_path":"README.md",
+                            "grant_id":"grant", "node_id":"node", "worker_id":"default"
+                        })),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(ticket["kind"], "read_summary");
+            tickets.push(ticket["id"].as_str().unwrap().to_owned());
+        }
+        let [ticket_a, ticket_b] = tickets.try_into().unwrap();
+        let get = |ticket: &str| {
+            request(
+                "GET",
+                format!("/api/v1/preferences?ticket_id={ticket}"),
+                None,
+            )
+        };
+        let put = |ticket: Option<&str>, expanded: bool, sender_filter: Value| {
+            request(
+                "PUT",
+                format!(
+                    "/api/v1/preferences{}",
+                    ticket.map_or(String::new(), |ticket| format!("?ticket_id={ticket}"))
+                ),
+                Some(json!({"expanded":expanded,"sender_filter":sender_filter})),
+            )
+        };
+        let inherited = json(app.clone().oneshot(get(&ticket_a)).await.unwrap()).await;
+        assert_eq!(inherited["scope"], "ticket");
+        assert_eq!(inherited["ticket_id"], ticket_a);
+        assert_eq!(inherited["has_override"], false);
+        assert_eq!(inherited["expanded"], false);
+        assert_eq!(inherited["sender_filter"], Value::Null);
+        assert_eq!(inherited.as_object().unwrap().len(), 5);
+
+        json(
+            app.clone()
+                .oneshot(put(Some(&ticket_a), false, json!(null)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let explicit_false = json(app.clone().oneshot(get(&ticket_a)).await.unwrap()).await;
+        assert_eq!(explicit_false["expanded"], false);
+        assert_eq!(explicit_false["has_override"], true);
+        assert!(explicit_false["updated_at"].is_string());
+        json(
+            app.clone()
+                .oneshot(put(Some(&ticket_a), true, json!("worker")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        json(
+            app.clone()
+                .oneshot(put(None, true, json!(null)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let explicit_a = json(app.clone().oneshot(get(&ticket_a)).await.unwrap()).await;
+        assert_eq!(explicit_a["scope"], "ticket");
+        assert_eq!(explicit_a["ticket_id"], ticket_a);
+        assert_eq!(explicit_a["expanded"], true);
+        assert_eq!(explicit_a["has_override"], true);
+        assert_eq!(explicit_a["sender_filter"], "worker");
+        let inherited_b = json(app.clone().oneshot(get(&ticket_b)).await.unwrap()).await;
+        assert_eq!(inherited_b["ticket_id"], ticket_b);
+        assert_eq!(inherited_b["expanded"], true);
+        assert_eq!(inherited_b["has_override"], false);
+        assert_eq!(inherited_b["sender_filter"], Value::Null);
+        assert_eq!(inherited_b.as_object().unwrap().len(), 5);
+
+        json(
+            app.clone()
+                .oneshot(put(Some(&ticket_b), false, json!(null)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let explicit_b = json(app.clone().oneshot(get(&ticket_b)).await.unwrap()).await;
+        assert_eq!(explicit_b["expanded"], false);
+        assert_eq!(explicit_b["has_override"], true);
+        assert_eq!(explicit_b["sender_filter"], Value::Null);
+        json(
+            app.clone()
+                .oneshot(put(None, false, json!(null)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        json(
+            app.clone()
+                .oneshot(put(None, true, json!(null)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let still_explicit_b = json(app.clone().oneshot(get(&ticket_b)).await.unwrap()).await;
+        assert_eq!(still_explicit_b["ticket_id"], ticket_b);
+        assert_eq!(still_explicit_b["expanded"], false);
+        assert_eq!(still_explicit_b["has_override"], true);
+        let unknown_ticket = "tkt_requested_before_ticket_exists";
+        let missing = json(app.clone().oneshot(get(unknown_ticket)).await.unwrap()).await;
+        assert_eq!(missing["scope"], "ticket");
+        assert_eq!(missing["ticket_id"], unknown_ticket);
+        assert_eq!(missing["expanded"], true);
+        assert_eq!(missing["has_override"], false);
+        assert_eq!(missing["sender_filter"], Value::Null);
+        assert_eq!(missing.as_object().unwrap().len(), 5);
+        let too_long = "t".repeat(161);
+        let rejected = app.oneshot(get(&too_long)).await.unwrap();
+        assert_eq!(rejected.status(), 400);
+    }
+
+    #[tokio::test]
     async fn model_descriptor_is_a_bounded_read_task_not_model_invocation() {
         const TOKEN: &str = "test-client-token-123456789012345";
         let directory = tempfile::tempdir().unwrap();
@@ -3332,15 +3550,36 @@ async fn preference(
     axum::extract::Query(query): axum::extract::Query<PreferenceQuery>,
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
-    if let Some(ticket) = query.ticket_id {
-        let pref = store.query("SELECT * FROM preferences WHERE ticket_id=?1", [ticket])?;
-        if let Some(reply) = pref.first() {
-            return Ok(Json(reply.clone()));
-        }
+    let Some(ticket) = query.ticket_id else {
+        return Ok(Json(json!({
+            "scope":"global",
+            "ticket_id":null,
+            "has_override":false,
+            "expanded":store.setting("global_expanded")==Some("true".into()),
+            "sender_filter":null,
+        })));
+    };
+    if ticket.trim().is_empty() || ticket.len() > 160 || ticket.chars().any(|c| c.is_control()) {
+        return Err(ApiError::bad(
+            "A bounded exact Ticket ID is required for preference filtering",
+        ));
     }
-    Ok(Json(
-        json!({"expanded":store.setting("global_expanded")==Some("true".into()),"sender_filter":null}),
-    ))
+    if let Some(mut reply) = store
+        .query("SELECT * FROM preferences WHERE ticket_id=?1", [&ticket])?
+        .into_iter()
+        .next()
+    {
+        reply["scope"] = json!("ticket");
+        reply["has_override"] = json!(true);
+        return Ok(Json(reply));
+    }
+    Ok(Json(json!({
+        "scope":"ticket",
+        "ticket_id":ticket,
+        "has_override":false,
+        "expanded":store.setting("global_expanded")==Some("true".into()),
+        "sender_filter":null,
+    })))
 }
 async fn update_preference(
     AppState(state): AppState<Arc<State>>,

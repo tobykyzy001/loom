@@ -7,7 +7,7 @@ import { formatTime, reportStatusTone, reportStatusLabel, safeJson } from '../li
 import AppIcon from './AppIcon.vue'
 import EmptyState from './EmptyState.vue'
 
-const props = defineProps<{ ticket: Ticket | null; audit: AuditEntry[]; expanded: boolean; preferences: Preferences; auditError?: string }>()
+const props = defineProps<{ ticket: Ticket | null; audit: AuditEntry[]; expanded: boolean; preferences: Preferences; preferencesBusy?: boolean; auditError?: string }>()
 const emit = defineEmits<{ save: [expanded: boolean, sender: string] }>()
 const tab = ref<'activity' | 'collaboration' | 'audit'>('activity')
 const localExpanded = ref(props.expanded)
@@ -51,8 +51,8 @@ const senders = computed(() => [...new Set(collaborations.value.map(item => item
         <div v-if="ticket.effects?.length" class="effect-list"><h3 class="aside-heading">副作用对账</h3><div v-for="effect in ticket.effects" :key="effect.effect_id" class="effect-item"><span class="status-dot" :class="effect.status === 'confirmed' ? 'success' : 'waiting'" /><span>{{ effect.status === 'confirmed' ? '已确认' : effect.status === 'needs_person' ? '需要人工处理' : effect.status === 'unknown' ? '结果未知' : '已记录' }}</span><code>{{ effect.effect_id.slice(0, 12) }}</code></div></div>
       </div>
       <div v-else-if="tab === 'collaboration'" class="activity-content">
-        <div class="display-settings"><span class="eyebrow">显示偏好 · 单任务</span><label class="switch-label"><input v-model="localExpanded" type="checkbox" @change="emit('save', localExpanded, sender)" /><span class="switch" />展开过程消息</label></div>
-        <label v-if="senders.length" class="sender-filter"><AppIcon name="filter" :size="13" /><select v-model="sender" @change="emit('save', localExpanded, sender)"><option value="">全部发送者</option><option v-for="item in senders" :key="item" :value="item">{{ item }}</option></select></label>
+        <div class="display-settings"><span class="eyebrow">显示偏好 · 单任务</span><label class="switch-label"><input v-model="localExpanded" type="checkbox" :disabled="preferencesBusy" @change="emit('save', localExpanded, sender)" /><span class="switch" />展开过程消息</label></div>
+        <label v-if="senders.length" class="sender-filter"><AppIcon name="filter" :size="13" /><select v-model="sender" :disabled="preferencesBusy" @change="emit('save', localExpanded, sender)"><option value="">全部发送者</option><option v-for="item in senders" :key="item" :value="item">{{ item }}</option></select></label>
         <template v-if="localExpanded && visibleMessages.length"><article v-for="{ message, delegation } in visibleMessages" :key="message.id" class="collab-message"><div><strong>{{ message.sender ?? message.sender_id ?? '执行者' }}</strong><span>{{ formatTime(message.created_at) }}</span></div><p>{{ message.content }}</p>
           <section v-if="delegation" class="delegation-source" data-testid="delegation-source">
             <h4>已核验的委派来源</h4>

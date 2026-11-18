@@ -22,7 +22,7 @@ import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
-import { useWorkspace, refresh, reconnect, navigate, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory, createSourceWorkTransport, createTicketFromSource, sourceOperationError } from './state/workspace'
+import { useWorkspace, refresh, reconnect, navigate, readPreferences, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory, createSourceWorkTransport, createTicketFromSource, sourceOperationError } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
 import { grantOperationsSummary } from './lib/permissions'
 import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate, InstallOutcome, InstallPlan, InstallTarget, SourceWorkDraft, Ticket } from './api/types'
@@ -58,6 +58,7 @@ const navItems: { page: Page; label: string; icon: IconName }[] = [
   { page: 'memories', label: '记忆', icon: 'memories' }, { page: 'skills', label: '技能', icon: 'sparkle' }, { page: 'access', label: '权限', icon: 'access' },
 ]
 const ticketOpen = computed(() => state.page === 'conversation' && !!state.selectedTicketId)
+const preferenceError = computed(() => Object.entries(state.errors).filter(([key, message]) => key.startsWith('preferences:') && message).map(([, message]) => message).join(' '))
 const sourceError = computed(() => sourceFeedback.value || sourceOperationError())
 
 let confirmationVersion = 0
@@ -87,7 +88,7 @@ function changePage(page: Page) {
   navigate(page)
   if (page === 'devices') void loadModelInventory()
   if (['devices', 'access', 'memories'].includes(page)) void loadResources()
-  if (page === 'projects') void refresh()
+  if (page === 'projects') { void refresh(); void readPreferences() }
   if (page === 'skills') void loadSkillEvidence()
   if (page === 'plans') void loadInstallPlans()
 }
@@ -255,7 +256,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
           <TicketDetail v-if="ticketOpen && ticket && !state.busy.detail" :ticket="ticket" :projects="projects" :artifacts="state.artifacts" :busy="state.busy['ticket-write']" :artifact-busy="Object.keys(state.busy).some(k => k.startsWith('artifact:') && state.busy[k])" :errors="state.errors" @cancel="ticketCancel" @retry="ticketRetry" @approve="approval" @artifact="artifact => ticket && void loadArtifact(ticket.id, artifact)" @close="startNewTicket" />
           <TicketList v-if="!ticketOpen" :tickets="tickets.slice(0, 20)" :projects="projects" :selected-id="state.selectedTicketId" @select="selectTask" />
         </section>
-        <ActivityPanel :class="{ 'mobile-inline-activity': ticketOpen }" :ticket="ticketOpen ? ticket : null" :audit="state.audit" :expanded="expanded" :preferences="state.preferences" :audit-error="state.errors.audit" @save="(value, sender) => void updatePreferences(value, sender, state.selectedTicketId ?? undefined)" />
+        <ActivityPanel :class="{ 'mobile-inline-activity': ticketOpen }" :ticket="ticketOpen ? ticket : null" :audit="state.audit" :expanded="ticketOpen ? state.preferences.expanded : expanded" :preferences="state.preferences" :preferences-busy="!!state.busy[state.selectedTicketId ? `preferences:ticket:${state.selectedTicketId}` : 'preferences:global']" :audit-error="state.errors.audit" @save="(value, sender) => { const id = state.selectedTicketId ?? undefined; void updatePreferences(value, sender, id) }" />
         <button v-if="!ticketOpen" class="button secondary source-open-button" @click="openSourceWork"><AppIcon name="conversation" :size="15" />打开受限 Source</button>
       </template>
       <InstallPlansView v-else-if="state.page === 'plans'" :plans="state.installPlans" :policy="state.installPlanPolicy" :loading="state.busy.plans" :busy="state.busy['plan-write']" :error="state.errors['plan-write']" :read-error="state.errors.plans" @create="createPlan" @approve="approveTarget" @rollback="rollbackTarget" @observe="observeTarget" @refresh="void loadInstallPlans()" />
@@ -264,12 +265,12 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
         <DevicesView ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" :inventory="state.modelInventory" :inventory-loading="state.busy.models" :inventory-error="state.errors.models" @enroll="void enroll()" @refresh-inventory="void loadModelInventory()" />
         <p v-if="state.errors.enrollment" class="form-error" role="alert">{{ state.errors.enrollment }}</p>
       </template>
-      <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy.preferences" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />
+      <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy['preferences:global']" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />
       <SkillsView v-else-if="state.page === 'skills'" :data="state.skillData" :tickets="tickets" :projects="projects" :loading="state.busy.skills" :busy="state.busy['skill-write']" :error="!state.busy.skills ? state.errors.skills : ''" :load-error="state.errors.skills" @refresh="void loadSkillEvidence()" @replay="skillReplay" @review="skillReview" @ticket="selectTask" />
       <MemoriesView v-else-if="state.page === 'memories'" :memories="state.memories" :candidates="memoryCandidateData" :projects="projects" :busy="state.busy['memory-write']" :error="state.errors['memory-write'] || (!state.busy.resources ? state.errors.resources : '')" @save="value => void saveMemory(value)" @delete="removeMemory" @review="reviewCandidate" @source="selectTask" />
       <AccessView v-else-if="state.page === 'access'" :grants="state.grants" :projects="projects" :nodes="nodes" :busy="state.busy['grant-write']" :error="state.errors['grant-write'] || (!state.busy.resources ? state.errors.resources : '')" @create="grantCreate" @revoke="revokeGrantWithConfirmation" />
       <HelpView v-else @connect="showConnection = true" />
-      <p v-if="state.errors.preferences" class="preferences-error" role="status">{{ state.errors.preferences }}</p>
+      <p v-if="preferenceError" class="preferences-error" role="status">{{ preferenceError }}</p>
     </main>
     <button v-if="!ticketOpen" class="mobile-new-task button primary" aria-label="新建任务" @click="startNewTicket"><AppIcon name="plus" :size="20" /></button>
     <nav class="mobile-tabs" aria-label="移动端工作空间"><button v-for="item in navItems.slice(0, 4)" :key="item.page" :class="{ active: state.page === item.page }" :aria-current="state.page === item.page ? 'page' : undefined" @click="changePage(item.page)"><AppIcon :name="item.icon" :size="20" /><span>{{ item.label }}</span></button><button :class="{ active: showMore || ['memories', 'skills', 'plans', 'access', 'help'].includes(state.page) }" :aria-expanded="showMore" @click="showMore = !showMore"><AppIcon name="menu" :size="20" /><span>更多</span></button></nav>
