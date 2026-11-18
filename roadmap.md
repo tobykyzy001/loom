@@ -92,7 +92,7 @@
 
 **用户撤权与普通未领取工作的实际控制也已有独立的 UI 证明**：在 Edge 中创建普通pending/running Assignment，但不先让Node领取，随后从权限页选择该精确Grant、确认撤销，收到同一Grant ID的200、真实`revoked_at`和版本1→2。原合同保持 immutable digest和原Assignment/Lease epoch，旧Lease不续，Ticket进入reconciling而非自动cancelled。两次真实Node poll均按原`LocalNodeRunner`返回`assignment:null`；临时fail-on-call executor未调用，outbox、报告、Artifact、Effect及目标文件保持零效果，以前成功Artifact的byte/hash不受影响。复用此已撤Grant的合法Ticket请求得到403 `grant_scope`且没有新任务，审计SHA链再次验证。
 
-前端修复了真实Grant SQL不返回独立status却让卡片仍显示有效的问题，状态徽标以revoked_at优先；`revokeGrant()`也只在确认id正确的撤销receipt且读取到最新资源后完成。读取失败要明确区分“中心确认撤权但还没有最新快照”，不把旧有效badge当作实时权限。确认操作在POST后的资源刷新中也不会重复进入。普通已受理源码撤权阶段与此**未acknowledged**的正常用户权限收回不是一回事，不能把后者误宣为取消/终止/自动重启Agent。原有普通cancelled Ticket和401 credential recovery在同一完整真实浏览器回归中仍通过，10阶段详细证据见 `tests/browser/README.md`。
+前端修复了真实Grant SQL不返回独立status却让卡片仍显示有效的问题，状态徽标以revoked_at优先；`revokeGrant()`也只在确认id正确的撤销receipt且读取到最新资源后完成。读取失败要明确区分“中心确认撤权但还没有最新快照”，不把旧有效badge当作实时权限。确认操作在POST后的资源刷新中也不会重复进入。普通已受理源码撤权阶段与此**未acknowledged**的正常用户权限收回不是一回事，不能把后者误宣为取消/终止/自动重启Agent。原有普通cancelled Ticket和401 credential recovery这同一回归中仍通过，现在已是含新撤权时序的11阶段，详细证据见 `tests/browser/README.md`。
 
 **真正失败才允许重新尝试，Unknown结果不能重放成新执行。** 公开retry现仅面向已failed且没有停止意图的原Ticket，仍要求在它的原Grant未撤销时创建新Assignment/epoch，digest、Node/worker/binding与历史Report/Artifact/Effect不被替换。pending、running、cancelled、succeeded、reconciling等直接retry不再签发多余作业或伪造retry审计。等待人工批准的首Attempt走单独approved/source校验后共享签发路径，未被误包进failed-only电网。前端对未知对账提供不可提交的说明/禁用操作，并在用户确认前重新核对当前failed对象和选中ID，不以隐藏按钮代替服务端权限。
 

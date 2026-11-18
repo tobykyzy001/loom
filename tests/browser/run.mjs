@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -163,7 +163,7 @@ async function run() {
       assert.ok(binding.id && grant.grant.id)
       await assert.rejects(() => LocalNodeRunner.create({ baseUrl: server.baseUrl, stateDir: join(root, 'duplicate-state'), artifactDir: join(root, 'duplicate-artifacts'), enrollmentCode: enrollment.code,
         projectRoots: { [projectId]: projectRoot }, registration: { workerId: 'default', harnessKind: 'deterministic-local-http', profileId: 'rejected-reused-code' } }), /single-use|enrollment|denied/i)
-      result.fixture = { synthetic_project_root_in_temp: true, exact_binding: true, explicit_read_write_grant: true, single_use_code_reuse_rejected: true, worker_id: 'default', node_id: node.nodeId }
+      result.fixture = { synthetic_project_root_in_temp: true, exact_binding: true, binding_id: binding.id, explicit_read_write_grant: true, single_use_code_reuse_rejected: true, worker_id: 'default', node_id: node.nodeId }
       appOrigin = server.baseUrl
     })
     if (flags.has('--vite')) await phase('temporary-vite-only-when-requested', async () => {
@@ -321,6 +321,9 @@ async function run() {
     await phase('real-ui-grant-revocation-before-first-Node-poll', async () => {
       await verifyGrantRevocationBeforeAdmission({ page, admin, node, server, projectRoot, result, createTask, tick })
     })
+    await phase('confirm-then-revoke-never-creates-a-retry', async () => {
+      await verifyGrantLossDuringRetryConfirmation({ page, admin, node, projectRoot, projectId, result, createTask, tick, capture: screenshot })
+    })
     await phase('authentication-expiry-and-verified-workspace-recovery', async () => {
       // The prior permission proof intentionally finishes on AccessView; restore
       // the conversation before exercising the existing new-task/auth controls.
@@ -420,8 +423,8 @@ async function run() {
       await screenshot('05-narrow-simulated-viewport-permissions')
       result.mobile_viewport = `PASS 390x844 Chromium viewport only (${layout.document}px scroll width); NOT phone, lockscreen, network-switch or accessibility`
     })
-    assert.equal(heartbeatCount, 6, 'Initial heartbeat plus rked read/write/cancel and two explicitly blocked revocation polls')
-    result.heartbeat = { calls: heartbeatCount, meaning: 'one initial + one bounded call before read/write/cancel and the two revoked-before-first-poll checks; no open-loop heartbeat' }
+    assert.equal(heartbeatCount, 8, 'Initial heartbeat plus normal tasks, two empty revoking polls, one failed read and one post-revoke idle check')
+    result.heartbeat = { calls: heartbeatCount, meaning: 'one initial + one bounded call before ordinary executions, two revoked-before-admission checks, a genuine failed read and a permission-loss idle check; no open-loop heartbeat' }
     await bounded(node.client.dispatchOutbox(), 'final outbox drain')
     result.exclusions = ['No real phone, lockscreen, network switching, accessibility audit', 'No Tauri/live paid LLM/multi-node delivery/host DSH Plugin claimed', 'No DSH/Desktop profile, live user browser session or credentials', 'No shared DSH GUI port or existing browser CDP endpoint attached']
     await cleanup()
@@ -786,5 +789,142 @@ async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server,
   assert.equal(result.revocation_before_first_poll.reconciling_ui_no_retry_offer, true)
   assert.equal(result.revocation_before_first_poll.reconciling_retry_browser_posts, 0)
   assert.deepEqual(result.revocation_before_first_poll.direct_reconciling_retry, { status: 400, new_assignment: false })
+}
+async function verifyGrantLossDuringRetryConfirmation({ page, admin, node, projectRoot, projectId, result, createTask, tick, capture }) {
+  // Separate freshly authorized Grant for this negative fixture. It never replaces
+  // the authority of any previously revoked Ticket, nor revives its pending work.
+  const independentGrant = await admin.post('/api/v1/grants', { project_id: projectId,
+    project_binding_id: result.fixture.binding_id, node_id: node.nodeId, worker_id: 'default', operations: ['read', 'write'] })
+  const grantId = independentGrant.grant.id
+  assert.notEqual(grantId, result.revocation_before_first_poll.grant_id)
+  const inputPath = join(projectRoot, 'input.txt')
+  const hiddenPath = join(projectRoot, 'retry-confirmation-held-input.txt')
+  const originalBytes = await readFile(inputPath)
+  // Ticket summaries do not carry each immutable Report/Artifact/Effect collection.
+  // Fetch those separately through the authenticated detail API before moving the fixture file.
+  const ticketSummaries = (await admin.get('/api/v1/tickets')).tickets
+  const olderTickets = await Promise.all(ticketSummaries.map(ticket => admin.get(`/api/v1/tickets/${ticket.id}`)))
+  const historyBefore = new Map(olderTickets.map(ticket => [ticket.id, {
+    status: ticket.status, attempt: ticket.attempt,
+    reports: ticket.reports.map(report => report.id).sort(),
+    artifacts: ticket.artifacts.map(artifact => ({ id: artifact.id, sha256: artifact.sha256 })).sort((a, b) => a.id.localeCompare(b.id)),
+    effects: ticket.effects.map(effect => effect.id ?? effect.effect_id).sort(),
+  }]))
+  await rename(inputPath, hiddenPath)
+  let failedId
+  try {
+    failedId = await createTask({ objective: 'Synthetic failed read awaiting late Grant revocation', kind: 'read_summary', path: 'input.txt' })
+    await tick('failed')
+  } finally {
+    await rename(hiddenPath, inputPath)
+    assert.deepEqual(await readFile(inputPath), originalBytes, 'The driver restores its explicit clean baseline, not an Agent rollback')
+  }
+  const failedBeforeRevocation = await admin.get(`/api/v1/tickets/${failedId}`)
+  assert.equal(failedBeforeRevocation.status, 'failed')
+  assert.equal(failedBeforeRevocation.attempt, 1)
+  assert.equal(failedBeforeRevocation.assignments.length, 1)
+  assert.equal(failedBeforeRevocation.reports.length, 1)
+  assert.equal(failedBeforeRevocation.reports[0].state, 'failed')
+  assert.equal(failedBeforeRevocation.artifacts.length, 0)
+  assert.equal(failedBeforeRevocation.effects.length, 0)
+  assert.equal(failedBeforeRevocation.grant_id, grantId)
+  const firstAssignment = failedBeforeRevocation.assignments[0]
+  assert.ok(firstAssignment.acknowledged_at)
+  assert.ok(firstAssignment.last_report_at)
+  // The failed Ticket is explicitly selected through the real task list before opening its retry confirmation.
+  if ((await page.locator('.ticket-detail h1').count())) await page.getByRole('button', { name: '新的任务', exact: true }).click()
+  const failedRow = page.locator('.ticket-item').filter({ hasText: 'Synthetic failed read awaiting late Grant revocation' })
+  await failedRow.click()
+  await page.locator('.ticket-detail').getByText('这项任务未能完成', { exact: true }).waitFor()
+  await page.getByRole('button', { name: '明确新尝试', exact: true }).click()
+  await page.getByRole('button', { name: '创建新尝试', exact: true }).waitFor()
+  const stageBefore = await page.evaluate(() => ({
+    retry_confirmation_open: Boolean(document.querySelector('.confirm-modal')),
+    selected_ticket: localStorage.getItem('loom.selected-ticket'),
+  }))
+  assert.equal(stageBefore.retry_confirmation_open, true)
+  assert.equal(stageBefore.selected_ticket, failedId)
+  const revocation = await admin.post(`/api/v1/grants/${grantId}/revoke`, {})
+  assert.equal(revocation.revoked, true)
+  assert.equal(revocation.grant_id, grantId)
+  const subsequentGrant = (await admin.get('/api/v1/grants')).grants.find(grant => grant.id === grantId)
+  assert.equal(subsequentGrant.version, 2)
+  assert.ok(subsequentGrant.revoked_at)
+  const failedResponse = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === `/api/v1/tickets/${failedId}/retry`)
+  await page.getByRole('button', { name: '创建新尝试', exact: true }).click()
+  const refused = await failedResponse
+  assert.equal(refused.status(), 400)
+  const message = (await refused.json()).error?.message ?? ''
+  assert.match(message, /Grant revoked/)
+  const modal = await page.locator('.confirm-modal').innerText()
+  assert.match(modal, /Grant revoked/, 'The real confirmation must show the current revoked-grant failure, not retain an optimistic success')
+  const modalErrors = await page.getByRole('alert').allTextContents()
+  assert.ok(modalErrors.some(text => text.includes('Grant revoked')))
+  await capture('07-late-grant-revocation-in-retry-confirm')
+
+  const rejectedDetail = await admin.get(`/api/v1/tickets/${failedId}`)
+  assert.equal(rejectedDetail.status, 'failed', 'Permission loss does not turn a known failed operation into a new successful / unknown retried state')
+  assert.equal(rejectedDetail.attempt, 1)
+  assert.equal(rejectedDetail.assignments.length, 1)
+  assert.equal(rejectedDetail.assignments[0].id, firstAssignment.id)
+  assert.equal(rejectedDetail.assignments[0].lease_epoch, firstAssignment.lease_epoch)
+  assert.equal(rejectedDetail.grant_digest, failedBeforeRevocation.grant_digest)
+  assert.equal(rejectedDetail.reports.length, 1)
+  assert.deepEqual(rejectedDetail.reports.map(report => report.id), failedBeforeRevocation.reports.map(report => report.id))
+  assert.equal(rejectedDetail.artifacts.length + rejectedDetail.effects.length, 0)
+  assert.ok([false, 0].includes(rejectedDetail.cancel_requested))
+  const pendingActionAfter = await page.locator('.confirm-modal').count()
+  assert.equal(pendingActionAfter, 1, 'The error must remain visible, without pretending to hide a failed auth attempt as accepted')
+  await page.getByRole('button', { name: '返回检查', exact: true }).click()
+  assert.equal(await page.locator('.confirm-modal').count(), 0)
+  const oldExecutor = node.executor
+  const localBefore = JSON.stringify({ assignments: node.state.data.assignments, completions: node.state.data.completions })
+  let calls = 0
+  node.executor = { execute: async () => { calls++; throw new Error('Failed Grant revocation reached the worker despite the server refusal') } }
+  try { await tick('idle') } finally { node.executor = oldExecutor }
+  assert.equal(calls, 0)
+  assert.equal(JSON.stringify({ assignments: node.state.data.assignments, completions: node.state.data.completions }), localBefore)
+  assert.equal(node.state.data.outbox.length, 0)
+  await page.locator('.main-nav').getByRole('button', { name: '权限', exact: true }).click()
+  const revokedCard = page.locator('.grant-item').filter({ hasText: grantId })
+  await revokedCard.locator('.status-badge').filter({ hasText: '已撤销', exact: true }).waitFor()
+  assert.equal(await revokedCard.getByRole('button', { name: '撤销授权', exact: true }).count(), 0)
+  const finalTicketSummaries = (await admin.get('/api/v1/tickets')).tickets
+  const finalTickets = await Promise.all(finalTicketSummaries.map(ticket => admin.get(`/api/v1/tickets/${ticket.id}`)))
+  assert.equal(finalTickets.length, historyBefore.size + 1, 'Only the deliberately failed read is added; no silent replacement or missing historical Tickets')
+  const finalIds = new Set(finalTickets.map(ticket => ticket.id))
+  assert.equal(finalIds.size, finalTickets.length, 'Every final Ticket has its own immutable ID, not aliases reused across scope')
+  assert.ok(finalIds.has(failedId), 'The single failed fixture is still present after the revocation and denial')
+  for (const oldId of historyBefore.keys()) {
+    assert.ok(finalIds.has(oldId), `Historical Ticket ${oldId} must remain queryable after the grant loss; it may not be deleted or hidden from the history junction`)
+  }
+  for (const ticket of finalTickets) {
+    if (ticket.id === failedId) continue
+    const old = historyBefore.get(ticket.id)
+    assert.ok(old, 'No extra hidden replacement Ticket may be created for a denied retry')
+    assert.equal(ticket.status, old.status)
+    assert.equal(ticket.attempt, old.attempt)
+    assert.deepEqual(ticket.reports.map(report => report.id).sort(), old.reports)
+    assert.deepEqual(ticket.artifacts.map(artifact => ({ id: artifact.id, sha256: artifact.sha256 })).sort((a, b) => a.id.localeCompare(b.id)), old.artifacts,
+      'Older byte-backed Artifact IDs and hashes remain immutable')
+    assert.deepEqual(ticket.effects.map(effect => effect.id ?? effect.effect_id).sort(), old.effects)
+  }
+  const audit = (await admin.get('/api/v1/audit/verify'))
+  assert.equal(audit.valid, true)
+  await capture('08-revoked-grant-after-confirm-refusal')
+  result.failed_late_revocation = {
+    ticket_id: failedId, grant_id: grantId,
+    confirmation_open_before_revocation: stageBefore.retry_confirmation_open,
+    grant_version: subsequentGrant.version, revoked_at: subsequentGrant.revoked_at,
+    denial_status: refused.status(), reason: message,
+    same_ticket: true, same_assignment: rejectedDetail.assignments[0].id === firstAssignment.id,
+    attempt_preserved: rejectedDetail.attempt, grant_digest_preserved: rejectedDetail.grant_digest === failedBeforeRevocation.grant_digest,
+    report_ids: rejectedDetail.reports.map(report => report.id),
+    no_new_artifacts_or_effects: rejectedDetail.artifacts.length + rejectedDetail.effects.length === 0,
+    node_executor_calls_after_denial: calls,
+    historical_records_unchanged: true, audit_chain_verified: true,
+    separate_grant_not_substituting_old_revoked_ticket: true,
+  }
 }
 await run()

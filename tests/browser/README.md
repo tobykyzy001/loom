@@ -78,15 +78,21 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
    和零Effects不变。保存的凭证明确包含这三项，而不是在汇总赋值时覆盖。
    恢复时回到对话页，并显式选定最初被取消的另一张Ticket，完成原401/
    认证恢复路径，避免把“当前最新 的reconciling”当成先前的取消。
-10. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
+10. 对已明确 failed 的读任务，先打开重试确认框，再使**同一Grant**真正失效，之后才确认。
+    这是同一Project/Node/Binding上的独立测试授权，不是借用/复活先前被撤票
+    的Grant。实际结果为 `/tickets/{id}/retry` 返回400 `Grant revoked`，模态
+    中展示真实错误、允许“返回检查”；它仍不表示获得新Grant。原失败状态、
+    attempt=1、Assignment/lease epoch、原始digest/Report和零新Artifact/Effect
+    不变，Node之后也没有执行，outbox为空。最终前端Permission卡显示
+    已撤销、cancel_requested仍false、完整历史ID集合不变且仅多本失读任务。
+    再核对 `/audit/verify`。
+11. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
     overflow。不是手机、锁屏、触屏、换网或 accessibility 验收。
-11. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
+12. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
     已不可用”的错误绿灯。
 
-读取/写入/取消及两次撤权后的空闲 poll 均各有一次显式 heartbeat：加上最初
-注册后的heartbeat，共 **6次heartbeat、5次有界Node poll**。新增 revoked
-Assignment 的 executor 调用数必须为 0。没有自动付费模型调用或长期loop。
-[当前完整10阶段PASS报告（含reconciling不可retry证明）](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-z9Mzwf/result.json)。
+初始heartbeat之后，普通read/write/cancel、两次revoked-before-poll、一次真实失读和一次确认后撤权idle各有一次显式heartbeat：共 **8次heartbeat、7次有界Node poll**。新 revoked unclaimed Assignment 的 executor调用为 0；失读被拒重试后也没有 worker 最后执行。没有自动付费模型调用或长期loop。
+[完整11阶段PASS报告（确认框打开后撤权及其不可用重试证明）](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-OMClbB/result.json)。另附 [打开后撤权的实际模态错误](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-OMClbB/07-late-grant-revocation-in-retry-confirm.png) 与 [权威权限卡已撤销](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-OMClbB/08-revoked-grant-after-confirm-refusal.png)，两图各不相同。
 
 ## 截图、日志、进程回收
 

@@ -170,6 +170,7 @@ Compose driver 确认后再发任务：
 | Unknown Outcome | 不可证明的成功进入对账或人工处理，不无条件重跑 |
 | 仅失败重试（当前Rust+真实UI） | public retry仅failed且无停止意图，原Grant/digest/Node/worker/binding保持不变，产生新的Attempt；pending/running/cancelled/succeeded/reconciling均不新增作业或retry审计。审批首Attempt走独立审批校验。failed UI点明确重试后必须实际执行，旧失败的下载bytes/Report/Effect不能被覆盖；未知只提示先对账、不得提交确认框。证据：`tests/harness/real-code-task.mjs`、`tests/sources/browser.mjs` |
 | 权限负例 | 越权路径、伪造 Node、错误 Grant digest、过期 Token 和跨 Profile 读取被拒绝并记录 |
+| 重试确认框已打开、随后撤权（当前真实 Edge 子集） | 已形成的失败报告不能因打开过确认框而占用旧Grant。真正撤销原Grant后才点击确认，实际400 grant-revoked，原attempt/assignment/digest/Report和已交付bytes仍在。无新Assignment、Report、Artifact、Effect或后续Node执行；所有原Ticket ID仍存在，数量仅增加预期的失读Ticket。模态显示实际错误与返回检查，无另一个Grant被换成执行权限，也不是cancel_requested/native abort证明。见`tests/browser/README.md`与`run.mjs` |
 | 撤权的普通未领取工作（当前真实 Edge 子集） | 用户 UI 确认同一Grant撤销，版本/revoked_at与权威资源刷新一致，而不是只看按钮消失。 Ticket保持reconciling且cancel_requested=false，Assignment尚未acknowledged，旧Lease不续、旧报告/字节仍在。连续两次Node poll均返回assignment:null，executor/outbox/Report/Artifact/Effect/目标文件均无新产生。旧Grant的合法形状复用必须403且不新增Ticket。快照刷新失败不能回收中心已确认撤权的语义或声称列表当前有效；见`tests/browser/run.mjs` |
 | 会话可见性 | 默认折叠、单任务展开不改变数据；消息可见性与 Artifact 访问权限各自成立 |
 | 偏好作用域（当前真实 Edge 子集） | 没有 Task override 时继承 global；显式折叠和 absent row 不混淆。单任务 PUT 仅带该 Ticket ID，global PUT 不带；四类显示切换与恢复不重写 message/Ticket/Report/Artifact/Effect。偏好读取 401 应为认证失效，403 为该显示的降级而非伪造同步成功。见 `tests/browser/README.md` 与 `apps/web/tests/display-preferences.test.ts` |

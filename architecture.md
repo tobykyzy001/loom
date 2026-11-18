@@ -814,6 +814,10 @@ queued → leased → confirmed
 
 用户可见按钮同样只允许真正failed；未知结果提示先核对现场。确认框提交前还会重新核对选中Ticket的类型及是否同一对象，防止当前选择已经转成reconciling、running或另一张Ticket时仍由旧页面发起后续动作。最终是否再签发Attempt始终由Concierge判定，前端不存在create-Attempt/cloned-Grant/service-cancellation权限。
 
+**确认框打开后也可能真正失去Grant。** 先看到“I can retry failed task”的旧快照并不占用当前Authorization：在真正向 `/tickets/{id}/retry` 发起请求时，Concierge再次按原Grant的 `revoked_at` 拒绝，不能因先前显示的可重试状态而继续签发。这个时刻与持久 `cancel_requested`、native abort 和取消 acknowledgement 不同，不要互相假冒。即使模态仍保留按钮，继续点击也不是新的Grant/重新授权；系统必须显示当前的真实错误，且允许“返回检查”，同时保留原 Ticket、attempt、原 Assignment、digest、已交付 bytes 和 Report，不能给已撤权对象换一张可用Grant或暗中执行任务。
+
+当前这类验收会准确顺序验证：真正失读并形成failed历史，用户打开重试确认，随后通过真实授权服务撤销该票的原Grant（独立测试中新授予并撤销的Grant，不是复活旧撤权凭证），最后确认。要求看到真实400与grant-revoked错误、可返回检查、原历史ID集合恰好多一条failed Ticket、无新Assignment/Artifact/Effect、处理后原轮询也不执行，并校验Audit chain和权限页已撤销状态。该测试不能拿快照prior meta服务当作权限 proof，也不要求在失去许可后对任何框架自动重试或强制伪造关闭对话框。详情仍然从授权详情接口逐项读取，不能只按摘要清单想当然存在历史。
+
 ### 9.4 调度失败与离线
 
 - 无符合 Host：排队、等待指定设备上线，或向用户提供替代方案；
