@@ -229,6 +229,14 @@ SQLite schema 12新增 `source_instances`、`source_threads`、`source_events` �
 
 这个切片提供 Source 身份、幂等、顺序、恢复以及用户在另一个明确受权规格下创建 `read_summary` 的小桥，不承诺自动任务解释、泛化 Source→DAG、自动模型审批、真实IM/OAuth、多租户或跨进程共享锁。`Source Work Spec` 是记录和二次核验的工作规格，不是调用方自带 Grant，也不是把原 source 消息释放成任何可执行权限。当前契约与验证入口见 [tests/sources/README.md](tests/sources/README.md)。
 
+### 3.1.2 Source Web 工作入口的当前可验证边界
+
+生产 Vue 通过同一个版本化 Client API 展示受认证 `Source + 精确 thread` 的接收、原文与既有 node/grant/Binding 公共范围，不读中心 SQLite 原表。打开 thread 或记录用户消息只接收 `loom.source-event.v1`，明确展示 `task_created=false/permission_granted=false`，不把私有接收消息冒充成 Ticket Activity 或 Agent Work authorization。用户选一条已接收 event，另选既有 `read` Grant、实际相对文件、对应物理 Node/Worker，并重复父层确认，才提交受限 `read_summary`。**Source 注册/登录或一条消息没有新Grant能力，必须继续经过控制面的实际 Grant/ProjectBinding/root 验证。**
+
+Source Ticket 的 digest、duplicate和历史身份与原 intake `ticket_id` 分开，客户端用户只能请求同一条已知 immutable work spec；普通当前工作完成后生成 Artifact 再纳入真实运行状态。前端不以 `running`、`waiting_approval`、DataClone成功、HTTP 200或收到POST回执冒充已执行。消息原始内容逐字节保留、不能靠一个 `source_scope`/自报root推导新的授权位置。source->task replay 按后端冻结 spec 返回原Ticket，并不意味着Grant续期和重执行；后续 approval/poll仍复验当前权限和旧Lease fencing。打开历史 Ticket靠受认证Ticket API读取，不能用 `exactly-once` 标签把一个HTTP调用说成远端甚至跨主机幂等效果。
+
+当前这个入口**固定受控 Source/thread类型**（不是多租户/真实IM/OAuth multi-thread compactor），只复用已有文件读取和Report/Artifact/Lease，不新增模型推理、代码Agent、通用 DAG、全量Transcript或通用backend Connector。refresh/reconnect有自己的credential epoch，受保护读写不能把旧凭据回包或received消息提升成新权限。Source modal 位于对话分支内，Activity/Help只能由该分支自己的条件链分流；宽度/长短ID换行由实际浏览器测量，不能把无关帮助面板当可折叠来实现结果。
+
 ### 3.2 当前受限文档工作流的授权与恢复约束
 
 控制器目前支持一种受限、版本化的两阶段 Document Workflow，而不是通用的行业 Pipeline 或任意 `Command` Graph。它复用现有 Host ProjectBinding 和已授权的 Ticket 与 Lease：

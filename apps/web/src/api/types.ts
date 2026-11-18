@@ -292,6 +292,7 @@ export interface Grant {
   project_id: string
   ticket_id?: string
   node_id?: string
+  installation_id?: string
   worker_id?: string
   project_binding_id?: string
   operations: string[]
@@ -468,4 +469,115 @@ export interface NewTicket {
   kind: TicketKind
   relative_path?: string
   content?: string
+}
+
+export interface SourceInstance {
+  id: string
+  source_key: string
+  kind: 'web'
+  label?: string | null
+  owner_key?: string
+  definition_digest?: string
+  last_sequence?: number
+  created_at?: string
+  updated_at?: string
+}
+export interface SourceRegistration {
+  source: SourceInstance
+  duplicate: boolean
+  task_created: false
+  permission_granted: false
+}
+export interface SourceInstanceInput {
+  schema: 'loom.source-instance.v1'
+  source_key: string
+  kind: 'web'
+  label: string
+}
+export interface SourceEvent {
+  id: string
+  source_id: string
+  /** Internal association key, never substituted for the exact client thread. */
+  thread_id: string
+  client_thread_id: string
+  external_event_id: string
+  kind: 'user_message'
+  content: string
+  payload_digest?: string
+  /** Unverified historical intake relation, not authority for new work. */
+  ticket_id?: string | null
+  task_ticket_id?: string | null
+  task_digest?: string | null
+  creation_kind?: string | null
+  task_spec?: SourceWorkSpec | null
+  /** Raw immutable evidence for audit display only; never a substitute for parsed full server validation. */
+  task_spec_raw?: string
+  legacy_reference?: 'unverified_intake_reference' | null
+  occurred_at?: string | null
+  received_at?: string
+  source_sequence: number
+  thread_sequence: number
+  duplicate?: boolean
+  task_created?: false
+  permission_granted?: false
+  delivery_stage?: 'recorded'
+}
+export interface SourceWorkSpec {
+  schema: 'loom.source-work-spec.v1'
+  source_event_id: string
+  event_request_digest: string
+  ticket_id: string
+  digest: string
+  project_id: string
+  kind: 'read_summary'
+  objective: string
+  relative_path: string
+  content?: string | null
+  grant_id: string
+  grant_digest: string
+  grant_version: number
+  project_binding_id: string
+  binding_digest: string
+  root_scope: string
+  node_id: string
+  installation_id: string
+  worker_id: string
+  created_at: string
+}
+export interface SourceThread {
+  schema?: 'loom.source-page.v1'
+  source_id: string
+  client_thread_id: string
+  thread_id?: string
+  events: SourceEvent[]
+  has_more: boolean
+  next_cursor: string | null
+  permission_granted?: false
+  /** Bound cursor continuation is supported by the workspace, never global thread merging. */
+  cursor?: string
+  limit?: number
+}
+export interface SourceWorkDraft {
+  /** Client-only validated immutable event and exact thread scope, never serialized as new authority. */
+  source_event?: SourceEvent
+  source_event_id: string
+  objective: string
+  kind: 'read_summary'
+  relative_path: string
+  project_id: string
+  grant_id: string
+  node_id: string
+  worker_id: string
+  /** Client-only context; sourceWorkBodyFrom deliberately does not send these to /tickets. */
+  source_scope?: { source_id: string; client_thread_id: string }
+}
+export interface SourceTicketReceipt {
+  ticket: Ticket
+  source_event_id: string
+  task_digest: string
+  duplicate: boolean
+  task_created: boolean
+  linked_existing_authorized_ticket: boolean
+  /** Applied to the existing workspace Ticket list without erasing a just-created Ticket. */
+  rejectLegacyTicketAsAuthority?: true
 }

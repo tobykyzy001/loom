@@ -17,6 +17,8 @@ export interface LoomClientOptions {
   fetch?: typeof globalThis.fetch
   /** Optional authentication revision, shared only by this workspace, not a server credential. */
   credentialEpoch?: () => number
+  /** Optional upper bound only for read snapshot acquisition, not remote writes. */
+  readTimeoutMs?: number
 }
 
 export class LoomClient {
@@ -37,6 +39,9 @@ export class LoomClient {
     }
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
+    const timeoutMs = this.options.readTimeoutMs ?? 30000
+    const signal = init.signal ?? (read && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined)
+    if (read && signal) init.signal = signal
     if (init.body) headers.set('Content-Type', 'application/json')
     if (token) headers.set('Authorization', `Bearer ${token}`)
 
@@ -44,6 +49,9 @@ export class LoomClient {
     try {
       response = await this.fetchFn(`/api/v1${path}`, { ...init, headers })
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'TimeoutError') {
+        throw new ApiError(0, 'read_timeout', '读取超时，未取得新的授权、项目或节点快照；不据此改变 Grant 或任务状态。', path)
+      }
       if (error instanceof DOMException && error.name === 'AbortError') throw error
       throw new ApiError(0, 'network_error', '无法连接协调器，请检查服务后再试。', path)
     }

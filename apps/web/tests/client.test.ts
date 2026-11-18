@@ -108,6 +108,24 @@ describe('LoomClient protocol and credential boundaries', () => {
     await expect(client.get('/tickets')).rejects.toMatchObject({ code: 'credential_epoch_changed', status: 0 })
   })
 
+  it('bounds stalled reads explicitly without modifying task state, auto-retrying or inferring grant status', async () => {
+    const fetch = vi.fn().mockImplementation(async (_url, init) => await new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('Bounded fixture read timed out', 'TimeoutError')), { once: true })
+    }))
+    const client = new LoomClient({ token: () => 'synthetic', fetch, readTimeoutMs: 5 })
+    const failure = await catchApiError(client.get('/grants'))
+    expect(failure).toMatchObject({ code: 'read_timeout', status: 0 })
+    expect(failure.message).toContain('不据此改变 Grant 或任务状态')
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('does not attach an automatic timeout to remote POST effects when caller has not provided one', async () => {
+    const fetch = vi.fn().mockResolvedValue(json({ accepted: true }))
+    const client = new LoomClient({ fetch, token: () => 'synthetic' })
+    await client.post('/tickets', { objective: 'write test' })
+    expect(fetch.mock.calls[0][1].signal).toBeUndefined()
+  })
+
   it('keeps a real accepted write receipt when credentials change, without inventing a rollback', async () => {
     let epoch = 0
     let release!: (value: Response) => void

@@ -41,4 +41,8 @@
 - 此 driver 的 restart 是 **Concierge重开**，不是 LocalNode/outbox重开；只有一个真实 Node / Installation，没有覆盖第二 Installation、真实多端Grant或Node身份隔离。未知请求有综合负例，但不称任意恶意JSON corpus、天然泛化source授权或安全多租户已经完成。
 - 全自动或跨进程 aggressive exactly-once claims.`database error after persistence ⇒ receipt delivery unsure`时需看原event以及后续receipt，而不是宣 称未发生。
 
-本轮不添加新UI 来源面板或消耗这一入口的自动执行驱动。需要实际把`source_event_id` 用显式用户提供工作与Grant去提交Ticket时，要保留这一不可变身份/核算关连并再次经过完整Ticket auth flow，不能借Source一条value把Grant做进 `content`。
+新增生产 Vue `SourceWorkPanel`：同一个受认证Source/thread的读取与历史展示，不把其中`visibility=private`的接收消息混入已过滤的Ticket Activity。打开/thread/记录均不发Ticket；回执显示真实event_id、`delivery_stage=recorded`和`task_created=false/permission_granted=false`。仍需用户对消息点选`基于此消息创建摘要`，再**人工选择**已有 read Grant、实际文件以及其绑定的物理Node/Worker安装，经过独立父ConfirmDialog确认才能提交 `source_event_id + exact objective + read_summary + 文件`。表单不是新Grant或自动意图解释；没有默认 path/Node/worker或root绑定。旧event的legacy ticket ID不能当 authority或替代选择。
+
+Browser driver `node tests/sources/browser.mjs` 使用真实生产Vue、bundled static assets、独立Edge临时profile、Rust Concierge与真实LocalNode。它验证两个不同Source事件各自POST Ticket和独立原spec duplicate（均200），不会再次产生相关执行；其中第一Source故意失读→真实failed Report/outbox→用户显式retry→第二个Assignment成功。真实center与下载 Artifact的SHA匹配（artifact SHA与原input SHA分别计算而非复用一个字符串）；后续workspace watcher不再有Producer副作用。每一轮2 Tickets、3 Assignments、3 Reports（一次失败/两次成功）、2 Artifacts、2 Effects、2 Source specs，audit链有效。撤权及确认中revoke race均无新任务POST，旧Lease被正确围栏。
+
+另以当前桌面1280窗口和窄390**视口**验证详情、Artifact正文、Activity各有适当空间且没有横向overflow；这是**真实Edge桌面 viewport**，不是手机真机锁屏/杀进程/切网实验。两Error-free边界的Source screenshots随当然owned root清理删除；常规浏览器 `node tests/browser/run.mjs --keep-evidence` 的PASS证据（5图与result JSON）单独留下，不在仓库提交临时报告。票据生命周期统一先由真实受控结果/凭据和完整分数结束，源消息/收到 HTTP200不负责证明已完成。

@@ -62,6 +62,12 @@
 - 安装编排现有**仅限合成 Inventory** 的可持久计划和 Vue 审阅：固定 Bare 描述符、已选/未选/不兼容目标、明确plan_digest审批、操作关联的 fixture 观察及带回滚父 operation 的持久历史；已有v7 DB增量迁移到schema8。`tests/install/plan.mjs`已实测HTTP、同op回执、Unknown不可盲重试、健康失败→批准回滚→回滚观察、真 server restart与禁用501；`tests/install/browser.mjs`也实测了真正确认、父子operation的关系、390 viewport与不变Ticket/Grant/Node数。见[tests/install/README.md](tests/install/README.md)。**这不是**真实主机安装器、遥测、SSH/幂等执行、root/Grant或Manifest生成的生产部署许可；未知需要后续具体证据对账而不悄悄自动分类。
 - Rust/Tokio、SQLite、Vue 在当前 macOS 验证；尚无 Tauri 或真实移动设备验证。DSH 0.2.2-rc.3 在专用临时 Profile 已跑过真实安装、任务、取消和原 Session 重开（见 `e1da1f0`）；这不是当前用户 Profile、系统 Credential Store 或真实 Live LLM 的验收。
 
+### 已有Source入口的真实用户确认链（M0局部）
+
+生产 Vue 已加入有界的 Source/thread消息入口。打开/记录消息仅达成 immutable intake，不创建ticket或新权限；用户必须选择**同一当前有效 Grant**、指定实际文件与精确Node/Worker，并再次确认后才生成受限 read_summary。没有 message→授权的自动意图识别，没有自报 Source 根目录替代ProjectBinding，也不会用前端 digest、received acknowledgment代替执行状态。运行/等待审批与实际Report/Artifact分开；同Source原spec duplicate仅返回原Ticket而不产生第二个执行、producer、Assignment或Artifact。
+
+真实独立Edge、Rust中心与LocalNode证明两支不同Source各自创建及duplicate、一次failed Report经显式retry的新Assignment成功、源spec/digest对账、Artifact下载bytes/hash、SQL审计和当前Grant撤销时的old lease fencing；此入口桌面默认UI保留Task/Activity脉络而不再误混入Help面板。390px桌面viewport也测过实际detail/activity/artifact无横向overflow，非移动真机/锁屏/切网测试。`node tests/sources/browser.mjs` 连续两轮通过；`node tests/browser/run.mjs --keep-evidence` 普通read/write/cancel/auth-expiry-recovery也全阶段通过。这里的Proof不是Live LLM、真实IM/OAuth、通用Agent Provider或第二物理宿主/Compose验收；M0及后续里程碑继续保持各自验证边界。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。

@@ -1,8 +1,9 @@
 import { reactive, toRefs } from 'vue'
 import { ApiError, LoomClient } from '../api/client'
-import { auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
-import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, InstallObservationRequest, InstallTarget, InstallPlan, InstallPlanData, InstallPlanPolicy, ModelInventoryData, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, Ticket } from '../api/types'
+import { acceptSourceTicketReceipt, auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, sourceEventFrom, sourceReceiptFrom, sourceRegistrationFrom, sourceThreadFrom, rejectSourceSpecMismatch, sourceWorkBodyFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
+import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, InstallObservationRequest, InstallTarget, InstallPlan, InstallPlanData, InstallPlanPolicy, ModelInventoryData, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, SourceEvent, SourceInstance, SourceInstanceInput, SourceThread, SourceTicketReceipt, SourceWorkDraft, Ticket } from '../api/types'
 import { PAGE_KEY, TICKET_KEY, TOKEN_KEY, cachedExpanded, localRead, localWrite } from '../lib/storage'
+import { safeRelativePath } from '../lib/format'
 import { SkillActions, type SkillWorkspaceReference } from '../lib/skillActions'
 import { InstallPlanActions, type InstallPlanRefresh } from '../lib/installPlan'
 import { modelReadError, parseModelInventory } from '../lib/modelInventory'
@@ -29,6 +30,9 @@ export interface WorkspaceState {
   credentialState: 'unknown' | 'checking' | 'valid' | 'required'
   busy: Record<string, boolean>
   errors: Record<string, string>
+  /** A newly accepted Source-linked Ticket, independent from a legacy intake ticket_id. */
+  sourceTicketToOpen: string | null
+  sourceTicketReceipt: SourceTicketReceipt | null
 }
 
 const pages: Page[] = ['conversation', 'activity', 'devices', 'projects', 'plans', 'memories', 'skills', 'access', 'help']
@@ -39,7 +43,7 @@ const state = reactive<WorkspaceState>({
   selectedTicketId: localRead(TICKET_KEY),
   ticket: null, bootstrap: null, projects: [], tickets: [], nodes: [], memories: [], candidateMemories: null, grants: [], audit: [], artifacts: {}, skillData: null,
   installPlans: [], installPlanPolicy: null, modelInventory: null,
-  preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, credentialState: 'unknown', busy: {}, errors: {},
+  preferences: { expanded: cachedExpanded(), sender_filter: null }, connected: null, credentialState: 'unknown', busy: {}, errors: {}, sourceTicketToOpen: null, sourceTicketReceipt: null,
 })
 let credentialEpoch = 0
 let credentialCandidate: string | null = null
@@ -51,13 +55,18 @@ const client = new LoomClient({
 const skillActions = new SkillActions(client)
 const installActions = new InstallPlanActions(client)
 let detailVersion = 0
+let sourceIdentityEpoch = 0
+const retainedSourceIds = new Map<string, string>()
+const rememberedSourceThreads = new Map<string, { source_id: string; client_thread_id: string }>()
+const recordRequests = new Map<string, string>()
+// Only bounded opaque IDs are retained locally; raw user text and tokens never enter storage.
 let refreshInFlight: Promise<void> | null = null
 function rethrowCredentialFailure(error: unknown): void {
   if (error instanceof ApiError && (error.status === 401 || error.code === 'credential_epoch_changed')) throw error
 }
 let poll: ReturnType<typeof setInterval> | undefined
 
-const writesNeedingCredentials = new Set(['project', 'composer', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'preferences', 'enrollment'])
+const writesNeedingCredentials = new Set(['project', 'composer', 'source-write', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'preferences', 'enrollment'])
 
 async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefined> {
   if (state.busy[key]) return undefined
@@ -66,6 +75,7 @@ async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefi
     return undefined
   }
   const epoch = credentialEpoch
+  // Existing run preserves accepted write responses while rejecting stale reads.
   state.busy[key] = true
   state.errors[key] = ''
   try {
@@ -78,7 +88,10 @@ async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefi
     }
     return result
   } catch (error) {
-    if (epoch !== credentialEpoch || (error instanceof ApiError && error.code === 'credential_epoch_changed')) return undefined
+    if (epoch !== credentialEpoch || (error instanceof ApiError && error.code === 'credential_epoch_changed')) {
+      if (writesNeedingCredentials.has(key)) state.errors[key] = '凭据已变化。若服务端曾接受写入，只能使用相同的 Source event 与完整冻结参数明确重放；不能改绑或假定执行状态。'
+      return undefined
+    }
     state.errors[key] = error instanceof Error ? error.message : '操作未完成，请稍后重试。'
     if (error instanceof ApiError) {
       if (error.status === 0) {
@@ -208,6 +221,12 @@ export function reconnect(token: string): Promise<boolean> {
   authentication = (async () => {
     const candidate = token.trim()
     credentialEpoch++
+    sourceIdentityEpoch++
+    retainedSourceIds.clear()
+    rememberedSourceThreads.clear()
+    recordRequests.clear()
+    state.sourceTicketToOpen = null
+    state.sourceTicketReceipt = null
     credentialCandidate = candidate
     state.credentialState = 'checking'
     state.connected = null
@@ -278,6 +297,284 @@ export async function createTicket(input: NewTicket) {
     await selectTicket(ticket.id)
   } else await refresh()
   return true
+}
+
+function opaqueSourceId(value: string): string {
+  if (!value || value.length > 160 || !/^[\w.:-]+$/u.test(value)) throw new Error('Source/thread/event ID 必须是非空、长度不超过 160 的受限 opaque ID。')
+  return value
+}
+function sourceUUID(): string {
+  const id = globalThis.crypto?.randomUUID?.()
+  if (!id) throw new Error('浏览器无法生成 Source event 幂等 ID，尚未发送消息或 Ticket。')
+  return `web-${id}`
+}
+export function sourceOperationError(): string {
+  const write = state.errors['source-write']
+  const read = state.errors['source-read']
+  if (write && read && write !== read) return `${write} ${read}`
+  return write || read || 'Source 操作未完成；没有创建 Ticket 或新 Grant。'
+}
+
+export async function registerSource(input: { source_key: string; kind: 'web'; label: string }): Promise<SourceInstance | null> {
+  const epoch = sourceIdentityEpoch
+  const result = await run('source-write', async () => {
+    if (input.kind !== 'web' || !input.label.trim() || input.label.length > 160 || [...input.label].some(character => character < ' ' || character === '\u007f')) throw new Error('仅支持有明确 label 的 web Source。')
+    const body: SourceInstanceInput = { schema: 'loom.source-instance.v1', source_key: opaqueSourceId(input.source_key), kind: 'web', label: input.label }
+    const registration = sourceRegistrationFrom(await client.post<unknown>('/sources', body))
+    if (registration.task_created || registration.permission_granted) throw new Error('Source 注册不能创建 Ticket 或授权。')
+    retainedSourceIds.set(input.source_key, registration.source.id)
+    return registration.source
+  })
+  return result !== undefined && epoch === sourceIdentityEpoch ? result : null
+}
+export async function ensureWebSource(sourceKey: string, label = 'User-authorized web messages'): Promise<SourceInstance | null> {
+  return findWebSource(sourceKey, label)
+}
+export function rememberSourceThread(sourceId: string, threadId: string, eventId: string) {
+  rememberedSourceThreads.set(opaqueSourceId(eventId), { source_id: opaqueSourceId(sourceId), client_thread_id: opaqueSourceId(threadId) })
+}
+
+export async function findWebSource(sourceKey: string, label = 'User-authorized web messages'): Promise<SourceInstance | null> {
+  const key = opaqueSourceId(sourceKey)
+  const epoch = sourceIdentityEpoch
+  const result = await run('source-read', async () => {
+    const cached = retainedSourceIds.get(key)
+    if (cached) return { id: cached, source_key: key, kind: 'web' as const, label }
+    let cursor: string | null = null
+    for (let page = 0; page < 100; page++) {
+      const query = new URLSearchParams({ limit: '100' })
+      if (cursor) { query.delete('limit'); query.set('source_cursor', cursor) }
+      const value = sourceObjectForSource(await client.get<unknown>(`/sources?${query}`))
+      const sources = value.sources
+      if (!Array.isArray(sources)) throw new Error('Source 列表格式无效，未进行跨 Source 推断。')
+      const found = sources.map(sourceRegistrationSummary).find(source => source.source_key === key && source.kind === 'web')
+      if (found) { retainedSourceIds.set(key, found.id); return found }
+      if (value.has_more !== true) return null
+      const nextCursor: unknown = value.next_cursor
+      cursor = typeof nextCursor === 'string' ? nextCursor : null
+      if (typeof cursor !== 'string') throw new Error('Source 列表 cursor 无效。')
+    }
+    throw new Error('Source 列表超过有界页数，未继续全局读取。')
+  })
+  return result !== undefined && epoch === sourceIdentityEpoch ? result : null
+}
+function sourceObjectForSource(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Source 响应不是对象。')
+  return value as Record<string, unknown>
+}
+function sourceRegistrationSummary(source: unknown): SourceInstance {
+  const value = sourceObjectForSource(source)
+  if (typeof value.id !== 'string' || typeof value.source_key !== 'string' || value.kind !== 'web') throw new Error('Source 列表包含无效的 SourceInstance。')
+  return { ...value, id: value.id, source_key: value.source_key, kind: 'web' } as SourceInstance
+}
+
+export async function recordSourceMessage(input: { source_id: string; thread_id: string; content: string }): Promise<SourceEvent | null> {
+  const source = opaqueSourceId(input.source_id)
+  const thread = opaqueSourceId(input.thread_id)
+  const requestKey = `${source}\u0000${thread}\u0000${input.content}`
+  /**
+   * Idempotence is stable for this unsent/queued logical message. It is not retained
+   * after settlement and is never a localStorage key or a reusable authority token.
+   */
+  const eventId = recordRequests.get(requestKey) ?? sourceUUID()
+  const epoch = sourceIdentityEpoch
+  recordRequests.set(requestKey, eventId)
+  const result = await run('source-write', () => client.post<unknown>('/source-events', {
+    schema: 'loom.source-event.v1', source_id: source, thread_id: thread,
+    event_id: eventId, kind: 'user_message', content: input.content,
+  }))
+  recordRequests.delete(requestKey)
+  if (result === undefined || epoch !== sourceIdentityEpoch) return null
+  const event = sourceReceiptFrom(result)
+  if (event.source_id !== source || event.client_thread_id !== thread) throw new Error('Source 接收回包不属于所选 Source/client thread，已拒绝。')
+  rememberSourceThread(source, thread, event.id)
+  return event
+}
+
+export async function loadSourceThread(sourceId: string, threadId: string, limit = 50, eventIds: string[] = []): Promise<SourceThread | null> {
+  const source = opaqueSourceId(sourceId)
+  const thread = opaqueSourceId(threadId)
+  const pageSize = Number.isInteger(limit) && limit > 0 && limit <= 200 ? limit : (() => { throw new Error('Source 单 thread 页大小必须在 1 到 200 之间。') })()
+  const epoch = sourceIdentityEpoch
+  const result = await run('source-read', () => {
+    return client.get<unknown>(`/source-events?source_id=${encodeURIComponent(source)}&thread_id=${encodeURIComponent(thread)}&limit=${pageSize}`)
+  })
+  if (result === undefined) return null
+  if (epoch !== sourceIdentityEpoch) throw new Error('凭据已变化，旧 Source 读取未用于新工作区。')
+  const page = sourceThreadFrom(result, { source_id: source, client_thread_id: thread })
+  for (const event of page.events) rememberSourceThread(source, thread, event.id)
+  for (const eventId of eventIds) rememberSourceThread(source, thread, eventId)
+  return page
+}
+export async function continueSourceThread(cursor: string, limit = 50, expected?: { source_id: string; client_thread_id: string }): Promise<SourceThread | null> {
+  if (state.credentialState !== 'valid') {
+    state.errors['source-read'] = '请重新认证后再读取 Source cursor。'
+    return null
+  }
+  const id = opaqueSourceId(cursor)
+  const pageSize = Number.isInteger(limit) && limit > 0 && limit <= 200 ? limit : (() => { throw new Error('Source 单 thread 页大小必须在 1 到 200 之间。') })()
+  const epoch = sourceIdentityEpoch
+  if (!expected) {
+    state.errors['source-read'] = '未知 cursor 不在本面板已核实的 Source/thread 内，不能猜测其范围。'
+    return null
+  }
+  const result = await run('source-read', () => client.get<unknown>(`/source-events?cursor=${encodeURIComponent(id)}&limit=${pageSize}`))
+  if (result === undefined) return null
+  if (epoch !== sourceIdentityEpoch) throw new Error('凭据已变化，cursor 对应的旧读取未用于新工作区。')
+  const raw = sourceObjectForSource(result)
+  const page = sourceThreadFrom(result, expected)
+  if (raw.next_cursor && raw.next_cursor !== page.next_cursor) throw new Error('Source cursor 响应无效。')
+  return page
+}
+
+export function createSourceWorkTransport(sourceKey: string, threadId: string, label = 'User-authorized web messages') {
+  const source = opaqueSourceId(sourceKey)
+  const thread = opaqueSourceId(threadId)
+  // Only this exact Source/client thread is registered/read. Cross-thread IDs never share a cached source context.
+  return {
+    async registerAndRecord(input: { thread_id: string; content: string }) {
+      if (input.thread_id !== thread) throw new Error('只能向绑定的 exact client thread 记录。')
+      const registered = await registerSource({ source_key: source, kind: 'web', label })
+      if (!registered) return null
+      return recordSourceMessage({ source_id: registered.id, thread_id: thread, content: input.content })
+    },
+    async readThread(input: { thread_id: string }) {
+      if (input.thread_id !== thread) throw new Error('只能读取绑定的 exact client thread。')
+      const registered = await ensureWebSourceThread(source, label, thread)
+      if (!registered) return null
+      return loadSourceThread(registered.id, thread, 200)
+    },
+  }
+}
+async function ensureWebSourceThread(sourceKey: string, label: string, thread: string): Promise<SourceInstance | null> {
+  let existing = await findWebSource(sourceKey, label)
+  if (!existing) {
+    if (state.errors['source-read']) return null
+    const registered = await registerSource({ source_key: sourceKey, kind: 'web', label })
+    if (!registered) return null
+    existing = registered
+  }
+  // Registration alone doesn't prove readability: the transport next performs
+  // the exact source_id + client_thread_id protected read; it must not be nested.
+  return existing
+}
+
+export async function createTicketFromSource(draft: SourceWorkDraft, sourceContext?: { source_id: string; client_thread_id: string }): Promise<SourceTicketReceipt | null> {
+  let body: SourceWorkDraft
+  try { body = sourceWorkBodyFrom(draft) } catch (error) {
+    state.errors['source-write'] = error instanceof Error ? error.message : 'Source 创建参数无效，未发送 Ticket。'
+    return null
+  }
+  const exactScope = sourceContext ?? draft.source_scope
+  if (exactScope) {
+    if (typeof exactScope.source_id !== 'string' || typeof exactScope.client_thread_id !== 'string') {
+      state.errors['source-write'] = 'Source 工作缺少精确的 Source/client thread 类型，未发送 Ticket。'
+      return null
+    }
+    try { rememberSourceThread(exactScope.source_id, exactScope.client_thread_id, body.source_event_id) }
+    catch (error) {
+      state.errors['source-write'] = error instanceof Error ? error.message : 'Source thread 无效，未发送 Ticket。'
+      return null
+    }
+  }
+  // Do not silently normalize this explicit file path or turn an empty worker into default.
+  if (!safeRelativePath(body.relative_path)) {
+    state.errors['source-write'] = 'Source 任务必须显式指定项目内安全相对路径。'
+    return null
+  }
+  const requestEpoch = credentialEpoch
+  if (state.credentialState !== 'valid') {
+    state.errors['source-write'] = '请先完成连接认证，再发起这个操作。旧任务未被取消，新的执行也未被创建。'
+    return null
+  }
+  const result = await run('source-write', async () => {
+    if (!rememberedSourceThreads.has(body.source_event_id)) throw new ApiError(409, 'source_context_required', '无法确定此 Source event 的精确 Source/client thread；未发送 Ticket。', '/tickets')
+    if (draft.source_event) {
+      const scope = rememberedSourceThreads.get(body.source_event_id)
+      // This client-only evidence bypasses a repeated GET, not the response
+      // parser. A forged/syntactic lookalike must not bypass Source validation.
+      const event = sourceEventFrom(draft.source_event)
+      if (!scope || event.id !== body.source_event_id
+        || event.source_id !== scope.source_id || event.client_thread_id !== scope.client_thread_id) {
+        throw new ApiError(409, 'source_context_required', '传入的 Source event 与已验证的 exact Source/client thread 不一致，未发送 Ticket。', '/tickets')
+      }
+    }
+    const matchingThread = draft.source_event ?? await findRecordedSourceEvent(body.source_event_id)
+    if (!matchingThread || matchingThread.content !== body.objective || matchingThread.kind !== 'user_message') throw new Error('Source event 不存在或原文不完全一致，不能创建新任务。')
+    if (matchingThread.task_ticket_id) {
+      rejectSourceSpecMismatch(matchingThread, body)
+      if (matchingThread.creation_kind !== 'explicit_task_created_after_intake' || matchingThread.task_digest !== matchingThread.task_spec?.digest) throw new Error('Source 已绑定事件的 task_digest / creation_kind 不完整，禁止重放或改绑。')
+    }
+    const grant = await findCurrentSourceGrant(body)
+    if (!grant) throw new Error('Grant/Project/Node/Worker 不符合同一精确 read 授权；未发送 Ticket。')
+    // Pre-read authorization in the same unchanged operation scope; a revoked
+    // current Grant fails before POST while the controller remains authoritative.
+    const response = await client.post<unknown>('/tickets', body)
+    const accepted = acceptSourceTicketReceipt(response)
+    if (accepted.source_event_id !== body.source_event_id || accepted.ticket.objective !== body.objective || accepted.ticket.kind !== body.kind || accepted.ticket.project_id !== body.project_id || accepted.ticket.relative_path !== body.relative_path) throw new Error('回包 Ticket 与 requested Source objective/scope 不一致，未将其加入工作区。')
+    const currentSpec = matchingThread.task_ticket_id ? matchingThread.task_spec : null
+    if (currentSpec && (accepted.ticket.id !== currentSpec.ticket_id || accepted.task_digest !== currentSpec.digest || !accepted.duplicate || accepted.task_created || !accepted.linked_existing_authorized_ticket)) throw new Error('回包不是原 immutable spec 的精确 duplicate Ticket。')
+    if (!currentSpec && (matchingThread.task_ticket_id || accepted.duplicate || !accepted.task_created || accepted.linked_existing_authorized_ticket)) throw new Error('未绑定 Source event 不能声称已有任务或重复。')
+    for (const assignment of accepted.ticket.assignments ?? []) {
+      if (assignment.ticket_id !== accepted.ticket.id || assignment.node_id !== body.node_id) throw new Error('回包 Assignment 与显式 Node/Ticket 不一致。')
+    }
+    return accepted
+  })
+  if (result === undefined) return null
+  const receipt = result
+  // An accepted response is a controller receipt, not a read snapshot. Do not discard it solely because credentials rotated.
+  state.sourceTicketReceipt = receipt
+  state.sourceTicketToOpen = receipt.ticket.id
+  if (requestEpoch === credentialEpoch) {
+    state.tickets = [receipt.ticket, ...state.tickets.filter(ticket => ticket.id !== receipt.ticket.id)]
+    // Reconcile after run('source-write') settles. Never nest source-read here:
+    // the receipt remains a fact even when this independent read later fails.
+    await updateRecordedTask(receipt, body.source_event_id)
+  } else if (state.errors['source-write'] === '') {
+    state.errors['source-write'] = '已接收 Ticket 回包，但凭据随后改变；旧会话没有更新 Ticket 列表。请先验证连接，不把快照当最新状态。'
+  }
+  return receipt
+}
+async function findRecordedSourceEvent(id: string): Promise<SourceEvent | null> {
+  const scope = rememberedSourceThreads.get(id)
+  if (!scope) return null // Never globally guess or mix another Source/client thread.
+  // Already inside source-write: use its single awaited read, then the same
+  // source-write finally clears busy. Never clear busy in an inner nested run.
+  const result = await client.get<unknown>(`/source-events?source_id=${encodeURIComponent(scope.source_id)}&thread_id=${encodeURIComponent(scope.client_thread_id)}&limit=200`)
+  const page = sourceThreadFrom(result, scope)
+  for (const event of page.events) rememberSourceThread(scope.source_id, scope.client_thread_id, event.id)
+  rememberSourceThread(scope.source_id, scope.client_thread_id, id)
+  return page.events.find(event => event.id === id) ?? null
+}
+async function findCurrentSourceGrant(body: SourceWorkDraft): Promise<Grant | null> {
+  // Re-read the exact Grant, not a guessed replacement. Await this part of
+  // source-write's own HTTP chain directly. The selector and controller also
+  // check the root/binding/Node, without a nested cross-key busy operation.
+  const grantValues = await client.get<unknown>('/grants')
+  const value = grantsFrom(grantValues)
+  const grant = value.find(candidate => candidate.id === body.grant_id)
+  if (!grant || (grant.revoked_at !== null && grant.revoked_at !== undefined) || (grant.status !== undefined && grant.status !== 'active')
+    || typeof grant.project_binding_id !== 'string' || !grant.project_binding_id
+    || !Array.isArray(grant.operations) || !grant.operations.includes('read')) return null
+  if (grant.project_id !== body.project_id || grant.node_id !== body.node_id || grant.node_id === 'auto'
+    || typeof grant.worker_id !== 'string' || grant.worker_id !== body.worker_id) return null
+  if (typeof grant.installation_id !== 'string' || !grant.installation_id) return null
+  return { ...grant }
+}
+async function updateRecordedTask(receipt: SourceTicketReceipt, eventId: string): Promise<void> {
+  const scope = rememberedSourceThreads.get(eventId)
+  if (!scope) return
+  const page = await loadSourceThread(scope.source_id, scope.client_thread_id, 200)
+  if (!page) return // Preserve source-read authentication/scope errors; accepted receipt remains unchanged.
+  const event = page.events.find(candidate => candidate.id === receipt.source_event_id)
+  if (!event || event.task_ticket_id !== receipt.ticket.id) {
+    state.errors['source-read'] = 'Ticket 已接受，但 Source 中尚未核实独立 task_ticket_id。legacy ticket_id 不是授权，运行中也不代表已完成。'
+  }
+}
+export function consumeSourceTicketOpen(): string | null {
+  const id = state.sourceTicketToOpen
+  state.sourceTicketToOpen = null
+  return id
 }
 
 export async function cancelTicket(id: string) {

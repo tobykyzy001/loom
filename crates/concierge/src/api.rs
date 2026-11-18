@@ -3331,7 +3331,8 @@ async fn read_source_events(
         })?
         .0;
     let mut store = state.lock()?;
-    Ok(Json(crate::source_events::preview(&mut store, query)?))
+    let result = crate::source_events::preview(&mut store, query)?;
+    Ok(Json(result))
 }
 
 async fn audit(
