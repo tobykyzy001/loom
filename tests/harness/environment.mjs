@@ -75,7 +75,7 @@ export async function command(command, args, { cwd, env, secrets = [], timeoutMs
   })
 }
 
-export async function installBundles({ env, root, cli, executable, bundles }) {
+export async function installBundles({ env, root, cli, executable, bundles, sourceOverrides = {} }) {
   const prepared = join(root, 'dsh-test-state', 'profiles', PROFILE)
   const initialArgs = ['--profile', PROFILE, '--from-default-profile', 'sdk-minimal', '--dump-config']
   const initial = await command(executable, [cli, ...initialArgs], { cwd: root, env })
@@ -89,7 +89,9 @@ export async function installBundles({ env, root, cli, executable, bundles }) {
   await mkdir(join(root, 'fixture-packages'), { mode: 0o700 })
   // Only the exact Schemastery version shipped by this Host needs an offline forwarding fixture.
   for (const name of ['stub-provider', 'dsh-loom', 'credential-record']) {
-    const source = join(repository, name === 'dsh-loom' ? 'plugins/dsh-loom' : join('tests/harness/fixtures', name))
+    const override = sourceOverrides[name]
+    if (override !== undefined && (!isAbsolute(override) || override === sep)) throw new Error('Fixture package override must name a specific absolute directory')
+    const source = override || join(repository, name === 'dsh-loom' ? 'plugins/dsh-loom' : join('tests/harness/fixtures', name))
     const destination = join(root, 'fixture-packages', name)
     await cp(source, destination, { recursive: true, filter: (path) => !path.includes('/test/') && !path.endsWith('/test') })
   }

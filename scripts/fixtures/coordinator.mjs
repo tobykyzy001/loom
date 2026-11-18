@@ -81,7 +81,17 @@ export class SyntheticCoordinator {
     else if (req.method === 'POST' && url.pathname === '/api/v1/nodes/events') {
       this.requireNode(body, identity); this.events.push(body); result = { accepted: true }
     } else if (req.method === 'POST' && url.pathname === '/api/v1/nodes/acknowledge') {
-      this.requireNode(body, identity); this.acks.push(body); result = { accepted: true }
+      this.requireNode(body, identity)
+      // Keep the test transport faithful to the versioned ACK receipt contract.
+      // These same-work records are just playback evidence, not new grant authority.
+      const previous = this.acks.find(ack => ack.node_id === body.node_id
+        && ack.ticket_id === body.ticket_id && ack.assignment_id === body.assignment_id
+        && ack.lease_epoch === body.lease_epoch && ack.cancel_requested === body.cancel_requested
+        && ack.cancellation === body.cancellation && ack.accepted === body.accepted
+        && (ack.reason || '') === (body.reason || ''))
+      const acknowledged_at = previous?.acknowledged_at || new Date().toISOString()
+      this.acks.push({ ...body, acknowledged_at })
+      result = { ...body, accepted: true, acknowledged_at, ...(previous ? { duplicate: true } : {}) }
     } else if (req.method === 'GET' && url.pathname === '/api/v1/tickets') { this.requireClient(identity); result = { tickets: [...this.tickets.values()] } }
     else if (req.method === 'GET' && /^\/api\/v1\/tickets\/[^/]+$/.test(url.pathname)) {
       this.requireClient(identity); result = this.tickets.get(url.pathname.split('/').at(-1)); if (!result) throw Object.assign(new Error('Not found'), { status: 404 })

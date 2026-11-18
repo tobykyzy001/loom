@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
+import { installAckResponseLoss } from './ack-recovery.js'
 export { registerScopedCodeTools, CODE_FIXTURE_SOURCE, CODE_FIXTURE_TEST, CODE_SOURCE_PATH, CODE_TEST_PATH } from './code-tools.js'
 
 const abortFailure = () => ({ code: 'ABORTED', message: 'Fixture provider cancelled by DSH.' })
@@ -263,5 +264,6 @@ export function apply(ctx, config) {
       return result
     },
   })
+  installAckResponseLoss({ control_path: controlPath })
   return () => { registration(); inspectRegistration(); writeRegistration() }
 }

@@ -161,9 +161,14 @@ export class LocalNodeRunner {
         // The operation may already have had its effect: Unknown Outcome != Failed.
         result.state = 'unknown'; result.summary = 'Cancellation raced with a completed effect; reconciliation is required.'
       }
-      await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
+      const acknowledgement = await this.client.acknowledge({ ticketId: assignment.ticket_id, assignmentId: assignment.id,
         leaseEpoch: assignment.lease_epoch, accepted: result.state !== 'failed' })
-      return { status: result.state, assignmentId: assignment.id, ...(await this.report(assignment, result)) }
+      const report = await this.report(assignment, result)
+      return { status: result.state, assignmentId: assignment.id, ...report,
+        ...(acknowledgement.acknowledgement_pending === true
+          ? { acknowledgement_pending: true, acknowledgementPending: true } : {}),
+        ...(acknowledgement.response?.accepted === true
+          ? { acknowledgement: structuredClone(acknowledgement.response) } : {}) }
     } finally {
       this.active.delete(assignment.id)
       this.activeAssignments.delete(assignment.id)

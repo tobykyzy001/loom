@@ -165,6 +165,7 @@ Compose driver 确认后再发任务：
 | A ↔ B 交接 | 双方只收到所需最小 Brief；Artifact 引用与父级关系正确，不把本地绝对路径作为全局 URI |
 | 选择 Node C 失败 | 能力不足 / 撤销时正确等待或询问；没有虚构完成或擅自选不相干节点 |
 | 当前合法Assignment的ACK重放与响应丢失（真实Rust+generic LocalNode子集） | 认证Node及当前`valid_lease`先于旧回执读取。仅真正NULL+无审计可做首笔原子ACK，合法timestamp+恰一匹配audit才返回原记录，坏值/半历史均409且不补写。实际ACK HTTP 200被注入丢失后，Node持久ACK保持pending，经真实状态重开和原有backoff继续`ACK→ACK→artifact→report`；原timestamp与一条审计、一个实际Report/Artifact/Effect、一次executor、源bytes不变与真实下载hash均硬断言，而非再次执行。其它Node/旧epoch/真Grant撤权仍拒绝；真实字节、原授权和对方完成是不同事实。见`tests/runner/ack-replay.mjs`及[最终proof](/tmp/loom-ack-replay-final-Yc6Qcx/result.json)。不是真实DSH宿主恢复、第二物理机、全局exactly-once或通用取消幂等 |
+| 独立vendored DSH bundle普通ACK恢复（真实隔离SDK子集） | 安装从实际`6b3bd71`存档的旧bundle后，读取HTTP 200 ACK再丢弃：原Admission已存在但没有ACK pending，原流程未执行`loom_fixture_write`，产生unknown/reconciling而非成功。修复bundle同一原始Assignment实际写一次HTML，持久ACK+Artifact+Report且此时中央三者均为0；重开真实Host、原注册身份后真实第二个ACK HTTP返回原timestamp、再交付真实Artifact/Report/confirmed Effect。必须实际一次工具effect、一个Session/原requestId/原始Node、恰一条准入audit和实际文件SHA，拒绝换会话、重执行或凭空duplicate。**不是任意mid-tool recovery、任意5xx已提交推断、另一Harness、付费provider、第二物理Host或延期的1+3拓扑**。入口`node tests/harness/ack-replay.mjs`，证据[result](/tmp/loom-dsh-ack-recovery-final-XEfDLI/result.json)和[manifest](/tmp/loom-dsh-ack-recovery-final-XEfDLI/manifest.json) |
 | 节点失联 | Ticket 持久保留；离线、Worker 失联与失败分别呈现 |
 | Lease 过期 | 迟到旧 Worker Report 不被接受为当前权威结果 |
 | 重复事件 | 同一 Report / Effect 重放不会重复外部副作用 |

@@ -62,7 +62,9 @@ LocalNode客户端把ACK先写入既有NodeState v1 outbox，再进行真实`nod
 
 真实driver：使用当前Rust Concierge、真实注册Node、项目/Binding/Grant和实际`ControlledFileExecutor`输入文件。第一次实际ACK HTTP 200被读取以后，adapter有意抛出“响应丢失”，但本地executor仍只运行一次。此时中心有第一笔ACK，没有Report/Artifact/Effect；本地ACK/Artifact/Report仍持久待发。driver重开同Node身份与状态，尊重原有backoff（不是把时间戳强置为过去），再取回**第一次timestamp**，记录实际HTTP顺序 **`ACK → ACK → artifact → report`**，最后得到一份 succeeded Report、一份Artifact和一份Effect。回头poll不再执行。真实下载通过原始Ticket Detail的`artifact.id`取回，并重新校验`downloaded.artifact.sha256`与`downloaded.size_bytes`，不是预先假定`metadata.*`包装或`artifact_id`列名。原输入bytes在前后完全一致，生成Artifact的341 bytes独立SHA校验后为`94811ec47d3a7326cc3f693387a93d60379f1198322c364ebc6aa56a02c7492e`。
 
-另一个在本机真实注册的逻辑Node对该Assignment仍403，错误`lease_epoch +1`也拒绝。随后真正撤销授权，再按旧ACK body/digest重新入队，它保持deferred而非accepted，原timestamp和单审计不变，撤权后的`audit/verify`仍有效。这个第二Node只用于owner负例，不意味着物理第二台机器。central SQLite仍为schema15，整轮为deterministic LocalNode loopback，**不是**已安装DSH宿主的ACK恢复、无条件的取消幂等、全局exactly-once或真实provider服务。
+另一个在本机真实注册的逻辑Node对该Assignment仍403，错误`lease_epoch +1`也拒绝。随后真正撤销授权，再按旧ACK body/digest重新入队，它保持deferred而非accepted，原timestamp和单审计不变，撤权后的`audit/verify`仍有效。这个第二Node只用于owner负例，不意味着物理第二台机器。central SQLite仍为schema15，整轮为deterministic LocalNode loopback，**不是**无条件的取消幂等、全局exactly-once或真实provider服务。**这是共享`packages/node-client`的证明，不能代替实际DSH bundle的独立副本/执行顺序**：`plugins/dsh-loom`在first SDK effect之前ACK，其真实Profile与tool/Host重开恢复由 [tests/harness/ack-replay.mjs](../harness/ack-replay.mjs) 单独验证，详见[真实DSH ACK回放](../harness/ACK_REPLAY.md)，都不是任意工具中途崩溃的全局幂等。
+
+本段落上文的[实际最终结果](/tmp/loom-ack-replay-final-Yc6Qcx/result.json)和[manifest](/tmp/loom-ack-replay-final-Yc6Qcx/manifest.json)属于该generic LocalNode验证；不要拿它取代真实bundle复制安装后的[真实bundle复制安装后的Host ACK replay结果](/tmp/loom-dsh-ack-recovery-final-XEfDLI/result.json)。
 
 [实际最终结果](/tmp/loom-ack-replay-final-Yc6Qcx/result.json)和[manifest](/tmp/loom-ack-replay-final-Yc6Qcx/manifest.json)保存了原始timestamp、owned fixture root、复现源码的hash、实际341-byte Artifact、单执行/单审计，以及真实Report、Artifact与Effect彼此分离的事实。manifest的result SHA为`1baeee9f066125d52412aa9d11dbbe595933abbfa39d06d1b38c2d8963e6b0f0`。仍以LocalNode ACK回执、实际report与外部effect的分离为限。
 

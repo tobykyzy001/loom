@@ -5,7 +5,7 @@
   "description": "Disposable zero-network DSH fixture: deterministic provider plus explicitly scoped inspection, document and clean-Git code-tool tests.",
   "type": "module",
   "exports": { ".": "./index.js", "./delegation": "./delegation.js", "./code-tools": "./code-tools.js" },
-  "files": ["index.js", "delegation.js", "code-tools.js", "cordis.patch.yml"],
+  "files": ["index.js", "ack-recovery.js", "delegation.js", "code-tools.js", "cordis.patch.yml"],
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "engines": { "dsh": "0.2.2-rc.3" },
   "peerDependencies": {

@@ -2,10 +2,22 @@ import { LoomHttpClient } from './http.js'
 import { id, canonical, sha256 } from './util.js'
 import { envelope, nonNegative, validateStatus } from './validation.js'
 
+const ACK_ROUTE = '/api/v1/nodes/acknowledge'
+const ACK_DENIED = new Set([400, 401, 403, 409, 410, 422])
+
+function validAcknowledgement(response) {
+  return response !== null && typeof response === 'object' && !Array.isArray(response)
+    && response.accepted === true
+    && typeof response.acknowledged_at === 'string' && response.acknowledged_at.length > 0
+    && Number.isFinite(Date.parse(response.acknowledged_at))
+    && (!('duplicate' in response) || typeof response.duplicate === 'boolean')
+}
+
 export class LoomNodeClient {
   constructor({ http, identity, state }) {
     if (!(http instanceof LoomHttpClient) || !identity || !state) throw new TypeError('http, identity and durable state are required')
     this.http = http; this.identity = identity; this.state = state
+    this.acknowledgementInflight = new Map()
   }
   get nodeId() { return this.identity.nodeId }
   get installationId() { return this.identity.data.installation_id }
@@ -72,13 +84,67 @@ export class LoomNodeClient {
     const { request_id, ...rest } = body
     return sha256(canonical({ logical_fields: rest }))
   }
-  async acknowledge({ ticketId, assignmentId, leaseEpoch, accepted, reason = '', cancelRequested = false, cancellation = false }) {
+  async acknowledge({ ticketId, assignmentId, leaseEpoch, accepted, reason = '', cancelRequested = false, cancellation = false, signal }) {
     const stop = Boolean(cancelRequested || cancellation)
     const body = { ...envelope(this, id()), ticket_id: ticketId, assignment_id: assignmentId,
       ...(leaseEpoch === undefined ? {} : { lease_epoch: leaseEpoch }), accepted: Boolean(accepted),
       reason, cancel_requested: stop, cancellation: stop }
-    const response = await this.http.post('/api/v1/nodes/acknowledge', body, { token: this.identity.token })
-    return { request: body, response }
+    // Preserve the pre-existing stop/cancel protocol exactly. In particular,
+    // revocable stop qualification can require a persisted original ACK timestamp;
+    // marking-cancelling only fields must never be replayed as ordinary admission.
+    if (stop) {
+      const response = await this.http.post(ACK_ROUTE, body, { token: this.identity.token, signal })
+      return { request: body, response }
+    }
+    const digest = this.logicalDigest(body)
+    const delivered = this.state.data.deliveries?.find((item) => item.kind === 'ack' && item.digest === digest)
+    if (delivered && canonical({ ...delivered.body, request_id: body.request_id }) === canonical(body)
+      && typeof delivered.body.request_id === 'string' && delivered.body.request_id.length > 0
+      && validAcknowledgement(delivered.response)) {
+      return { request: structuredClone(delivered.body), response: { ...structuredClone(delivered.response), duplicate: true } }
+    }
+    const item = await this.state.enqueue('ack', body, { digest })
+    const current = this.state.data.outbox.find((other) => other.kind === 'ack' && other.digest === digest)
+    if (current && current.body.request_id !== body.request_id) body.request_id = current.body.request_id
+    try {
+      return await this.postAcknowledgement(item, { signal })
+    } catch (error) {
+      if (ACK_DENIED.has(error?.status) || (error?.status >= 200 && error.status < 500)) throw error
+      // A network loss/unknown server outcome may already have committed the original
+      // admission. The durable intent is not itself a receipt or new execution authority.
+      return { request: structuredClone(item.body), response: null, acknowledgement_pending: true }
+    }
+  }
+  deliveredAcknowledgement(item) {
+    return this.state.data.deliveries?.find((other) => other.kind === 'ack' && other.digest === item.digest)
+  }
+  postAcknowledgement(item, { signal } = {}) {
+    const key = `ack:${item.digest}`
+    if (this.acknowledgementInflight.has(key)) return this.acknowledgementInflight.get(key)
+    // Start the request before sharing this promise so synchronous token rejection
+    // cannot create a false shared receipt or skip the real authorization check.
+    const transport = this.http.post(ACK_ROUTE, item.body, { token: this.identity.token, signal })
+    const operation = (async () => {
+      try {
+        const response = await transport
+        if (!validAcknowledgement(response)) {
+          const error = new Error('Invalid node acknowledgement receipt')
+          error.code = 'invalid_acknowledgement_receipt'; error.status = 502
+          throw error
+        }
+        const delivered = this.deliveredAcknowledgement(item)
+        const sameRequest = delivered && canonical(delivered.body) === canonical(item.body)
+          && validAcknowledgement(delivered.response)
+        const receipt = sameRequest ? { ...structuredClone(delivered.response), duplicate: true }
+          : structuredClone(response)
+        await this.recordDelivery(item, structuredClone(response))
+        return { request: structuredClone(item.body), response: receipt }
+      } finally {
+        if (this.acknowledgementInflight.get(key) === operation) this.acknowledgementInflight.delete(key)
+      }
+    })()
+    this.acknowledgementInflight.set(key, operation)
+    return operation
   }
   async authorizeCredential({ ticketId, assignmentId, leaseEpoch, snapshot }) {
     const body = { ...envelope({ protocol: 'loom.node.v1', node_id: this.nodeId, installation_id: this.installationId }, id()),
@@ -86,31 +152,71 @@ export class LoomNodeClient {
       authorization_snapshot: sha256(canonical(snapshot)) }
     return this.http.post('/api/v1/nodes/credential-authorize', body, { token: this.identity.token })
   }
+  async recordDelivery(item, response) {
+    await this.state.mutate((data) => {
+      data.outbox = data.outbox.filter((other) => !(other.kind === item.kind && other.digest === item.digest))
+      const next = { kind: item.kind, body: structuredClone(item.body), digest: item.digest, delivered_at: new Date().toISOString() }
+      if (item.kind === 'ack') next.response = structuredClone(response)
+      data.deliveries ||= []
+      const previous = data.deliveries.findIndex((other) => other.kind === item.kind && other.digest === item.digest)
+      if (previous >= 0) data.deliveries[previous] = next
+      else data.deliveries.push(next)
+      if (data.deliveries.length > 500) data.deliveries.splice(0, data.deliveries.length - 500)
+    })
+  }
+  sameAcknowledgementWork(ack, item) {
+    return typeof item.body?.assignment_id === 'string' && item.body.assignment_id.length > 0
+      && ack.body?.assignment_id === item.body.assignment_id
+      && ack.body?.ticket_id === item.body?.ticket_id
+      && ack.body?.lease_epoch === item.body?.lease_epoch
+  }
+  acknowledgementFor(item) {
+    if (!['artifact', 'report'].includes(item.kind)) return null
+    return this.state.data.outbox.find(other => other.kind === 'ack' && this.sameAcknowledgementWork(other, item)) || null
+  }
+  async defer(item, error, { signal } = {}) {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error
+    await this.state.mutate((data) => {
+      const current = data.outbox.find((other) => other.kind === item.kind && other.digest === item.digest)
+      if (!current) return
+      current.attempts += 1
+      current.last_error = error.message
+      if ([401, 403, 409, 410, 422].includes(error.status)) current.next_attempt_at = new Date(864e13).toISOString()
+      else current.next_attempt_at = new Date(Date.now() + Math.min(60_000, 1000 * (2 ** Math.min(current.attempts, 6)))).toISOString()
+    })
+    return { status: 'deferred', kind: item.kind, requestId: item.body?.request_id, error: error.message }
+  }
   async dispatchOutbox({ signal } = {}) {
     const results = []
-    for (const item of this.state.outbox) {
-      if (signal?.aborted || Date.parse(item.next_attempt_at) > Date.now()) continue
+    const visited = new Set()
+    for (;;) {
+      if (signal?.aborted) break
+      const candidates = this.state.outbox.filter(item => !visited.has(`${item.kind}:${item.digest}`)
+        && Date.parse(item.next_attempt_at) <= Date.now())
+      let selected = candidates[0]
+      const dependent = candidates.find(item => this.acknowledgementFor(item))
+      if (dependent) {
+        const ack = this.acknowledgementFor(dependent)
+        selected = candidates.find(item => item.kind === 'ack' && item.digest === ack.digest)
+          || candidates.find(item => !this.acknowledgementFor(item)) || null
+        if (selected && this.acknowledgementFor(selected)) selected = null
+      }
+      if (!selected) break
+      const item = selected
+      const key = `${item.kind}:${item.digest}`
+      visited.add(key)
       const route = { event: '/api/v1/nodes/events', report: '/api/v1/nodes/reports', artifact: '/api/v1/nodes/artifacts' }[item.kind]
       try {
-        const response = await this.http.post(route, item.body, { token: this.identity.token, signal })
-        await this.state.mutate((data) => {
-          data.outbox = data.outbox.filter((other) => !(other.kind === item.kind && other.digest === item.digest))
-          data.deliveries ||= []
-          data.deliveries.push({ kind: item.kind, body: item.body, digest: item.digest, delivered_at: new Date().toISOString() })
-          if (data.deliveries.length > 500) data.deliveries.splice(0, data.deliveries.length - 500)
-        })
-        results.push({ status: item.kind === 'report' ? 'replay_delivered' : 'delivered', kind: item.kind, requestId: item.body.request_id, response })
+        if (item.kind === 'ack') {
+          const receipt = await this.postAcknowledgement(item, { signal })
+          results.push({ status: 'delivered', kind: item.kind, requestId: item.body.request_id, response: receipt.response })
+        } else {
+          const response = await this.http.post(route, item.body, { token: this.identity.token, signal })
+          await this.recordDelivery(item)
+          results.push({ status: item.kind === 'report' ? 'replay_delivered' : 'delivered', kind: item.kind, requestId: item.body.request_id, response })
+        }
       } catch (error) {
-        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : error
-        await this.state.mutate((data) => {
-          const current = data.outbox.find((other) => other.kind === item.kind && other.digest === item.digest)
-          if (!current) return
-          current.attempts += 1
-          current.last_error = error.message
-          if ([401, 403, 409, 410, 422].includes(error.status)) current.next_attempt_at = new Date(864e13).toISOString()
-          else current.next_attempt_at = new Date(Date.now() + Math.min(60_000, 1000 * (2 ** Math.min(current.attempts, 6)))).toISOString()
-        })
-        results.push({ status: 'deferred', kind: item.kind, requestId: item.body.request_id, error: error.message })
+        results.push(await this.defer(item, error, { signal }))
       }
     }
     return results

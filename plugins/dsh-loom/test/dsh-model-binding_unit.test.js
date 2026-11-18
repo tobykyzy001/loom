@@ -5,6 +5,10 @@ import { DshDispatcher } from '../lib/dsh-dispatcher.js'
 import { CoordinatorLoop } from '../lib/coordinator.js'
 import { LoomHttpClient } from '../src/http.js'
 import { LoomNodeClient } from '../src/client.js'
+import { NodeState } from '../src/state.js'
+import { mkdtemp } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const identity = { node_id: 'a'.repeat(64), installation_id: 'install-actual' }
 const invokeDigest = 'b'.repeat(64)
@@ -252,11 +256,14 @@ test('model cancellation preserves immutable binding and requires no new model a
   const acks = []
   const http = new LoomHttpClient({ baseUrl: 'http://127.0.0.1:1', fetch: async (_url, init) => {
     acks.push(JSON.parse(init.body))
-    return new Response(JSON.stringify({ accepted: true }), { headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ accepted: true, acknowledged_at: '2026-11-19T00:00:00.000Z' }), { headers: { 'content-type': 'application/json' } })
   } })
+  // A queue/delivery client needs an actual scoped ledger, not just a display array.
+  // Scope the fallback node id explicitly for this in-memory bound model fixture.
+  subject.runner.state = await NodeState.open(await mkdtemp(join(tmpdir(), 'loom-dsh-binding-cancel-')))
   subject.runner.client = new LoomNodeClient({ http,
-    identity: { nodeId: identity.node_id, data: { installation_id: identity.installation_id }, token: 'fixture-node-token' },
-    state: { outbox: [] } })
+    identity: { nodeId: identity.node_id, data: { node_id: identity.node_id, installation_id: identity.installation_id }, token: 'fixture-node-token' },
+    state: subject.runner.state })
   const loop = new CoordinatorLoop({ max_active_workers: 1 }, subject, subject.runner.client)
   const original = loop.startAssignment(assignment)
   await entered.promise
