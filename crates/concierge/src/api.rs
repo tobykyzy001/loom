@@ -106,6 +106,216 @@ mod tests {
         );
     }
 
+    async fn post_json(app: &Router, uri: String, token: &str, body: Value) -> Response {
+        app.clone()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_retry_refuses_waiting_ticket_but_exact_approval_issues_first_attempt() {
+        const TOKEN: &str = "test-client-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Approval fixture','/owned/approval-fixture','read_write',1,'2026-01-01T00:00:00Z','{\"revision\":\"approval-revision\"}'); INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','worker','/owned/approval-fixture','binding-digest','2026-01-01T00:00:00Z'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','worker','installation','[\"read\"]',1,'grant-digest','2026-01-01T00:00:00Z','binding'); INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('ticket','project','Waiting for explicit approval','read_summary','README.md','Original request','waiting_approval','grant','grant-digest','node','installation','worker',0,0,'2026-01-01T00:01:00Z','2026-01-01T00:01:00Z');").unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        let original = state.lock().unwrap().detail("ticket").unwrap();
+        let grants = state.lock().unwrap().list("grants").unwrap();
+        let bindings = state
+            .lock()
+            .unwrap()
+            .query("SELECT * FROM project_bindings", [])
+            .unwrap();
+
+        let direct = post_json(
+            &app,
+            "/api/v1/tickets/ticket/retry".into(),
+            TOKEN,
+            json!({}),
+        )
+        .await;
+        assert_eq!(direct.status(), StatusCode::BAD_REQUEST);
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(store.detail("ticket").unwrap(), original);
+            assert!(store.audits(Some("ticket")).unwrap().is_empty());
+        }
+
+        let approved = post_json(
+            &app,
+            "/api/v1/tickets/ticket/approval".into(),
+            TOKEN,
+            json!({"decision":"approve","approval_id":"approval-1"}),
+        )
+        .await;
+        assert_eq!(approved.status(), StatusCode::OK);
+        let response: Value = serde_json::from_slice(
+            &axum::body::to_bytes(approved.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response["status"], "running");
+        assert_eq!(response["attempt"], 1);
+        assert_eq!(response["grant_id"], original["grant_id"]);
+        assert_eq!(response["grant_digest"], original["grant_digest"]);
+        for field in [
+            "id",
+            "project_id",
+            "objective",
+            "kind",
+            "relative_path",
+            "content",
+            "node_id",
+            "installation_id",
+            "worker_id",
+            "cancel_requested",
+            "created_at",
+        ] {
+            assert_eq!(response[field], original[field]);
+        }
+        let assignments = response["assignments"].as_array().unwrap();
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0]["attempt"], 1);
+        assert_eq!(assignments[0]["lease_epoch"], 1);
+        assert_eq!(assignments[0]["node_id"], original["node_id"]);
+        assert_eq!(assignments[0]["worker_id"], original["worker_id"]);
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(store.list("grants").unwrap(), grants);
+            assert_eq!(
+                store.query("SELECT * FROM project_bindings", []).unwrap(),
+                bindings
+            );
+            let audits = store.audits(Some("ticket")).unwrap();
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0]["action"], "assignment.retried");
+            assert!(store.verify_audit().unwrap());
+        }
+
+        let repeated = post_json(
+            &app,
+            "/api/v1/tickets/ticket/approval".into(),
+            TOKEN,
+            json!({"decision":"approve","approval_id":"approval-2"}),
+        )
+        .await;
+        assert_eq!(repeated.status(), StatusCode::CONFLICT);
+        let store = state.lock().unwrap();
+        assert_eq!(
+            store.detail("ticket").unwrap()["assignments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.audits(Some("ticket")).unwrap().len(), 1);
+    }
+
+    async fn assert_route_error_preserves_ticket_and_audit(
+        app: &Router,
+        state: &State,
+        uri: String,
+        token: &str,
+        body: Value,
+    ) {
+        let before = state.lock().unwrap().detail("ticket").unwrap();
+        let audits = state.lock().unwrap().audits(None).unwrap();
+        let response = post_json(app, uri, token, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let store = state.lock().unwrap();
+        assert_eq!(store.detail("ticket").unwrap(), before);
+        assert_eq!(store.audits(None).unwrap(), audits);
+        assert!(store
+            .audits(Some("ticket"))
+            .unwrap()
+            .iter()
+            .all(|entry| entry["action"] != "ticket.retried"));
+    }
+
+    #[tokio::test]
+    async fn succeeded_or_already_issued_public_retry_never_audits_a_no_op_as_retried() {
+        const TOKEN: &str = "test-client-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Approval fixture','/owned/retry-fixture','read_write',1,'2026-01-01T00:00:00Z','{}'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','project','node','worker','installation','[\"read\"]',1,'grant-digest','2026-01-01T00:00:00Z'); INSERT INTO tickets(id,project_id,objective,kind,relative_path,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES('ticket','project','Succeeded historical work','read_summary','README.md','succeeded','grant','grant-digest','node','installation','worker',1,0,'2026-01-01T00:01:00Z','2026-01-01T00:01:00Z');").unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        assert_route_error_preserves_ticket_and_audit(
+            &app,
+            &state,
+            "/api/v1/tickets/ticket/retry".into(),
+            TOKEN,
+            json!({}),
+        )
+        .await;
+        assert!(state
+            .lock()
+            .unwrap()
+            .audits(Some("ticket"))
+            .unwrap()
+            .is_empty());
+
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE tickets SET status='waiting_approval',attempt=0 WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        let approved = post_json(
+            &app,
+            "/api/v1/tickets/ticket/approval".into(),
+            TOKEN,
+            json!({"decision":"approve","approval_id":"approval-1"}),
+        )
+        .await;
+        assert_eq!(approved.status(), StatusCode::OK);
+        assert_route_error_preserves_ticket_and_audit(
+            &app,
+            &state,
+            "/api/v1/tickets/ticket/retry".into(),
+            TOKEN,
+            json!({}),
+        )
+        .await;
+        let store = state.lock().unwrap();
+        assert_eq!(
+            store.detail("ticket").unwrap()["assignments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.audits(Some("ticket")).unwrap().len(), 1);
+    }
+
     #[test]
     fn static_serving_only_accepts_bounded_public_directory() {
         assert_eq!(
@@ -3538,7 +3748,7 @@ async fn approval(
         return Ok(Json(store.detail(&ticket)?));
     }
     crate::source_events::ensure_source_work_approval(&store, &ticket)?;
-    crate::maintenance::retry(&store, &ticket)?;
+    crate::maintenance::retry_after_approval(&store, &ticket)?;
     Ok(Json(store.detail(&ticket)?))
 }
 #[derive(Deserialize)]

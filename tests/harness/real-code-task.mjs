@@ -203,8 +203,62 @@ try {
   assert.equal((await git('status', '--porcelain=v1', '--untracked-files=all')).stdout, '')
   assert.equal((await runTests(false)).code, 1)
   // The driver restores the observed test baseline outside the Agent and retains the first history.
-  const retry = await admin.post(`/api/v1/tickets/${first.ticket.id}/retry`, {})
-  const second = await terminal(retry)
+  let second
+  const failedBodies = new Map()
+  const retryReceipts = []
+  const retryWithBrowser = async (page) => {
+    await page.locator('.ticket-detail').getByText('这项任务未能完成', { exact: true }).waitFor()
+    const downloadBodies = async () => {
+      for (const entry of first.done.artifacts) {
+        const fetched = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith(`/artifacts/${entry.id}`))
+        await page.locator('.artifact-card').filter({ hasText: entry.name }).click()
+        const fetchedResponse = await fetched
+        assert.equal(fetchedResponse.status(), 200)
+        const body = await page.locator('.artifact-content').textContent()
+        assert.equal(sha256(Buffer.from(body)), entry.sha256)
+        const content = (await fetchedResponse.json()).content
+        assert.equal(content, body)
+        if (entry.media_type === 'application/json') {
+          assert.equal(JSON.parse(body).exit_code, 1)
+          await page.locator('.code-verification-result[data-exit-code="1"]').waitFor()
+        }
+        failedBodies.set(entry.id, body)
+      }
+    }
+    await downloadBodies()
+    const earlier = await admin.get(`/api/v1/tickets/${first.ticket.id}`)
+    assert.equal(earlier.status, 'failed')
+    assert.equal(earlier.assignments.length, 1)
+    for (const entry of first.done.artifacts) {
+      assert.ok(failedBodies.has(entry.id), `The failed ${entry.media_type} Artifact must have been read from the real UI, not inferred from parsed JSON body variables`)
+    }
+    const url = `/api/v1/tickets/${first.ticket.id}/retry`
+    const requests = []
+    page.on('request', request => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === url) requests.push(request)
+    })
+    await page.getByRole('button', { name: '明确新尝试', exact: true }).click()
+    await page.getByRole('button', { name: '创建新尝试', exact: true }).waitFor()
+    const response = page.waitForResponse(reply => reply.request().method() === 'POST' && new URL(reply.url()).pathname === url)
+    await page.getByRole('button', { name: '创建新尝试', exact: true }).click()
+    const reply = await response
+    assert.equal(reply.status(), 200)
+    assert.deepEqual(reply.request().postDataJSON(), {})
+    const receipt = await reply.json()
+    assert.equal(receipt.status, 'running')
+    assert.equal(receipt.grant_digest, first.done.grant_digest)
+    assert.equal(receipt.assignments.length, 2)
+    const issued = receipt.assignments.find(assignment => assignment.id !== first.ticket.assignments[0].id)
+    assert.ok(issued)
+    assert.equal(issued.attempt, 2)
+    assert.equal(issued.lease_epoch, 2)
+    assert.equal(issued.node_id, first.ticket.assignments[0].node_id)
+    assert.equal(issued.worker_id, first.ticket.assignments[0].worker_id)
+    second = await terminal(receipt)
+    assert.equal(requests.length, 1)
+    retryReceipts.push({ id: first.ticket.id, assignment_ids: receipt.assignments.map(assignment => assignment.id) })
+  }
+  const browserEvidence = await showArtifactsInVue({ server, admin, root, ticket: first.done, beforeInspect: retryWithBrowser })
   assert.equal(second.status, 'succeeded')
   assert.equal(second.assignments.length, 2)
   assert.notEqual(second.assignments[0].id, second.assignments[1].id)
@@ -226,9 +280,29 @@ try {
   assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
   pass('explicit retry is a fresh legal Assignment, does not rewrite the earlier failed source/test evidence', { assignments: second.assignments.map(entry => entry.id), reports: 2 })
 
-  const browserEvidence = await showArtifactsInVue({ server, admin, root, ticket: second })
+  const oldAttempt = second.assignments.find(assignment => assignment.id === first.diffMeta.assignment_id)
+  assert.equal(oldAttempt.attempt, 1)
+  assert.equal(oldAttempt.lease_epoch, 1)
+  assert.deepEqual(second.reports.filter(report => report.assignment_id === oldAttempt.id).map(report => report.id),
+    first.done.reports.map(report => report.id))
+  for (const entry of first.done.artifacts) {
+    assert.match(failedBodies.get(entry.id), entry.media_type === 'text/x-diff' ? /-  return a - b;/ : /"exit_code": 1|exit_code/)
+    assert.equal(sha256(Buffer.from(failedBodies.get(entry.id))), entry.sha256)
+    const afterRetry = await admin.get(`/api/v1/tickets/${second.id}/artifacts/${entry.id}`)
+    assert.equal(sha256(Buffer.from(afterRetry.content)), entry.sha256)
+    assert.equal(afterRetry.content, failedBodies.get(entry.id), 'The same first failed Artifact must remain byte-identical after the UI retry')
+  }
+  Object.assign(browserEvidence, {
+    user_failed_retry: true,
+    retry_post_count: retryReceipts.length,
+    retry_receipts: retryReceipts,
+    new_attempt_assignment: latestAssignmentId,
+    first_attempt_artifacts_before_and_after_checked: [...failedBodies.keys()],
+    first_failed_report_id: first.done.reports[0].id,
+    original_effect_id: first.done.effects[0].id,
+  })
   browserReports.push(browserEvidence)
-  pass('production Vue opens the real diff and verification Artifacts from this DSH Ticket', { desktop: 1280, desktop_viewport_only_narrow: 390 })
+  pass('production Vue explicitly retries the failed task once, preserves the first failed downloads and opens both the second diff and verification', { desktop: 1280, desktop_viewport_only_narrow: 390 })
 
   // The next owned baseline is explicitly constructed by the driver, not Agent rollback.
   // A user may stop after a real completed source edit and before verification begins.
@@ -690,7 +764,7 @@ function stubRequests(root) {
   return readFileSync(join(root, 'private', 'fixture-control.jsonl'), 'utf8').split('\n').filter(Boolean)
     .map(line => JSON.parse(line)).filter(row => row.type === 'request')
 }
-async function showArtifactsInVue({ server, admin, root, ticket }) {
+async function showArtifactsInVue({ server, admin, root, ticket, beforeInspect }) {
   process.env.LOOM_TEST_CONCIERGE_URL = server.baseUrl
   const appRoot = fileURLToPath(new URL('../../apps/web/', import.meta.url))
   const repository = fileURLToPath(new URL('../../', import.meta.url))
@@ -741,6 +815,13 @@ async function showArtifactsInVue({ server, admin, root, ticket }) {
   await page.getByRole('button', { name: '保存并重新连接', exact: true }).click()
   await page.locator('#connection-dialog').waitFor({ state: 'hidden' })
   authenticated = true
+  if (beforeInspect) {
+    await beforeInspect(page)
+    // Never let a changing param/selection turn a failed admin ticket into a
+    // silently successful retry. Read the actual authoritative new Ticket state
+    // only after the real user action and the Node's terminal Report.
+    ticket = await admin.get(`/api/v1/tickets/${ticket.id}`)
+  }
   await page.locator('.ticket-detail').getByText('收到成功报告', { exact: true }).waitFor()
   for (const assignment of ticket.assignments) {
     const diffArtifact = ticket.artifacts.find(artifact => artifact.assignment_id === assignment.id && artifact.media_type === 'text/x-diff')

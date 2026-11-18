@@ -5,6 +5,7 @@ import CodeArtifactView from '../components/CodeArtifactView.vue'
 import { formatBytes, formatTime, projectName, reportStatusLabel, reportStatusTone, safeJson, statusLabel, statusToneFor as statusTone } from '../lib/format'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
+import { canRetryTicket } from '../lib/retryControl'
 
 const props = defineProps<{ ticket: Ticket; projects: Project[]; artifacts: Record<string, ArtifactContent>; busy?: boolean; artifactBusy?: boolean; errors?: Record<string, string> }>()
 const emit = defineEmits<{ cancel: []; retry: []; approve: ['approve' | 'reject', string]; artifact: [artifact: ArtifactRef]; close: [] }>()
@@ -62,12 +63,12 @@ function requestApprove(decision: 'approve' | 'reject') {
 
     <div v-else-if="ticket.status === 'pending'" class="next-action-card neutral-action"><AppIcon name="clock" :size="20" /><div><h3>等待匹配的执行环境</h3><p>Ticket 已保存。还没有证据表明任务开始执行，也尚未产生交付。</p></div></div>
     <div v-else-if="ticket.status === 'running'" class="next-action-card active-action"><span class="pulse-icon"><AppIcon name="sparkle" :size="21" /></span><div><h3>正在处理这项任务</h3><p>执行状态来自结构化 Report。过程消息可以在右侧按需展开。</p></div></div>
-    <div v-else-if="ticket.status === 'reconciling'" class="next-action-card warning-action"><AppIcon name="warning" :size="22" /><div><h3>执行结果未知，需要对账</h3><p>不要假定已经成功。重试只创建明确的新 Attempt，不会自动重放未知副作用。</p></div></div>
+    <div v-else-if="ticket.status === 'reconciling'" class="next-action-card warning-action"><AppIcon name="warning" :size="22" /><div><h3>执行结果未知，需要对账</h3><p>不要假定已经成功。先核对已经发生的副作用；只有明确可重试的失败任务才允许再开一次新 Attempt。</p></div></div>
     <div v-else-if="ticket.status === 'failed'" class="next-action-card danger-action"><AppIcon name="warning" :size="22" /><div><h3>这项任务未能完成</h3><p>失败报告与已产生的证据都会保留，不会被成功消息覆盖。</p></div></div>
     <div v-else-if="ticket.status === 'cancelled'" class="next-action-card neutral-action"><AppIcon name="check" :size="21" /><div><h3>任务已取消</h3><p>取消意图和已有的执行证据仍然保留。</p></div></div>
     <div v-else-if="ticket.status === 'succeeded'" class="next-action-card success-action"><AppIcon name="check" :size="21" /><div><h3>收到成功报告</h3><p>{{ ticket.artifacts?.length ? '请检查交付内容与生成证据。' : '任务已收到成功状态；尚无可用 Artifact，报告可能只包含文本证据。' }}</p></div></div>
     <div v-if="errors?.['ticket-write']" class="inline-note danger-note" role="alert">{{ errors['ticket-write'] }}</div>
-    <div class="detail-actions"><button class="button secondary" @click="emit('close')"><AppIcon name="plus" :size="15" />新的任务</button><div class="button-row"><button v-if="['running', 'pending', 'waiting_approval', 'reconciling'].includes(ticket.status)" class="button secondary" :disabled="busy || ticket.cancel_requested" @click="emit('cancel')"><AppIcon name="close" :size="15" />取消任务</button><button v-if="['failed', 'reconciling'].includes(ticket.status)" class="button secondary" :disabled="busy" @click="emit('retry')"><AppIcon name="refresh" :size="15" />明确新尝试</button></div></div>
+    <div class="detail-actions"><button class="button secondary" @click="emit('close')"><AppIcon name="plus" :size="15" />新的任务</button><div class="button-row"><button v-if="['running', 'pending', 'waiting_approval', 'reconciling'].includes(ticket.status)" class="button secondary" :disabled="busy || ticket.cancel_requested" @click="emit('cancel')"><AppIcon name="close" :size="15" />取消任务</button><button v-if="canRetryTicket(ticket)" class="button secondary" :disabled="busy" @click="emit('retry')"><AppIcon name="refresh" :size="15" />明确新尝试</button><button v-else-if="ticket.status === 'reconciling'" class="button secondary" title="先核对已有副作用，不能重试或创建另一份执行" disabled><AppIcon name="warning" :size="15" />先处理对账</button></div></div>
 
     <section class="deliverables">
       <div class="section-heading"><h2>交付产物 <span class="count-pill">{{ ticket.artifacts?.length ?? 0 }}</span></h2><span class="tiny muted">AUTHORIZED ARTIFACTS</span></div>

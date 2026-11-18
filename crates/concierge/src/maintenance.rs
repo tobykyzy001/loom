@@ -480,31 +480,47 @@ pub fn retry(store: &Store, ticket: &str) -> Result<()> {
     if t["cancel_requested"] == true {
         bail!("Durable stop intent cannot be overwritten by an automatic retry")
     }
-    let status = t["status"].as_str().unwrap_or_default();
-    if status == "succeeded" {
-        return Ok(());
+    if t["status"] != "failed" {
+        bail!("Only a failed Ticket can be retried")
     }
-    if !store
+    issue_next_attempt(store, &t, ticket)
+}
+
+pub fn retry_after_approval(store: &Store, ticket: &str) -> Result<()> {
+    let t = store.get("tickets", ticket)?.context("ticket not found")?;
+    if t["status"] == "reconciling" {
+        bail!("Unresolved outcomes require effect reconciliation, not blind retry.")
+    }
+    if t["cancel_requested"] == true {
+        bail!("Durable stop intent cannot be overwritten by an automatic retry")
+    }
+    if t["status"] != "waiting_approval" {
+        bail!("Only an exactly waiting-for-approval Ticket can issue its first attempt")
+    }
+    issue_next_attempt(store, &t, ticket)
+}
+
+fn issue_next_attempt(store: &Store, t: &Value, ticket: &str) -> Result<()> {
+    if store
         .query(
             "SELECT id FROM grants WHERE id=?1 AND revoked_at IS NULL",
             [t["grant_id"].as_str().unwrap_or_default()],
         )?
         .is_empty()
     {
-        let epoch = t["attempt"].as_i64().unwrap_or(0) + 1;
-        let asg = id("asg");
-        let program = store
-            .get("projects", t["project_id"].as_str().unwrap())?
-            .unwrap_or(Value::Null);
-        store.conn().execute(
-            "UPDATE tickets SET status='running',attempt=?1,updated_at=?2 WHERE id=?3",
-            params![epoch, crate::now(), ticket],
-        )?;
-        store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) SELECT ?1,id,node_id,worker_id,?2,?3,?2,?4,?5 FROM tickets WHERE id=?6",params![asg,epoch,id("lease"),(chrono::Utc::now()+chrono::Duration::seconds(75)).to_rfc3339(),crate::now(),ticket])?;
-        store.audit(Some(ticket),"client","assignment.retried",&json!({"attempt":epoch,"node_id":t["node_id"],"project_revision":program["inventory"]["revision"]}))?;
-    } else {
         bail!("Grant revoked; cannot reactivate authorization through retry")
     }
+    let epoch = t["attempt"].as_i64().unwrap_or(0) + 1;
+    let asg = id("asg");
+    let program = store
+        .get("projects", t["project_id"].as_str().unwrap())?
+        .unwrap_or(Value::Null);
+    store.conn().execute(
+        "UPDATE tickets SET status='running',attempt=?1,updated_at=?2 WHERE id=?3",
+        params![epoch, crate::now(), ticket],
+    )?;
+    store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) SELECT ?1,id,node_id,worker_id,?2,?3,?2,?4,?5 FROM tickets WHERE id=?6",params![asg,epoch,id("lease"),(chrono::Utc::now()+chrono::Duration::seconds(75)).to_rfc3339(),crate::now(),ticket])?;
+    store.audit(Some(ticket),"client","assignment.retried",&json!({"attempt":epoch,"node_id":t["node_id"],"project_revision":program["inventory"]["revision"]}))?;
     Ok(())
 }
 
@@ -1212,6 +1228,227 @@ mod observation_tests {
             "Only real accepted/retracted and reviewed commands are audited"
         );
         assert!(store.verify_audit().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        store: Store,
+    }
+
+    fn insert_ticket(store: &Store, id: &str, status: &str, attempt: i64, cancel: bool) {
+        store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES(?1,'project-a','Original bounded objective','edit_file','src/original.txt','Original immutable input',?2,'grant-a','immutable-grant-digest','node-a','installation-a','worker-a',?3,?4,'2026-01-01T00:00:00Z','2026-01-01T00:01:00Z')",params![id,status,attempt,cancel]).unwrap();
+    }
+
+    fn fixture(status: &str, attempt: i64, cancel: bool) -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        store.conn().execute_batch("BEGIN; INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project-a','Original project','/owned/project-a','read_write',4,'2026-01-01T00:00:00Z','{\"revision\":\"original-revision\"}'); INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding-a','project-a','node-a','installation-a','worker-a','/owned/project-a','binding-digest-a','2026-01-01T00:00:00Z'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant-a','project-a','node-a','worker-a','installation-a','[\"edit_file\"]',1,'immutable-grant-digest','2026-01-01T00:00:00Z','binding-a'); COMMIT; PRAGMA foreign_keys=ON;").unwrap();
+        insert_ticket(&store, "ticket-a", status, attempt, cancel);
+        insert_ticket(&store, "unrelated-ticket", "failed", 3, false);
+        for (assignment, ticket) in [
+            ("original-assignment", "ticket-a"),
+            ("unrelated-assignment", "unrelated-ticket"),
+        ] {
+            store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,acknowledged_at,created_at,cancelled_at,last_report_at) VALUES(?1,?2,'node-a','worker-a',1,?3,1,'2026-01-01T01:00:00Z','2026-01-01T00:30:00Z','2026-01-01T00:10:00Z',NULL,'2026-01-01T00:50:00Z')",params![assignment,ticket,format!("lease-{assignment}")]).unwrap();
+        }
+        if attempt > 0 {
+            store.conn().execute("UPDATE assignments SET attempt=?1,lease_epoch=?1 WHERE id='original-assignment'", [attempt]).unwrap();
+        }
+        store.conn().execute("INSERT INTO reports(id,assignment_id,ticket_id,node_id,lease_epoch,request_id,state,summary,evidence,session_ref,cancel_acknowledged,created_at) VALUES('original-report','original-assignment','ticket-a','node-a',?1,'original-request','failed','Original failure report','[{\"proof\":\"original\"}]','session-original',0,'2026-01-01T00:50:00Z')",[attempt.max(1)]).unwrap();
+        store.conn().execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES('original-artifact','ticket-a','original-assignment','node-a','original.txt','text/plain',17,'original-artifact-sha','original.storage','loom://artifact/original-artifact','[]','2026-01-01T00:51:00Z')",[]).unwrap();
+        store.conn().execute("INSERT INTO effects(id,ticket_id,assignment_id,node_id,attempt,input_digest,status,evidence,artifacts,created_at,updated_at) VALUES('original-effect','ticket-a','original-assignment','node-a',?1,'original-input-digest','confirmed','[{\"proof\":\"original-effect\"}]','[\"original-artifact\"]','2026-01-01T00:52:00Z','2026-01-01T00:52:00Z')",[attempt.max(1)]).unwrap();
+        if matches!(status, "pending" | "waiting_approval") {
+            for table in ["reports", "artifacts", "effects"] {
+                store
+                    .conn()
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE ticket_id='ticket-a'"),
+                        [],
+                    )
+                    .unwrap();
+            }
+        }
+        store
+            .audit(
+                Some("ticket-a"),
+                "node",
+                "original.history",
+                &json!({"immutable":true}),
+            )
+            .unwrap();
+        Fixture {
+            _directory: directory,
+            store,
+        }
+    }
+
+    fn assert_retry_refused(fixture: &Fixture, id: &str, expected: Option<&str>) {
+        let store = &fixture.store;
+        let ticket = store.get("tickets", id).unwrap().unwrap();
+        let history = store.detail(id).unwrap();
+        let audits = store.audits(None).unwrap();
+        let grants = store.list("grants").unwrap();
+        let projects = store.list("projects").unwrap();
+        let bindings = store.query("SELECT * FROM project_bindings", []).unwrap();
+        let unrelated = store.detail("unrelated-ticket").unwrap();
+        let error = retry(store, id).unwrap_err();
+        if let Some(expected) = expected {
+            assert_eq!(error.to_string(), expected);
+        }
+        assert_eq!(store.get("tickets", id).unwrap().unwrap(), ticket);
+        assert_eq!(store.detail(id).unwrap(), history);
+        assert_eq!(store.audits(None).unwrap(), audits);
+        assert_eq!(store.list("grants").unwrap(), grants);
+        assert_eq!(store.list("projects").unwrap(), projects);
+        assert_eq!(
+            store.query("SELECT * FROM project_bindings", []).unwrap(),
+            bindings
+        );
+        assert_eq!(store.detail("unrelated-ticket").unwrap(), unrelated);
+        assert!(
+            !store.audits(Some(id)).unwrap().iter().any(|entry| matches!(
+                entry["action"].as_str(),
+                Some("ticket.retried" | "assignment.retried")
+            ))
+        );
+    }
+
+    #[test]
+    fn public_retry_rejects_non_failed_and_stopped_states_without_any_mutation() {
+        for (status, cancel) in [
+            ("pending", false),
+            ("running", false),
+            ("waiting_approval", false),
+            ("cancel_requested", false),
+            ("cancelled", false),
+            ("succeeded", false),
+            ("reconciling", false),
+            ("unknown", false),
+            ("stopped", false),
+            ("future_arbitrary_status", false),
+            ("failed", true),
+            ("running", true),
+        ] {
+            let fixture = fixture(status, 1, cancel);
+            let expected = match (status, cancel) {
+                ("reconciling", _) => {
+                    Some("Unresolved outcomes require effect reconciliation, not blind retry.")
+                }
+                (_, true) => {
+                    Some("Durable stop intent cannot be overwritten by an automatic retry")
+                }
+                _ => None,
+            };
+            assert_retry_refused(&fixture, "ticket-a", expected);
+        }
+    }
+
+    #[test]
+    fn failed_retry_issues_a_distinct_second_attempt_and_preserves_original_history() {
+        let fixture = fixture("failed", 1, false);
+        let store = fixture.store;
+        let before = store.detail("ticket-a").unwrap();
+        let audits = store.audits(None).unwrap();
+        let grants = store.list("grants").unwrap();
+        let projects = store.list("projects").unwrap();
+        let bindings = store.query("SELECT * FROM project_bindings", []).unwrap();
+        let unrelated = store.detail("unrelated-ticket").unwrap();
+
+        retry(&store, "ticket-a").unwrap();
+        assert_eq!(store.audits(None).unwrap().len(), audits.len() + 1);
+
+        let after = store.detail("ticket-a").unwrap();
+        assert_eq!(after["status"], "running");
+        assert_eq!(after["attempt"], 2);
+        assert_eq!(after["cancel_requested"], false);
+        for field in [
+            "id",
+            "project_id",
+            "objective",
+            "kind",
+            "relative_path",
+            "content",
+            "grant_id",
+            "grant_digest",
+            "node_id",
+            "installation_id",
+            "worker_id",
+            "created_at",
+        ] {
+            assert_eq!(
+                after[field], before[field],
+                "immutable Ticket field {field}"
+            );
+        }
+        let assignments = after["assignments"].as_array().unwrap();
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0]["id"], "original-assignment");
+        assert_eq!(assignments[0]["lease_id"], "lease-original-assignment");
+        assert_eq!(before["assignments"][0], assignments[0]);
+        let current = assignments
+            .iter()
+            .find(|assignment| assignment["id"] != "original-assignment")
+            .unwrap();
+        assert_eq!(current["attempt"], 2);
+        assert_eq!(current["lease_epoch"], 2);
+        assert_eq!(current["node_id"], "node-a");
+        assert_eq!(current["worker_id"], "worker-a");
+        assert_ne!(current["lease_id"], "lease-original-assignment");
+        assert_eq!(after["reports"], before["reports"]);
+        assert_eq!(after["artifacts"], before["artifacts"]);
+        assert_eq!(after["effects"], before["effects"]);
+        assert_eq!(store.list("grants").unwrap(), grants);
+        assert_eq!(store.list("projects").unwrap(), projects);
+        assert_eq!(
+            store.query("SELECT * FROM project_bindings", []).unwrap(),
+            bindings
+        );
+        assert_eq!(store.detail("unrelated-ticket").unwrap(), unrelated);
+        let audits = store.audits(Some("ticket-a")).unwrap();
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry["action"] == "assignment.retried")
+                .count(),
+            1
+        );
+        assert!(!audits
+            .iter()
+            .any(|entry| entry["action"] == "ticket.retried"));
+        assert!(store.verify_audit().unwrap());
+    }
+
+    #[test]
+    fn absent_or_revoked_grant_cannot_interpolate_another_scope() {
+        for revoke_only in [false, true] {
+            let fixture = fixture("failed", 1, false);
+            let store = fixture.store;
+            store.conn().execute_batch("INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding-b','project-a','node-b','installation-b','worker-b','/owned/project-a','binding-digest-b','2026-01-01T00:00:00Z'); INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant-b','project-a','node-b','worker-b','installation-b','[\"edit_file\"]',1,'alternate-grant-digest','2026-01-01T00:00:00Z','binding-b');").unwrap();
+            if revoke_only {
+                store.conn().execute("UPDATE grants SET revoked_at='2026-01-01T02:00:00Z',version=2 WHERE id='grant-a'",[]).unwrap();
+            } else {
+                store.conn().execute("PRAGMA foreign_keys=OFF", []).unwrap();
+                store
+                    .conn()
+                    .execute("DELETE FROM grants WHERE id='grant-a'", [])
+                    .unwrap();
+                store.conn().execute("PRAGMA foreign_keys=ON", []).unwrap();
+            }
+            let fixture = Fixture {
+                _directory: fixture._directory,
+                store,
+            };
+            assert_retry_refused(
+                &fixture,
+                "ticket-a",
+                Some("Grant revoked; cannot reactivate authorization through retry"),
+            );
+        }
     }
 }
 

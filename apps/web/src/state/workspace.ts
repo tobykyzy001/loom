@@ -7,6 +7,7 @@ import { safeRelativePath } from '../lib/format'
 import { SkillActions, type SkillWorkspaceReference } from '../lib/skillActions'
 import { InstallPlanActions, type InstallPlanRefresh } from '../lib/installPlan'
 import { modelReadError, parseModelInventory } from '../lib/modelInventory'
+import { canRetryTicket } from '../lib/retryControl'
 export interface WorkspaceState {
   page: Page
   installPlans: InstallPlan[]
@@ -718,6 +719,13 @@ export async function cancelTicket(id: string) {
 }
 
 export async function retryTicket(id: string) {
+  // Re-read the currently selected Ticket when the deferred confirmation runs.
+  // Never turn an unsupported/stopped Ticket or another selection into a new Attempt.
+  const current = state.selectedTicketId === id ? state.ticket : null
+  if (!current || current.id !== id || !canRetryTicket(current)) {
+    state.errors['ticket-write'] = '只有真正失败且没有停止意图的任务才能创建新尝试；未知结果请先核对已有副作用。'
+    return false
+  }
   const result = await run('ticket-write', () => client.post<unknown>(`/tickets/${encodeURIComponent(id)}/retry`))
   if (result === undefined) return false
   await selectTicket(id)

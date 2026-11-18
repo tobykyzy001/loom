@@ -25,6 +25,7 @@ import HelpView from './views/HelpView.vue'
 import { useWorkspace, refresh, reconnect, navigate, readPreferences, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory, createSourceWorkTransport, createTicketFromSource, sourceOperationError } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
 import { grantOperationsSummary } from './lib/permissions'
+import { canRetryTicket } from './lib/retryControl'
 import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate, InstallOutcome, InstallPlan, InstallTarget, SourceWorkDraft, Ticket } from './api/types'
 
 const { state, ticket, projects, tickets, nodes, bootstrap, expanded } = useWorkspace()
@@ -166,7 +167,7 @@ function ticketCancel() {
 }
 function ticketRetry() {
   const id = ticket.value?.id
-  if (!id || !['failed', 'reconciling'].includes(ticket.value!.status)) return
+  if (!id || !canRetryTicket(ticket.value)) return
   ask({ title: '创建一次明确的新尝试？', effect: '协调器创建新的 Attempt，系统不会由前端重放任何未知副作用。', changes: ['保留既有报告与证据', '重新核对匹配的 Grant 与 Lease'], confirmLabel: '创建新尝试' }, () => retryTicket(id))
 }
 function approval(decision: 'approve' | 'reject', reason: string) {

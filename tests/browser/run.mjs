@@ -609,6 +609,7 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
   })
 }
 async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server, projectRoot, result, createTask, tick }) {
+  result.revocation_before_first_poll ||= {}
   const path = 'nested/revoked-before-first-poll.txt'
   const ticketId = await createTask({ objective: 'Synthetic browser pending revoked grant', kind: 'edit_file', path, content: 'This unclaimed assignment must not execute after its Grant is revoked.\n' })
   const pending = await admin.get(`/api/v1/tickets/${ticketId}`)
@@ -734,7 +735,42 @@ async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server,
   await reloadedCard.locator('.status-badge').filter({ hasText: '已撤销', exact: true }).waitFor()
   assert.equal(await reloadedCard.locator('.status-badge').innerText(), '已撤销', 'Reload must recover the persisted revocation, not an optimistic UI reset')
   assert.equal(await reloadedCard.getByRole('button', { name: '撤销授权', exact: true }).count(), 0)
+
+  // Reconciliation is not a valid retry offer even when the central ticket is visible.
+  await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
+  if (!(await page.locator('.ticket-detail h1').count()) || !(await page.locator('.ticket-detail h1').innerText()).includes('Synthetic browser pending revoked grant')) {
+    if (await page.getByRole('button', { name: '新的任务', exact: true }).count()) {
+      await page.getByRole('button', { name: '新的任务', exact: true }).click()
+    }
+    await page.locator('.ticket-item').filter({ hasText: 'Synthetic browser pending revoked grant' }).click()
+  }
+  await page.locator('.ticket-detail').getByText('执行结果未知，需要对账', { exact: true }).waitFor()
+  const unavailableRetry = page.getByRole('button', { name: '先处理对账', exact: true })
+  assert.equal(await unavailableRetry.isDisabled(), true)
+  const retryRequests = []
+  page.on('request', request => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === `/api/v1/tickets/${ticketId}/retry`) retryRequests.push(request.url())
+  })
+  await unavailableRetry.click({ force: true })
+  assert.equal(retryRequests.length, 0)
+  assert.equal(await page.locator('.confirm-modal').count(), 0)
+  await assert.rejects(admin.post(`/api/v1/tickets/${ticketId}/retry`, {}), error => {
+    assert.equal(error.status, 400)
+    assert.match(error.message, /reconciliation/)
+    return true
+  })
+  const nonRetried = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(nonRetried.status, 'reconciling')
+  assert.equal(nonRetried.attempt, pending.attempt)
+  assert.equal(nonRetried.assignments.length, 1)
+  assert.equal(nonRetried.assignments[0].id, admitted.id)
+  assert.equal(nonRetried.reports.length + nonRetried.artifacts.length + nonRetried.effects.length, 0)
+  assert.ok([false, 0].includes(nonRetried.cancel_requested))
+  result.revocation_before_first_poll.reconciling_ui_no_retry_offer = true
+  result.revocation_before_first_poll.reconciling_retry_browser_posts = retryRequests.length
+  result.revocation_before_first_poll.direct_reconciling_retry = { status: 400, new_assignment: false }
   result.revocation_before_first_poll = {
+    ...result.revocation_before_first_poll,
     ticket_id: ticketId, grant_id: grantBefore.id, assignment_id: admitted.id,
     before_status: 'running', after_status: revoked.status, grant_version: currentGrant.version,
     revoked_at: currentGrant.revoked_at, original_digest_retained: true,
@@ -745,5 +781,10 @@ async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server,
     file_effect_absent: true, failed_reuse_status: 403, new_ticket_on_rejected_reuse: false,
     persisted_revoked_badge: true, original_successful_artifact_hash: result.actual_write.content_sha256,
   }
+  // The emitted proof must retain the exact negative control facts we actually asserted,
+  // not overwrite them with the broader revoking summary object.
+  assert.equal(result.revocation_before_first_poll.reconciling_ui_no_retry_offer, true)
+  assert.equal(result.revocation_before_first_poll.reconciling_retry_browser_posts, 0)
+  assert.deepEqual(result.revocation_before_first_poll.direct_reconciling_retry, { status: 400, new_assignment: false })
 }
 await run()
