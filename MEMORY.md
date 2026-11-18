@@ -308,6 +308,9 @@
 - 范围仍明文受限：只有一 owned Git简单函数与小测试、当前平台macOS、单真实隔离DSH SingleNode和纯fixture zero-network stub。没有 universal code agent/natural language quality, shell/remoteCredentials/network, live LLM, M3代码worktree request/Reviewer/Stage, true second HostInstallation, physical mobile lock screen / synchronization、IM/OAuth或1+3 benchmark的假完成。完整真实证据契约/复现命令见 `tests/harness/CODE_TASK.md`。src code默认OFF，不能因为API route/两种artifact Schema出现就不触发安装和激活来声援生产设备。
 
 
+- **Checkpoint `1866f77 feat: verify scoped source edits and tests with DSH`**: 22 native code/evidence/fixture/driver/docs files，没有临时Screenshots/Profiles/Credentials/Providers/Auth credentials。当前 main领先 origin/main **64 且未推送**，不将有限code样例标成已验证整个M0或platform。最终独立读码与事件序列审查**局部分块 ACCEPT**：`code_outcome_requires_review` 后再核对 bounded File Effects，补齐之前 direct `turn/end(error)`导致 failed 绕过证据 的问题。独立spy证明proof actually执行；其它非current Scope和 old Session 不借用。Latest Plugin63 (not prior 61)，Vue91，Node22，fixture18，bundle31，Rust/workspace/raports+source workflows全阶段与真实普通Browser PASSED；`node tests/harness/real-code-task.mjs` latest actual `overall:PASS`、8 checks， Source browser也PASS/owned_cleanup=true. 真实单纯异常 Host 尚未逐 故障注入全矩阵，更不是物理多机/iPhone/付费LLM/通用 coder /通用 Pipeline 支持。
+- **保留明确工作样例报告以便另一次复核**：最新实跑 `/tmp/loom-code-task-proof-final-3SNueF/result.json`，另有 desktop/narrow Artifact evidence PNG 在 owned output path；fixture清理不会 educed只是把临时path当commit evidence。主要事实包括源file真实Input与diff、ACTUAL node:test/exit reports、2 attempts/2 reports/2 confirmed effects/4 Artifacts 与 两个 Assignment UUID，以及生产Vue显示、source-after reopens不增量。下一次继续M0本机第二项实际缺口，保持不明显平台/多机真机未验。
+
 ## Open problems and resolutions
 
 - Scope is large and includes actual hardware, platform-signed distribution and mobile verification. Proceed in evidenced increments rather than marking roadmap milestones complete from mocks, compilation or unit tests.
