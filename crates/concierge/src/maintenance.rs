@@ -299,7 +299,7 @@ pub fn create_ticket(
 
 pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Value>> {
     crate::pipeline::advance_all(store)?;
-    let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at, g.operations as grant_operations FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND g.revoked_at IS NULL AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling') ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
+    let assignment=store.query("SELECT t.id as ticket_id,t.project_id,t.kind,t.objective,t.relative_path,t.content,t.status,t.node_id,t.installation_id,t.worker_id,t.attempt,t.grant_digest,t.cancel_requested,a.id as assignment_id,a.lease_id,a.lease_epoch,a.lease_expires_at,g.operations as grant_operations,g.revoked_at as grant_revoked_at FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id WHERE a.node_id=?1 AND t.attempt=a.lease_epoch AND (t.status IN ('running','cancel_requested') OR (t.status IN ('reconciling') AND a.last_report_at IS NULL)) AND (g.revoked_at IS NULL OR (t.status='reconciling' AND t.kind='edit_file' AND t.cancel_requested=0 AND a.acknowledged_at IS NOT NULL AND a.last_report_at IS NULL AND g.version=2 AND t.grant_digest=g.digest)) AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling') ORDER BY a.created_at DESC LIMIT 1",[node_id])?.into_iter().next();
     if let Some(mut assignment) = assignment {
         crate::source_events::ensure_source_work_approval(
             store,
@@ -379,7 +379,17 @@ pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Va
             )?
             .into_iter()
             .next());
-        assignment["grant_version"] = assignment["grant"]["version"].clone();
+        let revoked_stop = !assignment["grant_revoked_at"].is_null();
+        // Grants are created at version 1. The sole production version mutation is
+        // revoke_grant's single increment, and the revoked selection above also
+        // requires the Ticket's original digest to match. Preserve that admitted
+        // version for the node-side identity fence; the Grant object separately
+        // exposes its current version and revoked status. Never infer other deltas.
+        assignment["grant_version"] = if revoked_stop {
+            json!(1)
+        } else {
+            assignment["grant"]["version"].clone()
+        };
         assignment["grant_digest"] = assignment["grant"]["digest"].clone();
         assignment["grants"] = json!([assignment["grant"]]);
         if assignment["kind"] == "model_text" {
@@ -401,6 +411,30 @@ pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Va
             "SELECT root_scope,project_id,node_id,installation_id,worker_id FROM project_bindings WHERE id=?1 AND revoked_at IS NULL",
             [assignment["grant"]["project_binding_id"].as_str().unwrap_or_default()],
         )?.into_iter().next().ok_or_else(|| anyhow::anyhow!("The assignment's exact project binding is gone"))?;
+        if revoked_stop {
+            let exact_physical_binding = [
+                ("project_id", "project_id"),
+                ("node_id", "node_id"),
+                ("installation_id", "installation_id"),
+                ("worker_id", "worker_id"),
+            ]
+            .into_iter()
+            .all(|(binding_key, ticket_key)| binding[binding_key] == assignment[ticket_key]);
+            let root = binding["root_scope"].as_str().unwrap_or_default();
+            if !exact_physical_binding || !root.starts_with('/') || root == "/" {
+                bail!("A revoked assignment requires its original exact physical project binding");
+            }
+            // This stop is only for deterministic file work, not the reissued
+            // source-input or special model/credential authority paths.
+            if crate::pipeline::input_for_assignment(
+                store,
+                assignment["ticket_id"].as_str().unwrap_or_default(),
+            )?
+            .is_some()
+            {
+                bail!("A revoked stop cannot carry a derived source-work authority path");
+            }
+        }
         if assignment["kind"] != "credential_ref" {
             assignment["grant"]["project_root"] = binding["root_scope"].clone();
         }
@@ -1178,5 +1212,180 @@ mod observation_tests {
             "Only real accepted/retracted and reviewed commands are audited"
         );
         assert!(store.verify_audit().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod revoked_assignment_tests {
+    use super::*;
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        store: Store,
+    }
+
+    fn fixture(kind: &str) -> Fixture {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let created = crate::now();
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Bounded fixture','/private/poll-fixture','read_write',1,?1,'{}')", [&created]).unwrap();
+        store.conn().execute("INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default','/private/poll-fixture','binding-digest',?1)", [&created]).unwrap();
+        store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"write\"]',1,'original-grant-digest',?1,'binding')", [&created]).unwrap();
+        store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES('ticket','project','Bounded original work',?1,'src/calc.js','original task input','running','grant','original-grant-digest','node','installation','default',1,?2,?2)", params![kind,created]).unwrap();
+        store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES('assignment','ticket','node','default',1,'lease',1,?1,?2)", params![created,created]).unwrap();
+        Fixture {
+            _directory: directory,
+            store,
+        }
+    }
+
+    fn revoke_running(fixture: &Fixture, acknowledged: bool) {
+        let at = crate::now();
+        fixture
+            .store
+            .conn()
+            .execute(
+                "UPDATE grants SET revoked_at=?1,version=version+1 WHERE id='grant'",
+                [&at],
+            )
+            .unwrap();
+        fixture
+            .store
+            .conn()
+            .execute(
+                "UPDATE tickets SET status='reconciling',updated_at=?1 WHERE id='ticket'",
+                [&at],
+            )
+            .unwrap();
+        fixture
+            .store
+            .conn()
+            .execute(
+                "UPDATE assignments SET lease_expires_at=?1,acknowledged_at=?2 WHERE id='assignment'",
+                params![&at, acknowledged.then_some(&at)],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn admitted_revoked_edit_file_gets_repeatable_stop_without_lease_or_identity_change() {
+        let fixture = fixture("edit_file");
+        let mut mutable_store = fixture.store;
+        let initial = assignment_for_poll(&mut mutable_store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial["purpose"], "execute");
+        assert_eq!(initial["grant_status"], true);
+        assert_eq!(initial["grant_version"], 1);
+
+        mutable_store
+            .conn()
+            .execute(
+                "UPDATE assignments SET acknowledged_at=?1 WHERE id='assignment'",
+                [crate::now()],
+            )
+            .unwrap();
+        let fixture = Fixture {
+            _directory: fixture._directory,
+            store: mutable_store,
+        };
+        revoke_running(&fixture, true);
+        let expired = fixture
+            .store
+            .get("assignments", "assignment")
+            .unwrap()
+            .unwrap()["lease_expires_at"]
+            .clone();
+        let mut mutable_store = fixture.store;
+        let stop = assignment_for_poll(&mut mutable_store, "node")
+            .unwrap()
+            .unwrap();
+        let repeated = assignment_for_poll(&mut mutable_store, "node")
+            .unwrap()
+            .unwrap();
+
+        for frame in [&stop, &repeated] {
+            assert_eq!(initial["id"], frame["id"]);
+            assert_eq!(initial["ticket_id"], frame["ticket_id"]);
+            assert_eq!(initial["lease_id"], frame["lease_id"]);
+            assert_eq!(initial["lease_epoch"], frame["lease_epoch"]);
+            assert_eq!(initial["attempt"], frame["attempt"]);
+            assert_eq!(initial["objective"], frame["objective"]);
+            assert_eq!(initial["content"], frame["content"]);
+            assert_eq!(initial["operation"], frame["operation"]);
+            assert_eq!(initial["grant_digest"], frame["grant_digest"]);
+            assert_eq!(initial["grant_version"], frame["grant_version"]);
+            assert_eq!(frame["purpose"], "reconcile");
+            assert_eq!(frame["grant_status"], false);
+            assert_eq!(frame["cancel_requested"], false);
+            assert_eq!(frame["lease_expires_at"], expired);
+            assert_eq!(frame["grant"]["version"], 2);
+            assert!(frame["grant"]["revoked_at"].is_string());
+            assert_eq!(frame["grant"]["project_root"], "/private/poll-fixture");
+            assert_eq!(frame["resource"]["node_id"], "node");
+            assert_eq!(frame["resource"]["installation_id"], "installation");
+            assert_eq!(frame["resource"]["worker_id"], "default");
+        }
+        assert_eq!(stop, repeated);
+        assert_eq!(
+            mutable_store
+                .get("assignments", "assignment")
+                .unwrap()
+                .unwrap()["lease_expires_at"],
+            expired,
+            "the expired revoked lease must not be renewed"
+        );
+    }
+
+    #[test]
+    fn revoked_assignment_needs_admission_and_an_unreported_bounded_edit_shape() {
+        for (kind, acknowledged, reported) in [
+            ("edit_file", false, false),
+            ("edit_file", true, true),
+            ("read_summary", true, false),
+            ("model_text", true, false),
+            ("model_descriptor", true, false),
+            ("credential_ref", true, false),
+            ("dsh_agent_turn", true, false),
+        ] {
+            let fixture = fixture(kind);
+            revoke_running(&fixture, acknowledged);
+            if reported {
+                fixture
+                    .store
+                    .conn()
+                    .execute(
+                        "UPDATE assignments SET last_report_at=?1 WHERE id='assignment'",
+                        [crate::now()],
+                    )
+                    .unwrap();
+            }
+            let mut store = fixture.store;
+            assert!(
+                assignment_for_poll(&mut store, "node").unwrap().is_none(),
+                "kind={kind}, acknowledged={acknowledged}, reported={reported} must not redeliver a revoked Assignment"
+            );
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap()["last_report_at"]
+                    .is_null(),
+                !reported
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_grant_or_explicit_cancel_cannot_become_a_revocation_snapshot() {
+        for mutation in [
+            "UPDATE grants SET version=3 WHERE id='grant'",
+            "UPDATE grants SET digest='changed-grant-digest' WHERE id='grant'",
+            "UPDATE tickets SET grant_digest='changed-grant-digest' WHERE id='ticket'",
+            "UPDATE tickets SET cancel_requested=1 WHERE id='ticket'",
+        ] {
+            let fixture = fixture("edit_file");
+            revoke_running(&fixture, true);
+            fixture.store.conn().execute(mutation, []).unwrap();
+            let mut store = fixture.store;
+            assert!(assignment_for_poll(&mut store, "node").unwrap().is_none());
+        }
     }
 }

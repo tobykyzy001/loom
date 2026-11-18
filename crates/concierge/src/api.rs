@@ -23,6 +23,89 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn revoke_route_records_current_fence_and_audit() {
+        const TOKEN: &str = "test-client-token-123456789012345";
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("owned-project");
+        std::fs::create_dir(&root).unwrap();
+        let store = crate::store::Store::open(directory.path().join("db")).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','owned',?1,'read_write',1,?2,'{}')", params![root.to_string_lossy(), crate::now()]).unwrap();
+        for statement in [
+            "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('binding','project','node','installation','default','/owned-project','binding-proof','2026-01-01T00:00:00Z')",
+            "INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('grant','project','node','default','installation','[\"write\"]',1,'original-digest','2026-01-01T00:00:00Z','binding')",
+        ] { store.conn().execute_batch(statement).unwrap(); }
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        let call = || {
+            axum::extract::Request::builder()
+                .method("POST")
+                .uri("/api/v1/grants/grant/revoke")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap()
+        };
+        let response = app.clone().oneshot(call()).await.unwrap();
+        assert_eq!(response.status(), 200);
+        {
+            let store = state.lock().unwrap();
+            for sequence in 0..28 {
+                store
+                    .audit(
+                        None,
+                        "fixture",
+                        "fixture.read-marker",
+                        &json!({"sequence":sequence}),
+                    )
+                    .unwrap();
+            }
+        }
+        let read = app
+            .clone()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/audit")
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.status(), 200);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(read.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let audits = body["audit"].as_array().unwrap();
+        assert_eq!(
+            audits.len(),
+            29,
+            "Global audit projection must retain records beyond the oldest 24 entries"
+        );
+        assert!(
+            audits
+                .iter()
+                .any(|record| record["action"] == "grant.revoked"
+                    && record["evidence"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("grant")),
+            "{}",
+            body
+        );
+    }
+
     #[test]
     fn static_serving_only_accepts_bounded_public_directory() {
         assert_eq!(
