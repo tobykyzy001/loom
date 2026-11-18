@@ -80,6 +80,10 @@
 
 同时查清并修复了**报告级 Effect identity吞并**：第二合法Attempt复用旧Effect ID不能靠`INSERT OR IGNORE`吞掉新Effect，须比较原Scope/digest/status/evidence/Artifact引用并返回冲突；同Report重复ID也拒绝。Unknown effect保持unknown/对账，不因已知test byte或public proof升级成整体成功。实际 `cargo run ... -- smoke` 的跨Attempt report冲突已409且旧effect/Report不变，合法pending retry仍运行，第一份失败Report也保留。这个是本机实现与验收上的共享身份可靠修复，非新增Permission或确切一次跨机副作用。
 
+**同一受限样例的“已写源码、尚未验证即用户中止”已验收。** 真正 `loom_fixture_verify.execute` 在固定 `node --test` 启动前停留，当前Agent的真实 user AbortSignal 和 `turn/end(aborted,user)`均在完成编辑之后被记录；这不等于有测试完成。Adapter释放自己该Assignment的 bounded gate 只解除等待，不证明取消；center已有停止意图又确认 SDK 实际中止后才保存 `cancel_acknowledged`。经过精确字节/Git/diff/tool 关联验证后，Ticket可保存一个真实源 diff 与一个 confirmed source Effect，但整个操作保持 unknown/reconciling，不产生验证 Artifact、测试成功宣称或回滚。普通 `unknown+confirmed` 及普通 cancelled upload 仍被拒绝，只有当前Ticket/Node/source hash 对齐的单一真 diff 作为例外留存，供这个Report引用。
+
+该结果经 center与Host真实重开仍可用同一 Report/Effect/Artifact 读取，不新增工具调用。旧 reconciling Ticket 自动retry返回现有`400 invalid_request`且不生成新Assignment；随后显式创建新Ticket，沿用原有效Grant/Binding，得到新的Agent/Assignment/Session并真实测试成功。最终完整 driver 包含正常失败重试、这次中止和独立成功三组数据：3 tickets、4 assignments、4 reports、7 artifacts 和4 confirmed source effects，SQL完整性/audit chain也通过。它仍是当前 owner fixture 的**这一处前测试中止**，不是通用 pre-step/任意工具进程停止、移动真机、live LLM、多机或全M0完成。详见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。
