@@ -318,8 +318,14 @@ async function run() {
       assert.equal(await stat(join(projectRoot, 'must-not-write.txt')).then(() => false, (error) => { assert.equal(error.code, 'ENOENT'); return true }), true)
       result.cancel = { ticket_id: cancelId, visible_cancel_intent: true, final_cancelled: true, file_effect_absent: true }
     })
+    await phase('real-ui-grant-revocation-before-first-Node-poll', async () => {
+      await verifyGrantRevocationBeforeAdmission({ page, admin, node, server, projectRoot, result, createTask, tick })
+    })
     await phase('authentication-expiry-and-verified-workspace-recovery', async () => {
-      const retainedId = (await page.locator('.ticket-id').innerText()).split('/').pop().trim()
+      // The prior permission proof intentionally finishes on AccessView; restore
+      // the conversation before exercising the existing new-task/auth controls.
+      await page.locator('.main-nav').getByRole('button', { name: '对话', exact: true }).click()
+      const retainedId = result.cancel.ticket_id
       const replacement = 'browser-replacement-client-credential'
       const rejected = 'browser-rejected-client-credential'
       secrets.push(replacement, rejected)
@@ -373,7 +379,14 @@ async function run() {
         assert.match(await page.locator('.ticket-detail h1').innerText(), /Synthetic browser stop intent/,
           'The already opened retained Ticket must remain exactly the same cancelled work')
       } else {
-        await page.locator('.ticket-item').filter({ hasText: 'Synthetic browser stop intent' }).click()
+        // Auth recovery may restore the newest reconciling revoked Ticket. Use
+        // the existing new-task action to reveal its list, then explicitly reopen
+        // the original cancelled ticket instead of treating that detail as the same work.
+        await page.getByRole('button', { name: '新的任务', exact: true }).click()
+        const historicalCancel = page.locator('.ticket-item').filter({ hasText: 'Synthetic browser stop intent' })
+        await historicalCancel.waitFor()
+        assert.equal(await historicalCancel.count(), 1)
+        await historicalCancel.click()
       }
       await page.waitForFunction(expected => document.querySelector('.ticket-id')?.textContent.includes(expected), retainedId)
       const restored = await admin.get(`/api/v1/tickets/${retainedId}`)
@@ -407,7 +420,8 @@ async function run() {
       await screenshot('05-narrow-simulated-viewport-permissions')
       result.mobile_viewport = `PASS 390x844 Chromium viewport only (${layout.document}px scroll width); NOT phone, lockscreen, network-switch or accessibility`
     })
-    result.heartbeat = { calls: heartbeatCount, meaning: 'one initial + one bounded call before each of three explicit Node polls; no open-loop heartbeat' }
+    assert.equal(heartbeatCount, 6, 'Initial heartbeat plus rked read/write/cancel and two explicitly blocked revocation polls')
+    result.heartbeat = { calls: heartbeatCount, meaning: 'one initial + one bounded call before read/write/cancel and the two revoked-before-first-poll checks; no open-loop heartbeat' }
     await bounded(node.client.dispatchOutbox(), 'final outbox drain')
     result.exclusions = ['No real phone, lockscreen, network switching, accessibility audit', 'No Tauri/live paid LLM/multi-node delivery/host DSH Plugin claimed', 'No DSH/Desktop profile, live user browser session or credentials', 'No shared DSH GUI port or existing browser CDP endpoint attached']
     await cleanup()
@@ -593,5 +607,143 @@ async function verifyDisplayPreferences({ page, admin, node, server, projectRoot
       event_provenance: `actual node-authored event through node.client.event for assignment=${owner.id}, not a claimed DSH transcript`,
     },
   })
+}
+async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server, projectRoot, result, createTask, tick }) {
+  const path = 'nested/revoked-before-first-poll.txt'
+  const ticketId = await createTask({ objective: 'Synthetic browser pending revoked grant', kind: 'edit_file', path, content: 'This unclaimed assignment must not execute after its Grant is revoked.\n' })
+  const pending = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(pending.status, 'running', 'Create the pending ticket but do not poll the Node yet')
+  assert.ok([false, 0].includes(pending.cancel_requested))
+  assert.equal(pending.assignments.length, 1)
+  const admitted = pending.assignments[0]
+  assert.equal(admitted.acknowledged_at, null)
+  assert.equal(admitted.last_report_at, null)
+  assert.equal(pending.reports.length + pending.artifacts.length + pending.effects.length, 0)
+  assert.equal(node.state.data.assignments[admitted.id], undefined, 'The Node must not have admitted this Assignment before the UI revocation')
+
+  const grantsBefore = (await admin.get('/api/v1/grants')).grants
+  assert.equal(grantsBefore.length, 1)
+  const grantBefore = grantsBefore.find(grant => grant.id === pending.grant_id)
+  assert.ok(grantBefore)
+  assert.equal(grantBefore.version, 1)
+  assert.equal(grantBefore.revoked_at, null)
+  await page.locator('.main-nav').getByRole('button', { name: '权限', exact: true }).click()
+  const grantCard = page.locator('.grant-item').filter({ hasText: grantBefore.id })
+  await grantCard.getByRole('button', { name: '撤销授权', exact: true }).click()
+  await page.getByRole('button', { name: '确认撤销授权', exact: true }).waitFor()
+  const revoking = page.waitForResponse(response => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === `/api/v1/grants/${grantBefore.id}/revoke`)
+  const refreshed = page.waitForResponse(async response => {
+    if (response.request().method() !== 'GET' || new URL(response.url()).pathname !== '/api/v1/grants') return false
+    const payload = await response.json()
+    const current = Array.isArray(payload.grants) && payload.grants.find(grant => grant.id === grantBefore.id)
+    return Boolean(current && current.version === 2 && current.revoked_at !== null && current.revoked_at !== undefined)
+  })
+  await page.getByRole('button', { name: '确认撤销授权', exact: true }).click()
+  const [revokeResponse] = await Promise.all([revoking, refreshed])
+  assert.equal(revokeResponse.status(), 200)
+  const accepted = await revokeResponse.json()
+  assert.equal(accepted.revoked, true)
+  assert.equal(accepted.grant_id, grantBefore.id)
+  assert.deepEqual(revokeResponse.request().postDataJSON(), {})
+  const authorization = revokeResponse.request().headers().authorization
+  assert.ok(authorization?.startsWith('Bearer '), 'The UI must send the actual client authentication')
+  assert.equal(sha256(authorization.slice('Bearer '.length)), sha256(server.clientToken), 'This is the UI client credential, never a forged Node identity')
+
+  await grantCard.locator('.status-badge').filter({ hasText: '已撤销', exact: true }).waitFor()
+  assert.equal(await grantCard.locator('.status-badge').innerText(), '已撤销', 'Actual revoked_at must determine the displayed state, not a missing status field')
+  assert.equal(await grantCard.getByRole('button', { name: '撤销授权', exact: true }).count(), 0)
+  const revoked = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(revoked.status, 'reconciling', 'Revocation is not a fabricated cancellation/completion of the unclaimed task')
+  assert.ok([false, 0].includes(revoked.cancel_requested))
+  assert.equal(revoked.reports.length + revoked.artifacts.length + revoked.effects.length, 0)
+  const originalAssignment = revoked.assignments.find(assignment => assignment.id === admitted.id)
+  assert.ok(originalAssignment)
+  assert.equal(originalAssignment.acknowledged_at, null)
+  assert.equal(originalAssignment.last_report_at, null)
+  assert.equal(originalAssignment.lease_id, admitted.lease_id)
+  assert.equal(originalAssignment.lease_epoch, admitted.lease_epoch)
+  assert.equal(revoked.grant_digest, pending.grant_digest)
+  assert.ok(Date.parse(originalAssignment.lease_expires_at) <= Date.parse(admitted.lease_expires_at), 'Revocation cannot renew the old Lease')
+  const revokedGrants = (await admin.get('/api/v1/grants')).grants
+  const currentGrant = revokedGrants.find(grant => grant.id === grantBefore.id)
+  assert.equal(currentGrant.version, 2)
+  assert.ok(currentGrant.revoked_at)
+  assert.equal(currentGrant.digest, grantBefore.digest)
+
+  const localBefore = JSON.stringify({ assignments: node.state.data.assignments, completions: node.state.data.completions })
+  const post = node.http.post.bind(node.http)
+  const polls = []
+  node.http.post = async (route, body, options) => {
+    const response = await post(route, body, options)
+    if (route === '/api/v1/nodes/assignments/poll') {
+      if (!response || typeof response !== 'object' || !Object.hasOwn(response, 'assignment')) throw new Error('Revocation poll must return an explicit assignment field')
+      polls.push({ assignment: response.assignment, node_id: body.node_id })
+    }
+    return response
+  }
+  let executorCalls = 0
+  const originalExecutor = node.executor
+  node.executor = { execute: async () => { executorCalls++; throw new Error('FAIL: a revoked unclaimed Assignment reached the executor') } }
+  try {
+    await tick('idle')
+    await tick('idle')
+  } finally {
+    node.executor = originalExecutor
+    node.http.post = post
+  }
+  assert.equal(polls.length, 2, 'Both genuine Node polling attempts must return no Assignment')
+  assert.ok(polls.every(call => call.assignment === null && call.node_id === node.nodeId))
+  assert.equal(executorCalls, 0, 'The test executor would throw on any actual attempt to execute after revocation')
+  assert.equal(JSON.stringify({ assignments: node.state.data.assignments, completions: node.state.data.completions }), localBefore, 'Idle revoked polling cannot create an admission, completion or rejection')
+  assert.equal(node.state.data.outbox.length, 0, 'No artifact/report/cancel acknowledgements should be produced for this pending Task')
+
+  const afterPolls = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(afterPolls.status, 'reconciling')
+  assert.ok([false, 0].includes(afterPolls.cancel_requested))
+  assert.equal(afterPolls.reports.length + afterPolls.artifacts.length + afterPolls.effects.length, 0)
+  assert.equal(afterPolls.assignments[0].acknowledged_at, null)
+  await stat(join(projectRoot, path)).then(() => { throw new Error('Forbidden file was created by revoked pending work') }, error => { assert.equal(error.code, 'ENOENT') })
+  const totalTickets = (await admin.get('/api/v1/tickets')).tickets
+  await assert.rejects(admin.post('/api/v1/tickets', { project_id: pending.project_id, objective: 'Cannot reuse revoked Grant', kind: pending.kind,
+    relative_path: 'nested/revoke-cannot-replay.txt', content: 'Forbidden replacement execution', grant_id: grantBefore.id,
+    node_id: pending.node_id, worker_id: pending.worker_id }), error => {
+    assert.equal(error.status, 403)
+    assert.equal(error.code, 'grant_scope')
+    return true
+  })
+  assert.equal((await admin.get('/api/v1/tickets')).tickets.length, totalTickets.length, 'Rejected reuse cannot create another ticket or assignment')
+
+  const audit = (await admin.get('/api/v1/audit')).audit
+  const grantAudit = audit.filter(entry => entry.action === 'grant.revoked' && (typeof entry.evidence === 'string' ? JSON.parse(entry.evidence) : entry.evidence).evidence.grant_id === grantBefore.id)
+  assert.equal(grantAudit.length, 1, 'Keep the real central revocation evidence')
+  assert.equal(grantAudit[0].ticket_id, null, 'A Grant revocation audit is not the pending Ticket cancellation')
+  const ticketAudit = (await admin.get(`/api/v1/audit?ticket_id=${ticketId}`)).audit
+  assert.equal(ticketAudit.filter(entry => ['assignment.acknowledged', 'cancel.requested', 'report.accepted', 'artifact.indexed'].includes(entry.action)).length, 0)
+  const auditVerification = await admin.get('/api/v1/audit/verify')
+  assert.equal(auditVerification.valid, true)
+  assert.equal(auditVerification.algorithm, 'sha256_chain_v1')
+  const currentBefore = await admin.get(`/api/v1/tickets/${result.actual_write.ticket_id}`)
+  assert.equal(currentBefore.artifacts.length, 1)
+  assert.equal(currentBefore.effects[0].status, 'confirmed')
+
+  const freshGrants = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/grants')
+  await page.reload()
+  assert.equal((await freshGrants).status(), 200)
+  const reloadedCard = page.locator('.grant-item').filter({ hasText: grantBefore.id })
+  await reloadedCard.locator('.status-badge').filter({ hasText: '已撤销', exact: true }).waitFor()
+  assert.equal(await reloadedCard.locator('.status-badge').innerText(), '已撤销', 'Reload must recover the persisted revocation, not an optimistic UI reset')
+  assert.equal(await reloadedCard.getByRole('button', { name: '撤销授权', exact: true }).count(), 0)
+  result.revocation_before_first_poll = {
+    ticket_id: ticketId, grant_id: grantBefore.id, assignment_id: admitted.id,
+    before_status: 'running', after_status: revoked.status, grant_version: currentGrant.version,
+    revoked_at: currentGrant.revoked_at, original_digest_retained: true,
+    cancel_requested: revoked.cancel_requested, acknowledged_at: originalAssignment.acknowledged_at,
+    lease_id_preserved: originalAssignment.lease_id === admitted.lease_id, lease_epoch: originalAssignment.lease_epoch,
+    two_real_node_empty_polls: polls, executor_calls: executorCalls,
+    reports: afterPolls.reports.length, artifacts: afterPolls.artifacts.length, effects: afterPolls.effects.length,
+    file_effect_absent: true, failed_reuse_status: 403, new_ticket_on_rejected_reuse: false,
+    persisted_revoked_badge: true, original_successful_artifact_hash: result.actual_write.content_sha256,
+  }
 }
 await run()

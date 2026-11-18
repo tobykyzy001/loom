@@ -833,7 +833,16 @@ export async function createProjectBinding(input: ProjectBindingInput) {
 export async function revokeGrant(id: string) {
   const result = await run('grant-write', () => client.post<unknown>(`/grants/${encodeURIComponent(id)}/revoke`))
   if (result === undefined) return false
-  await loadResources()
+  const receipt = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, unknown> : null
+  if (receipt?.revoked !== true || receipt.grant_id !== id) {
+    state.errors['grant-write'] = '协调器未确认这个精确 Grant 的撤销；保留先前授权快照，不将其显示为撤销成功。'
+    return false
+  }
+  const refreshed = await loadResources()
+  if (!refreshed) {
+    state.errors['grant-write'] = '中心已确认撤销，但最新授权列表未刷新；当前卡片只有先前快照，不意味着授权仍然有效。'
+    return false
+  }
   return true
 }
 
