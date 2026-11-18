@@ -306,6 +306,9 @@ async function run() {
     await phase('process-display-preferences-keep-global-and-ticket-distinct', async () => {
       await verifyDisplayPreferences({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess })
     })
+    await phase('artifact-read-owner-digest-path-and-encoding', async () => {
+      await verifyArtifactReadIntegrity({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess })
+    })
     await phase('real-cancel-intent-before-Node-acknowledgement', async () => {
       const cancelId = await createTask({ objective: 'Synthetic browser stop intent', kind: 'edit_file', path: 'must-not-write.txt', content: 'No effect allowed.' })
       await page.getByRole('button', { name: '取消任务', exact: true }).click(); await page.getByRole('button', { name: '确认取消任务', exact: true }).click()
@@ -802,6 +805,157 @@ async function verifySenderFilter({ page, admin, node, ticketId, owner, sessionR
   assert.deepEqual(after.messages.map(message => message.id), afterLabel.messages.map(message => message.id))
   return { ticket_sender_filter_persisted_and_revalidated: true, reset_all_keeps_all_source_records: true, auxiliary_label_is_not_an_actor_permission: true }
 }
+async function verifyArtifactReadIntegrity({ page, admin, node, server, projectRoot, result, refreshTicket }) {
+  const ticketId = result.actual_write.ticket_id
+  const before = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(before.status, 'succeeded')
+  assert.equal(before.assignments.length, 1)
+  assert.equal(before.artifacts.length, 1)
+  const original = before.artifacts[0]
+  const originalId = original.artifact_id ?? original.id
+  const assignment = before.assignments[0]
+  assert.equal(original.ticket_id, ticketId)
+  assert.equal(original.assignment_id, assignment.id)
+  assert.match(originalId, /[0-9a-f-]{36}/i)
+  const owner = assignment.node_id
+  assert.equal(owner, original.origin_node_id)
+  assert.equal(owner, node.nodeId)
+  const storagePath = join(server.dataDir, 'artifacts', `${originalId}.artifact`)
+  const originalBytes = await readFile(storagePath)
+  assert.equal(sha256(originalBytes), original.sha256)
+  const readArtifact = async id => {
+    const response = await fetch(`${server.baseUrl}/api/v1/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(id)}`, {
+      headers: { authorization: `Bearer ${server.clientToken}`, accept: 'application/json' },
+    })
+    let payload
+    try { payload = await response.json() } catch { payload = { body: await response.text() } }
+    return { status: response.status, body: payload }
+  }
+  const good = await readArtifact(originalId)
+  assert.equal(good.status, 200)
+  assert.equal(good.body.artifact.id ?? good.body.artifact.artifact_id, originalId)
+  assert.equal(good.body.encoding, 'utf8')
+  assert.equal(good.body.truncated, false)
+  assert.equal(good.body.size_bytes, originalBytes.length)
+  assert.equal(good.body.artifact.ticket_id, ticketId)
+  assert.equal(good.body.artifact.assignment_id, assignment.id)
+  assert.equal(good.body.artifact.origin_node_id, owner)
+  assert.equal(good.body.artifact.sha256, original.sha256)
+  assert.equal(good.body.artifact.storage_name, `${originalId}.artifact`)
+  const otherTicket = (await admin.get('/api/v1/tickets')).tickets.find(ticket => ticket.id !== ticketId)
+  assert(otherTicket)
+  const foreign = await fetch(`${server.baseUrl}/api/v1/tickets/${encodeURIComponent(otherTicket.id)}/artifacts/${encodeURIComponent(originalId)}`, {
+    headers: { authorization: `Bearer ${server.clientToken}`, accept: 'application/json' },
+  })
+  const foreignBody = await foreign.json()
+  assert.equal(foreign.status, 403)
+  assert.equal(foreignBody.error.code, 'artifact_scope')
+  const unrelatedRead = await fetch(`${server.baseUrl}/api/v1/tickets/${encodeURIComponent(ticketId)}/artifacts/${randomUUID()}`, { headers: { authorization: `Bearer ${server.clientToken}` } })
+  assert.equal(unrelatedRead.status, 404)
+
+  let originalName = null
+  let db
+  let storageMutated = false
+  const victimName = `../outside-owned-${originalId}.txt`
+  const rootForOwnedSentinel = await realpath(server.dataDir)
+  const outsidePath = resolve(rootForOwnedSentinel, `outside-owned-${originalId}.txt`)
+  assert.equal(dirname(outsidePath), rootForOwnedSentinel, 'Only the single sibling byte file created for this exact owned path-safety proof may be cleaned later')
+  try {
+    db = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'))
+    const stored = db.prepare('SELECT id,storage_name FROM artifacts WHERE id=? AND ticket_id=?').get(originalId, ticketId)
+    originalName = stored.storage_name
+    assert.equal(originalName, `${originalId}.artifact`)
+    await writeFile(storagePath, Buffer.from('Deliberately corrupted content for this owned test only\n'))
+    const corrupt = await readArtifact(originalId)
+    assert.equal(corrupt.status, 409)
+    assert.equal(corrupt.body.error.code, 'artifact_integrity')
+    await writeFile(storagePath, originalBytes)
+
+    // The bytes outside our artifact directory have the same correct digest;
+    // absence of either original content can therefore never account for a fake PASS.
+    await writeFile(outsidePath, originalBytes)
+    const changed = db.prepare('UPDATE artifacts SET storage_name=? WHERE id=? AND ticket_id=?').run(victimName, originalId, ticketId)
+    assert.equal(changed.changes, 1)
+    storageMutated = true
+    const traversal = await readArtifact(originalId)
+    assert.equal(traversal.status, 409)
+    assert.equal(traversal.body.error.code, 'artifact_location')
+    assert.equal(traversal.body.content, undefined)
+    db.prepare('UPDATE artifacts SET storage_name=? WHERE id=? AND ticket_id=?').run(originalName, originalId, ticketId)
+    storageMutated = false
+    await rm(outsidePath)
+    const repaired = await readArtifact(originalId)
+    assert.equal(repaired.status, 200)
+    assert.equal(sha256(repaired.body.content), sha256(originalBytes.toString('utf8')))
+  } finally {
+    if (db && storageMutated) db.prepare('UPDATE artifacts SET storage_name=? WHERE id=? AND ticket_id=?').run(originalName, originalId, ticketId)
+    db?.close()
+    await writeFile(storagePath, originalBytes)
+    await rm(outsidePath, { force: true })
+  }
+
+  // This real Node uploads, not a fake HTTP completion, additional bytes tied to
+  // its original owned Assignment. They are deliberately not valid UTF-8 but have
+  // an authentic UUID, SHA, size, assignment, node identity and persisted bytes.
+  const invalidBytes = Buffer.from([0xff, 0xfe, 0x00])
+  const badId = randomUUID()
+  const sha = sha256(invalidBytes)
+  const upload = await node.client.http.post('/api/v1/nodes/artifacts', {
+    protocol: 'loom.node.v1', node_id: node.nodeId, installation_id: node.installationId,
+    request_id: randomUUID(), ticket_id: ticketId, assignment_id: assignment.id, lease_epoch: assignment.lease_epoch,
+    artifact_id: badId, bytes_base64: invalidBytes.toString('base64'), metadata: {
+      artifact_id: badId, name: 'bounded-non-utf8.bin', media_type: 'application/octet-stream', size_bytes: invalidBytes.length, sha256: sha,
+    },
+  }, { token: node.identity.token })
+  assert.equal(upload.artifact_id, badId)
+  assert.equal(upload.sha256, sha)
+  const persistedBadBytes = await readFile(join(server.dataDir, 'artifacts', `${badId}.artifact`))
+  assert.deepEqual(persistedBadBytes, invalidBytes)
+  const invalidResult = await readArtifact(badId)
+  assert.equal(invalidResult.status, 409)
+  assert.equal(invalidResult.body.error.code, 'artifact_encoding')
+  assert.equal(invalidResult.body.content, undefined)
+
+  await refreshTicket()
+  const wrongCard = page.locator('.artifact-card').filter({ hasText: 'bounded-non-utf8.bin' })
+  await wrongCard.waitFor()
+  assert.equal(await wrongCard.count(), 1)
+  await wrongCard.click()
+  const error = page.locator('.artifact-viewer [role=alert]')
+  await error.waitFor()
+  assert.match(await error.innerText(), /UTF-8/)
+  assert.equal(await page.locator('.artifact-viewer .artifact-content').count(), 0)
+  await page.getByRole('button', { name: '关闭产物查看', exact: true }).click()
+  const originalNameForCard = original.type ?? original.name
+  assert.equal(typeof originalNameForCard, 'string')
+  const originalCard = page.locator('.artifact-card').filter({ hasText: originalNameForCard })
+  await originalCard.waitFor()
+  await originalCard.click()
+  await page.locator('.artifact-viewer .artifact-content').waitFor()
+  assert.match(await page.locator('.artifact-viewer').innerText(), /"target_hash"/)
+
+  const after = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.deepEqual(after.reports, before.reports)
+  assert.deepEqual(after.effects, before.effects)
+  assert.deepEqual(after.assignments, before.assignments)
+  assert.equal(after.grant_id, before.grant_id)
+  assert.equal(after.grant_digest, before.grant_digest)
+  assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
+  const finalBytes = await readFile(storagePath)
+  assert.deepEqual(finalBytes, originalBytes)
+  result.artifact_read_verification = {
+    exact_owner_content_metadata_and_sha: true,
+    cross_ticket_rejected_with_403_artifact_scope: true,
+    hash_tamper_rejected_with_409_integrity: true,
+    unsafe_storage_location_rejected_even_when_matching_bytes_exist: true,
+    same_node_valid_byte_upload_preserved: { artifact_id: badId, size_bytes: invalidBytes.length, sha256: sha },
+    invalid_utf8_rejected_not_lossy_decoded: true,
+    browser_shows_specific_error_and_healthy_original_still_reads: true,
+    reports_and_effects_unchanged: true,
+    partial_storage_fault_repaired: true,
+    projectFile_sha256: sha256(await readFile(join(projectRoot, 'nested/browser-result.txt')))
+  }
+}
 async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server, projectRoot, result, createTask, tick }) {
   result.revocation_before_first_poll ||= {}
   const path = 'nested/revoked-before-first-poll.txt'
@@ -919,7 +1073,15 @@ async function verifyGrantRevocationBeforeAdmission({ page, admin, node, server,
   assert.equal(auditVerification.valid, true)
   assert.equal(auditVerification.algorithm, 'sha256_chain_v1')
   const currentBefore = await admin.get(`/api/v1/tickets/${result.actual_write.ticket_id}`)
-  assert.equal(currentBefore.artifacts.length, 1)
+  assert.equal(currentBefore.artifacts.length, 2, 'Preserve the original real write artifact plus only the explicit Node byte-upload used by the read suite')
+  const addedBytes = result.artifact_read_verification.same_node_valid_byte_upload_preserved
+  const verifiedByteArtifact = currentBefore.artifacts.find(artifact => artifact.id === addedBytes.artifact_id)
+  assert(verifiedByteArtifact)
+  assert.equal(verifiedByteArtifact.assignment_id, currentBefore.assignments[0].id)
+  assert.equal(verifiedByteArtifact.sha256, addedBytes.sha256)
+  assert.equal(verifiedByteArtifact.size_bytes, addedBytes.size_bytes)
+  assert.equal(currentBefore.reports.length, 1)
+  assert.equal(currentBefore.effects.length, 1)
   assert.equal(currentBefore.effects[0].status, 'confirmed')
 
   const freshGrants = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/grants')

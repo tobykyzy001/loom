@@ -772,11 +772,35 @@ export async function decideApproval(id: string, decision: 'approve' | 'reject',
 }
 
 export async function loadArtifact(ticketId: string, artifact: ArtifactRef) {
-  const result = await run(`artifact:${artifact.artifact_id}`, async () => {
-    const value = await client.get<unknown>(`/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}`)
-    return artifactFrom(value)
+  const artifactId = typeof artifact?.artifact_id === 'string' ? artifact.artifact_id : ''
+  const errorKey = artifactId ? `artifact:${artifactId}` : 'artifact:unidentified'
+  if (!artifactId.trim() || artifactId.length > 160 || [...artifactId].some(character => character < ' ' || character === '\u007f')
+    || state.selectedTicketId !== ticketId || state.ticket?.id !== ticketId) {
+    state.errors[errorKey] = '请重新读取当前Ticket中的Artifact，不会将另一任务的响应当作这个产物。'
+    return
+  }
+  const current = state.ticket
+  const listed = current.artifacts?.find(item => item.artifact_id === artifactId)
+  if (!listed || (artifact.ticket_id !== undefined && artifact.ticket_id !== ticketId)) {
+    state.errors[errorKey] = '此Artifact不属于当前Ticket的已验证快照，请重新读取后再试。'
+    return
+  }
+  const version = detailVersion
+  const result = await run(`artifact:${artifactId}`, async () => {
+    const value = await client.get<unknown>(`/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(artifactId)}`)
+    return artifactFrom(value, {
+      ticketId, artifactId, originNodeId: listed.origin_node_id,
+      assignmentId: (listed as ArtifactRef & { assignment_id?: string }).assignment_id,
+      sha256: listed.sha256, sizeBytes: listed.size_bytes,
+    })
   })
-  if (result) state.artifacts = { ...state.artifacts, [artifact.artifact_id]: result }
+  // A request for an old Ticket must not complete into the newly selected
+  // Ticket's render/cache. Administratively valid another-parent data isn't
+  // converted to an assertion about the current one either.
+  if (result && version === detailVersion && state.selectedTicketId === ticketId && state.ticket?.id === ticketId
+    && state.ticket.artifacts?.some(item => item.artifact_id === artifactId && item.sha256 === listed.sha256 && item.origin_node_id === listed.origin_node_id)) {
+    state.artifacts = { ...state.artifacts, [artifactId]: result }
+  }
 }
 
 export async function updatePreferences(expanded: boolean, senderFilter: string, ticketId?: string) {

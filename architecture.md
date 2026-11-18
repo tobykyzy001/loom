@@ -321,6 +321,16 @@ Schema14在现有 `artifacts` 增加可空 `code_evidence_json`，只为这一�
 
 实际一次 source→socket→checksum→B Grant→child file验证在[tests/direct/README.md](tests/direct/README.md)，含取消 expires/lifecycle错误与重启幂等测试。它**不是**第二物理机连接/TLS保证、远程安装包部署、任意大文件默认可下载或全面M2完成证明。中途断流、nonce已经消费而下游结果不确定的自动收据/对账仍未完整验证，不可用一次领取或Model Observation替代未知付款的结果确认。
 
+### 3.5.1 中心 Artifact 读取的身份、存储与纯文本边界
+
+- 中心`GET /api/v1/tickets/{ticket}/artifacts/{artifact}`仍是既有authenticated client读取，不是新Ticket Grant或跨Principal身份模型。控制器必须按真实record的 `ticket_id` 限定这个Artifact属于正在读取的Ticket，其它Ticket不能通过改URL/ID冒领，未注册ID保持404。产生新Artifact的既有Node上传递同一原始 Grant/Assignment/Lease/sha验证，不能因为读取一个UUID就获得新的权限。
+- **上传原本就已经执行UUID验证**，本次不是凭空新造这项边界。读取再核验持久化的 `storage_name`：它必须像一个正常的单一相对文件名，不能含`/`、`\\`或`.`/`..`路径换层；UUID record必须是上传时的**`<id>.artifact`**固定name。普通旧非UUID字段只保留单一安全filename的兼容，不因此放开任意link/目录。`symlink_metadata`与实际`file_type().is_file()`是本地常规文件检查，缺 index对应bytes时给出特定`artifact_storage_unavailable`，危险path/static/file类型用409 `artifact_location`，不是把一个nullptr/metadata unwrap崩掉或抽象IO错误谎称完整。其它true I/O失败仍明确归为存储失败。
+- 读取**真实**bytes，而不是把record或Node报告直接当内容。SHA必须以实际存储重新计算并对应immutable digest，损坏/hash/bytes不符或bad metadata 只能409 `artifact_integrity`；缺bytes也不能假装该Artifact可下载。所有请求owner范围、路径与哈希检查依次成立，未通过不会把它包装成完整download，证据联接中的错误Task、Grant/report历史不因此被静默改写。
+- **当前这个endpoint是纯文本阅读**，不再使用`String::from_utf8_lossy`把损坏bytes悄悄转成U+FFFD后称作原文。只有合法UTF-8在当前环节才以String交付，并明确 `encoding:'utf8'`、`truncated:false`、`size_bytes`为真实byte长度（不是Unicode字符数或页数）。有合法hash、真实UUID及原Assignment的原Node上传产生的 **non-UTF-8 bytes**会真实存在，但read被409 `artifact_encoding`拒绝。没有宣称通用blob/base64/range/binary传输已经完成，也不把这一read failure等价为Report/task状态失败或删除immutable Artifact。
+- 前端只把**当前已加载Ticket快照所列出的**artifact交给下载，不主动请求另一Ticket或一个不在该快照中的ID。返回 payload需对应请求的ID、Ticket owner、originNode、Assignment（快照涵盖时）、原SHA/size；缺这些identity、矛盾ID与metadata不符都不得进入 `state.artifacts`。先前没有此下载上下文的旧`artifactFrom`解析仍然保留兼容，它**不是**verified-download入口。当前Content只有 intended plain text。
+- `loadArtifact`捕获请求时的detail generation；若用户已选择另一Ticket，旧请求即使随后返回合法obj也决不能落到新选Ticket的缓存。提交时再次核对当前selected ID、当前loaded Ticket及那种身份仍列于它自己的artifact列表，然后才能更新。`TicketDetail`的卡片在保留已有type时允许使用真实Artifact name作fallback，让多份产物能按可追溯名称明确点击；`type`缺失不能被全写为同一种虚构身份来蒙混。错误展示先出现，不得以先前同ID正文冒充该次失败的内容。
+- 验收由**真实filesystem+SQLite+HTTP**、前端定向9项以及13阶段生产Edge与既有隔离Node fixture组成。实际新式Artifact owner/digest/missing path、member保留、non-UTF8和后续撤权/认证测试在macOS真实可复现。它**不**解决其他物理Host/Windows symlink-time竞态、客户端AuthenticatedPrincipal多租户、秘密凭据读取/恢复、手机或generic arbitrary binary transport。
+
 ### 3.6 受限模型调用的可读观察
 
 需要早期模型功能的第一个回答不是全套激活面板，而是**这一份实际任务用到了哪个资源、产生了哪一份Artifact、哪次Grant关联何来源**。在严格`model_text`的SDK返回Artifact时，Concierge只接受受限`loom.model-ref.v1`，核对原Task原始`loom.model-text.v1` provider/model、实际origin Node/Assignment、精确原`invoke_text` Grant和结果bytes SHA。它保存`model_observations`仅作**已登记Artifact的观察关系**，与Artifact在同一SQLite事务创建，不能独立预造。

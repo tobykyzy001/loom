@@ -95,10 +95,15 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
    `activity` notice不计入sender-filter的session_link子集，总计数另行说明。
    原`assertMessageCount`也改为聚合读取，见到两个不同sender时不再错误使用单条innerText。
    每次仍先精确等待Ticket详情及合作记录就绪，不把loading中的空select误判为同步生效。
-8. 新建 write ticket，不轮询之前点真实“取消任务”和确认按钮，必须看到
+9. **验证Artifact的owner/content/path/text完整性。** 仍以真实write产生的原Ticket/Assignment/Artifact为锚。正常GET必须核对原生`artifact.id`、owner、origin Node、assignment、actual bytes SHA、固定`{id}.artifact`与真实byte size，并返回`encoding:'utf8'`、`truncated:false`；换成另一真实Ticket要403 `artifact_scope`。
+   只在owned Rust runtime做**及恢复原值的故障注入**：写坏byte要409 `artifact_integrity`，随后把持久name临时变成`../outside-owned-{uuid}.txt`。一个限定的owner-runtime兄弟目录文件放**同样正确的原始bytes**，所以旧简单join确实能够读到内容；现在必须为409 `artifact_location`，不得输出该body。恢复SQL filename和原始bytes后再取健康200。
+   用现有Node token和**同一个已授权的Assignment/lease_epoch**真实上传一份3 bytes `[ff,fe,00]`，UUID/base64/sha/size与真实存储都核对，不是伪造一次意外或新Agent/Task。读取这份bytes需409 `artifact_encoding`，不会沿用旧`from_utf8_lossy`打印替换字符。它不是一个合格binary transport承诺，也不是生产者accomplish状态被改写；缺bytes另有`artifact_storage_unavailable`，metadata/nil/hash问题均不报panic。
+   刷新Ticket后，卡片在缺type时也能以真实name明确选择`bounded-non-utf8.bin`；实际对应viewer明确报错且不展示`.artifact-content`，随后选回原healthy card即能看到原文中的`target_hash`。前端由当前verified snapshot限制只读请求的id/tkt/node/assignment/hash/size；切换另一ticket后过期response不会落到新票缓存。原始Report/Assignment/Effect和Grant ID/digest不变，原Report只有一份。
+   新增byte-backed附件属于同一个原Assignment，属实新增**一份Artifact**而非一次执行。后续撤权case因此明确校验原工单恰有**2个**immutable Artifact，新增附件的ID/assignment/hash/size，且原Report及confirmed Effect只有一份，**不是**随意改写全局聚合数或容许未知执行。
+10. 新建 write ticket，不轮询之前点真实“取消任务”和确认按钮，必须看到
    “取消意图已记录”。随后 Node 承认取消，并断言 `cancelled`、无 Artifact、
    无目标文件。Center 将 ack 映射为 `true` 或 `1` 均是已有真实表现。
-9. 浏览器 UI 再创建一个**尚未领取**的 write Ticket/Assignment，先不在 Node 上
+11. 浏览器 UI 再创建一个**尚未领取**的 write Ticket/Assignment，先不在 Node 上
    poll。进入权限页，选择目标 Grant，真正点「确认撤销授权」，等待该精确 Grant
    的200回执、版本递增、`revoked_at` 与新资源列表。Ticket虽在此时已转为
    `reconciling`，但 `cancel_requested=false`，尚未acknowledged，原
@@ -114,7 +119,7 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
    和零Effects不变。保存的凭证明确包含这三项，而不是在汇总赋值时覆盖。
    恢复时回到对话页，并显式选定最初被取消的另一张Ticket，完成原401/
    认证恢复路径，避免把“当前最新 的reconciling”当成先前的取消。
-10. 对已明确 failed 的读任务，先打开重试确认框，再使**同一Grant**真正失效，之后才确认。
+12. 对已明确 failed 的读任务，先打开重试确认框，再使**同一Grant**真正失效，之后才确认。
     这是同一Project/Node/Binding上的独立测试授权，不是借用/复活先前被撤票
     的Grant。实际结果为 `/tickets/{id}/retry` 返回400 `Grant revoked`，模态
     中展示真实错误、允许“返回检查”；它仍不表示获得新Grant。原失败状态、
@@ -122,13 +127,24 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
     不变，Node之后也没有执行，outbox为空。最终前端Permission卡显示
     已撤销、cancel_requested仍false、完整历史ID集合不变且仅多本失读任务。
     再核对 `/audit/verify`。
-11. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
-    overflow。不是手机、锁屏、触屏、换网或 accessibility 验收。
-12. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
-    已不可用”的错误绿灯。
+13. 原 client token确实失效时，不会让固有缓存冒充新读取。owned SQLite只改变本测试中client token hash；旧token遇401后原有Task显示为expired snapshot，不能通过发起新任务绕过认证。错误candidate未经protected-read不得覆盖已验证token。之后只有真实当前replacement凭据真正成功重读才保存，最终再选定**同一张已实际取消**的原Ticket，读取真实ack，不把最新的reconciling记录误当原取消；不创建新Artifact/Effect。401与普通的client network outage层不混同。
+
+### 额外的显示/几何检查（不并入主阶段编号）
+- `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向 overflow。不是手机、锁屏、触屏、换网或 accessibility 验收。
+- 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局已不可用”的错误绿灯。
 
 初始heartbeat之后，普通read/write/cancel、两次revoked-before-poll、一次真实失读和一次确认后撤权idle各有一次显式heartbeat：共 **8次heartbeat、7次有界Node poll**。新 revoked unclaimed Assignment 的 executor调用为 0；失读被拒重试后也没有 worker 最后执行。没有自动付费模型调用或长期loop。
 [完整11阶段PASS报告（确认框打开后撤权及其不可用重试证明）](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-OMClbB/result.json)。另附 [打开后撤权的实际模态错误](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-OMClbB/07-late-grant-revocation-in-retry-confirm.png) 与 [权威权限卡已撤销](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-OMClbB/08-revoked-grant-after-confirm-refusal.png)，两图各不相同。
+
+## 当前整体本地验收入口
+
+`node tests/browser/run.mjs --keep-evidence` 仍会构建真正生产Vue并运行独立 Rust 与 Node、独立安装的 Edge、某个当前受控项目的原始读写作业，而不是单独的 read fixture 客户端。当前完整13阶段依次覆盖初始真实read/write、浏览器断网重读、偏好、这里新增的Artifact完整性、正常取消、未领取撤权、确认后撤权不能再重试及真实认证恢复。
+
+见 [13阶段完整报告](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-Kfz5Xu/result.json)。其 `artifact_read_verification` 明确列出原owner/content/sha、跨票403、篡改409、同bytes危险path、真实Node byte-driven attachment及严格UTF-8；`.same_node_valid_byte_upload_preserved`中的UUID与真实3-byte有效上传、assignment对应。原healthy card继续可读，原Report/confirmed Effect与Grant不被读取失败改写。该报告还包含先前网络及偏好回归；配套的Rust109 unit+2 integration、展开workspace clippy、Vue19 files/137 tests、Node24皆已实际运行通过。独立focused review ACCEPT，附真实Node凭据与持久bytes，**不是 seed rows 直接声称Agent执行**。
+
+临时损坏了哪些byte/file和storage_name均会明确恢复原状；outside sibling对照的原始bytes 也仅来自owned fixture固定runtime，不是当前用户其它目录或凭据。保留的7张真实截图仍是原职掌各阶段的截图，**不要**把没专门捕获的新byte错误卡截图说成随报告保存。非UTF-8的精确HTTP code、真实payload和native Vue正文空断言在result.json而不是靠“看截图是否像UTF-8”验证。
+
+最终实际身份与namespace属于**center权威**；浏览器只按当前工单快照校验下载响应，不制造permission、Grant 或 Assignment。当前reader只处理实际UTF-8纯文本，非UTF-8拒绝可保留原byte记录而没有所谓“failed text completion”。通用binary传输、跨Principal授权服务、Windows/TOCTOU或真实手机依然均未验证。
 
 ## 截图、日志、进程回收
 

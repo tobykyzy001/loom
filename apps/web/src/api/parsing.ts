@@ -52,13 +52,36 @@ export function ticketResponseFrom(value: unknown): Ticket | null {
   if (!value || typeof value !== 'object' || !('id' in value)) return null
   return ticketFrom(value)
 }
-export function artifactFrom(value: unknown): ArtifactContent {
-  if (!value || typeof value !== 'object') throw new Error('Invalid artifact response')
+export interface ArtifactDownloadScope {
+  ticketId: string
+  artifactId: string
+  originNodeId: string
+  assignmentId?: string
+  sha256?: string
+  sizeBytes?: number
+}
+
+export function artifactFrom(value: unknown, expected?: ArtifactDownloadScope): ArtifactContent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid artifact response')
   const result = value as Record<string, unknown>
-  const source = (result.metadata ?? result.artifact ?? value) as ArtifactRef & { id?: string; name?: string }
+  const source = (result.artifact ?? result.metadata ?? value) as ArtifactRef & { id?: string; name?: string; assignment_id?: string }
   const metadata: ArtifactRef & { id?: string; name?: string; parents?: unknown[] } = { ...source, artifact_id: source.artifact_id ?? source.id ?? '' }
   metadata.parents = source.parents ?? (Array.isArray(source.lineage) ? source.lineage : [])
   metadata.type = source.type ?? source.name
+  if (expected) {
+    const matching = (field: string, value: unknown) => typeof value === 'string' && value === (metadata as unknown as Record<string, unknown>)[field]
+    if (metadata.artifact_id !== expected.artifactId || typeof metadata.artifact_id !== 'string'
+      || (source.id !== undefined && source.id !== expected.artifactId)
+      || !matching('ticket_id', expected.ticketId)
+      || !matching('origin_node_id', expected.originNodeId)
+      || (expected.assignmentId !== undefined && !matching('assignment_id', expected.assignmentId))
+      || (expected.sha256 !== undefined && metadata.sha256 !== expected.sha256)
+      || (expected.sizeBytes !== undefined && metadata.size_bytes !== expected.sizeBytes)) {
+      throw new Error('Artifact response does not belong to the requested Ticket, Artifact, source worker and immutable SHA')
+    }
+    if (typeof result.content !== 'string') throw new Error('Artifact response must contain its actual bounded text bytes')
+    if (result.encoding !== undefined && result.encoding !== 'utf8') throw new Error('This Artifact viewer only supports an explicitly declared UTF-8 text response')
+  }
   return {
     metadata,
     content: typeof result.content === 'string' ? result.content : '',

@@ -52,6 +52,9 @@ export interface ArtifactRef {
   artifact_id: string
   ticket_id: string
   origin_node_id: string
+  id?: string
+  assignment_id?: string
+  name?: string
   type?: string
   version?: number
   location?: string

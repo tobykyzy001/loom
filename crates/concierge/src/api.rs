@@ -23,6 +23,234 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use tower::ServiceExt;
+    async fn artifact_response(app: &Router, ticket: &str, artifact: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/tickets/{ticket}/artifacts/{artifact}"))
+                    .header(
+                        header::AUTHORIZATION,
+                        "Bearer artifact-reader-test-token-12345",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn artifact_read_binds_scope_path_integrity_and_utf8() {
+        const TOKEN: &str = "artifact-reader-test-token-12345";
+        const ARTIFACT_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const BINARY_ID: &str = "22222222-2222-4222-8222-222222222222";
+        const GOOD: &[u8] = b"owned artifact text\nwith exact UTF-8 bytes\n";
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        // Directly seeded reader rows/files are deliberately not claims that a
+        // producer, worker, upload or successful task execution occurred.
+        store.conn().execute_batch(
+            "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Artifact reader fixture','/owned/artifact-reader','read_only',1,'2026-01-01T00:00:00Z','{}');
+             INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','project','node','worker','installation','[\"read\"]',1,'grant-digest','2026-01-01T00:00:00Z');
+             INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,cancel_requested,created_at,updated_at) VALUES
+               ('ticket','project','Reader fixture','read_summary','README.md',NULL,'pending','grant','grant-digest','node','installation','worker',0,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+               ('other-ticket','project','Other reader fixture','read_summary','OTHER.md',NULL,'pending','grant','grant-digest','node','installation','worker',0,0,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+        ).unwrap();
+        let seed_artifact = |id: &str, bytes: &[u8], name: &str| {
+            store.conn().execute(
+                "INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at) VALUES(?1,'ticket','reader-fixture','node',?2,'text/plain',?3,?4,?5,?6,'[]','2026-01-01T00:00:00Z')",
+                params![id,name,bytes.len() as i64,sha256(bytes),format!("{id}.artifact"),format!("loom://artifact/{id}")],
+            ).unwrap();
+            std::fs::write(
+                store.root.join("artifacts").join(format!("{id}.artifact")),
+                bytes,
+            )
+            .unwrap();
+        };
+        seed_artifact(ARTIFACT_ID, GOOD, "owned.txt");
+        seed_artifact(BINARY_ID, &[0xff, 0xfe, 0x00], "binary-fixture.txt");
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        let path = state
+            .lock()
+            .unwrap()
+            .root
+            .join("artifacts")
+            .join(format!("{ARTIFACT_ID}.artifact"));
+        assert!(path.is_file());
+
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for (key, expected) in [
+            ("id", Value::from(ARTIFACT_ID)),
+            ("ticket_id", Value::from("ticket")),
+            ("assignment_id", Value::from("reader-fixture")),
+            ("origin_node_id", Value::from("node")),
+            ("name", Value::from("owned.txt")),
+            ("media_type", Value::from("text/plain")),
+            (
+                "storage_name",
+                Value::from(format!("{ARTIFACT_ID}.artifact")),
+            ),
+            (
+                "location",
+                Value::from(format!("loom://artifact/{ARTIFACT_ID}")),
+            ),
+            ("sha256", Value::from(sha256(GOOD))),
+        ] {
+            assert_eq!(body["artifact"][key], expected, "{key}");
+        }
+        assert_eq!(body["artifact"]["size_bytes"], GOOD.len());
+        assert_eq!(body["size_bytes"], GOOD.len());
+        assert_eq!(body["content"], String::from_utf8(GOOD.to_vec()).unwrap());
+        assert_eq!(body["content"].as_str().unwrap().as_bytes(), GOOD);
+        assert_eq!(body["encoding"], "utf8");
+        assert_eq!(body["truncated"], false);
+        assert_eq!(body["artifact"]["code_evidence"], Value::Null);
+        assert!(body["artifact"].get("code_evidence_json").is_none());
+        let (status, missing) =
+            artifact_response(&app, "ticket", "33333333-3333-4333-8333-333333333333").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+        assert_eq!(missing["error"]["code"], "not_found");
+
+        let (status, body) = artifact_response(&app, "other-ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_scope");
+        assert!(body.get("content").is_none());
+        assert!(!body.to_string().contains("owned artifact text"));
+
+        let location_error = |body: &Value| {
+            assert_eq!(body["error"]["code"], "artifact_location", "{body}");
+            assert!(!body
+                .to_string()
+                .contains(directory.path().to_string_lossy().as_ref()));
+        };
+        let update_metadata = |field: &str, value: Value| {
+            let value = match value {
+                Value::String(value) => rusqlite::types::Value::Text(value),
+                Value::Number(value) => value.as_i64().map_or_else(
+                    || rusqlite::types::Value::Real(value.as_f64().unwrap()),
+                    rusqlite::types::Value::Integer,
+                ),
+                _ => unreachable!("fixture only persists scalar metadata"),
+            };
+            state
+                .lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    &format!("UPDATE artifacts SET {field}=?1 WHERE id=?2"),
+                    params![value, ARTIFACT_ID],
+                )
+                .unwrap();
+        };
+        // The outside file has exactly the recorded bytes/digest: this case
+        // fails only if storage_name escapes the owned artifacts namespace.
+        std::fs::write(directory.path().join("outside-owned.txt"), GOOD).unwrap();
+        update_metadata("storage_name", Value::from("../outside-owned.txt"));
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        location_error(&body);
+        for invalid_location in [
+            "",
+            ".",
+            "..",
+            "nested/name.artifact",
+            "folder\\name.artifact",
+            "/tmp/name.artifact",
+            "legacy.artifact",
+        ] {
+            update_metadata("storage_name", Value::from(invalid_location));
+            let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{invalid_location}: {body}");
+            location_error(&body);
+        }
+        update_metadata("storage_name", Value::from(7));
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        location_error(&body);
+        update_metadata(
+            "storage_name",
+            Value::from(format!("{ARTIFACT_ID}.artifact")),
+        );
+
+        std::fs::write(&path, b"tampered while preserving the filename").unwrap();
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_integrity");
+        assert!(body.get("content").is_none());
+        update_metadata("sha256", Value::from(7));
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_integrity");
+        update_metadata("sha256", Value::from(7.5));
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_integrity");
+        update_metadata("sha256", Value::from(sha256(GOOD)));
+        std::fs::write(&path, GOOD).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_storage_unavailable");
+        assert!(body.get("content").is_none());
+        std::fs::write(&path, GOOD).unwrap();
+        let (status, _) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = artifact_response(&app, "ticket", BINARY_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_encoding");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("plain text"));
+        assert!(body.get("content").is_none());
+        assert!(!body.to_string().contains('�'));
+        assert_eq!(
+            state.lock().unwrap().detail("ticket").unwrap()["status"],
+            "pending"
+        );
+
+        #[cfg(unix)]
+        {
+            // This link targets the matching outside bytes, so it independently
+            // checks the regular-file guard on the supported local macOS path.
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(directory.path().join("outside-owned.txt"), &path).unwrap();
+            let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            location_error(&body);
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .query("SELECT id FROM artifacts", [])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn revoke_route_records_current_fence_and_audit() {
         const TOKEN: &str = "test-client-token-123456789012345";
@@ -3294,6 +3522,46 @@ pub(crate) async fn report(
     Ok(Json(response))
 }
 
+fn artifact_storage_path(store_root: &Path, artifact: &Value) -> ApiResult<PathBuf> {
+    let location_error = || {
+        ApiError::conflict(
+            "artifact_location",
+            "Artifact storage metadata names an invalid location; content was not returned",
+        )
+    };
+    let storage_name = artifact["storage_name"]
+        .as_str()
+        .ok_or_else(location_error)?;
+    let mut components = Path::new(storage_name).components();
+    if storage_name.is_empty()
+        || storage_name.contains(['/', '\\'])
+        || matches!(storage_name, "." | "..")
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(location_error());
+    }
+    let id = artifact["id"].as_str().ok_or_else(location_error)?;
+    if uuid::Uuid::parse_str(id).is_ok() && storage_name != format!("{id}.artifact") {
+        return Err(location_error());
+    }
+    let path = store_root.join("artifacts").join(storage_name);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::conflict(
+                "artifact_storage_unavailable",
+                "Artifact metadata exists but its stored bytes are unavailable",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(location_error());
+    }
+    Ok(path)
+}
+
 async fn artifact(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Path((ticket, artifact)): axum::extract::Path<(String, String)>,
@@ -3314,21 +3582,41 @@ async fn artifact(
         storage_fields.remove("code_evidence_json");
     }
     a["code_evidence"] = public_evidence.unwrap_or(Value::Null);
-    let bytes = std::fs::read(
-        store
-            .root
-            .join("artifacts")
-            .join(a["storage_name"].as_str().unwrap()),
-    )?;
-    if sha256(&bytes) != a["sha256"].as_str().unwrap() {
+    let bytes = match std::fs::read(artifact_storage_path(&store.root, &a)?) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::conflict(
+                "artifact_storage_unavailable",
+                "Artifact metadata exists but its stored bytes are unavailable",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let expected_sha256 = a["sha256"].as_str().ok_or_else(|| {
+        ApiError::conflict(
+            "artifact_integrity",
+            "Artifact digest metadata is invalid; content was not returned",
+        )
+    })?;
+    if sha256(&bytes) != expected_sha256 {
         return Err(ApiError::conflict(
             "artifact_integrity",
             "Artifact no longer matches its digest",
         ));
     }
-    Ok(Json(
-        json!({"artifact":a,"content":String::from_utf8_lossy(&bytes),"size_bytes":bytes.len()}),
-    ))
+    let content = String::from_utf8(bytes).map_err(|_| {
+        ApiError::conflict(
+            "artifact_encoding",
+            "Artifact bytes are not UTF-8; this endpoint currently serves plain text, not binary transport",
+        )
+    })?;
+    Ok(Json(json!({
+        "artifact":a,
+        "content":content,
+        "size_bytes":content.len(),
+        "encoding":"utf8",
+        "truncated":false,
+    })))
 }
 async fn tickets(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({"tickets":state.lock()?.list("tickets")?})))
