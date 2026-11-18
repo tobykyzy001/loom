@@ -767,7 +767,9 @@ export async function decideApproval(id: string, decision: 'approve' | 'reject',
   }
   const result = await run('ticket-write', () => client.post<unknown>(`/tickets/${encodeURIComponent(id)}/approval`, { approval_id: crypto.randomUUID(), decision, reason: trimmed }))
   if (result === undefined) return false
-  await selectTicket(id)
+  // The decision is already accepted. If the current operator moved while it
+  // was pending, do not redraw their later selection or Page as the old Ticket.
+  if (state.selectedTicketId === id) await selectTicket(id, state.page)
   return true
 }
 

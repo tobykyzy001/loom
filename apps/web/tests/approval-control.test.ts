@@ -24,6 +24,13 @@ async function setup(handler: (url: URL, init?: RequestInit) => Response | Promi
 }
 afterEach(() => vi.unstubAllGlobals())
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
 describe('one exact approval selection and human rationale', () => {
   it('trims the actual reason, submits it with one source-ticket decision, and reopens the same ticket', async () => {
     const id = 'waiting-source'
@@ -49,6 +56,57 @@ describe('one exact approval selection and human rationale', () => {
     expect(body).not.toHaveProperty('project_binding_id')
     expect(body).not.toHaveProperty('source_event_id')
     expect(fixture.state.ticket?.status).toBe('running')
+  })
+
+  it('keeps the later selected Ticket and page after a pending approval is accepted', async () => {
+    const id = 'waiting-source'
+    const completion = deferred<Response>()
+    const fixture = await setup(async url => {
+      if (url.pathname === `/api/v1/tickets/${id}/approval`) return completion.promise
+      if (url.pathname === `/api/v1/tickets/${id}`) return json(ticket(id, 'running'))
+      throw new Error(`Unexpected fetch while operator browsed another context: ${url}`)
+    })
+    fixture.state.selectedTicketId = id
+    fixture.state.ticket = ticket(id, 'waiting_approval') as typeof fixture.state.ticket
+    const decision = fixture.workspace.decideApproval(id, 'approve', '  Explicitly reviewed the original Ticket  ')
+    await vi.waitFor(() => {
+      expect(fixture.calls.filter(call => call.url.pathname.endsWith('/approval'))).toHaveLength(1)
+    })
+    fixture.state.selectedTicketId = 'different-ticket'
+    fixture.state.ticket = ticket('different-ticket', 'running') as typeof fixture.state.ticket
+    fixture.state.page = 'projects'
+    completion.resolve(json(ticket(id, 'running')))
+    expect(await decision).toBe(true)
+    expect(fixture.state.selectedTicketId).toBe('different-ticket')
+    expect(fixture.state.ticket?.id).toBe('different-ticket')
+    expect(fixture.state.page).toBe('projects')
+    const approvals = fixture.calls.filter(call => call.url.pathname === `/api/v1/tickets/${id}/approval`)
+    expect(approvals).toHaveLength(1)
+    expect(JSON.parse(String(approvals[0].init?.body))).toEqual(expect.objectContaining({ decision: 'approve', reason: 'Explicitly reviewed the original Ticket' }))
+    expect(fixture.calls.filter(call => (call.init?.method ?? 'GET') === 'GET' && call.url.pathname === `/api/v1/tickets/${id}`)).toHaveLength(0)
+  })
+
+  it('re-reads the same still-selected Ticket without forcing conversation when the operator changed pages', async () => {
+    const id = 'waiting-source'
+    const completion = deferred<Response>()
+    const fixture = await setup(async url => {
+      if (url.pathname === `/api/v1/tickets/${id}/approval`) return completion.promise
+      if (url.pathname === `/api/v1/tickets/${id}`) return json(ticket(id, 'waiting_approval'))
+      throw new Error(`Unexpected revalidation target ${url.pathname}`)
+    })
+    fixture.state.selectedTicketId = id
+    fixture.state.ticket = ticket(id, 'waiting_approval') as typeof fixture.state.ticket
+    const decision = fixture.workspace.decideApproval(id, 'reject', '  Reviewed only this waiting Ticket  ')
+    await vi.waitFor(() => expect(fixture.calls.some(call => call.url.pathname.endsWith('/approval'))).toBe(true))
+    fixture.state.page = 'devices'
+    completion.resolve(json(ticket(id, 'waiting_approval')))
+    expect(await decision).toBe(true)
+    expect(fixture.state.selectedTicketId).toBe(id)
+    expect(fixture.state.page).toBe('devices')
+    expect(fixture.calls.filter(call => (call.init?.method ?? 'GET') === 'GET' && call.url.pathname === `/api/v1/tickets/${id}`)).toHaveLength(1)
+    expect(fixture.calls.filter(call => call.url.pathname === `/api/v1/tickets/${id}/approval`)).toHaveLength(1)
+    expect(fixture.state.ticket?.status).toBe('waiting_approval')
+    expect(fixture.state.ticket?.id).toBe(id)
   })
 
   it('rejects the stale selected id, changed state, stop intent and malformed reasons without any new decision', async () => {

@@ -13,7 +13,9 @@ import { startRustConcierge, prepareProject, testingClientToken } from '../../sc
 import { chromium } from '../browser/node_modules/playwright-core/index.mjs'
 
 // Real bundled Vue + a fresh Edge profile + genuine Rust/LocalNode chain.
-// Requests are passively observed, never intercepted, mocked or replayed by Playwright.
+// Requests are observed; the explicit approval-navigation case only delays
+// forwarding of the unchanged real POST, then route.continue()s to the owned center.
+// No request payload, response or approval receipt is fabricated or replayed.
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const appRoot = join(repository, 'apps/web')
 const root = await mkdtemp(join(tmpdir(), 'loom-source-browser-'))
@@ -463,8 +465,43 @@ async function run() {
   assert.equal(await page.locator('.confirm-modal').innerText().then(text => text.includes(approveReason) && text.includes('input.txt')), true)
   const approveResponse = page.waitForResponse(response => new URL(response.url()).pathname === rejectPath && response.request().method() === 'POST')
   approveResponse.catch(error => console.error('SOURCE APPROVAL GRANT WAIT', error.message))
+  let releaseApproval
+  const approvalFlight = new Promise(resolve => { releaseApproval = resolve })
+  await page.route(`**${rejectPath}`, async route => {
+    // Delay only the real network hop, then forward the original request with
+    // its existing authentication and normalized reason into the actual Rust center.
+    await approvalFlight
+    await route.continue()
+  })
+  const approvalInFlight = page.waitForRequest(request => new URL(request.url()).pathname === rejectPath && request.method() === 'POST')
   await page.getByRole('button', { name: '确认一次性批准', exact: true }).click()
+  await approvalInFlight
+  // Do not bypass the overlay via a forced pointer click. The actual current
+  // modal has no enabled controls while its action is pending; verify reachable
+  // keyboard navigation so this is an achievable UI path, not a synthetic state edit.
+  let reachedProjects = false
+  const focusTrace = []
+  for (let attempt = 0; attempt < 24; attempt++) {
+    reachedProjects = await page.evaluate(() => {
+      const active = document.activeElement
+      return active instanceof HTMLButtonElement && active.matches('nav.main-nav button, nav.mobile-tabs button')
+        && active.textContent.trim() === '项目' && active.getBoundingClientRect().width > 0 && active.getBoundingClientRect().height > 0
+    })
+    if (!reachedProjects) focusTrace.push(await page.evaluate(() => ({
+      tag: document.activeElement?.tagName ?? null,
+      label: document.activeElement instanceof HTMLButtonElement ? document.activeElement.textContent.trim().slice(0, 60) : null,
+      aria: document.activeElement?.getAttribute('aria-label') ?? null,
+      parents: document.activeElement ? [...document.activeElement.parentElement?.classList ?? [], ...document.activeElement.parentElement?.parentElement?.classList ?? []] : [],
+    })))
+    if (reachedProjects) break
+    await page.keyboard.press('Tab')
+  }
+  assert.equal(reachedProjects, true, `The busy confirmation must allow actual keyboard focus to reach the existing Projects navigation; actual focus trace: ${JSON.stringify(focusTrace)}`)
+  await page.keyboard.press('Enter')
+  await page.locator('.page-title').getByRole('heading', { name: '项目有位置，授权有范围。', exact: true }).waitFor({ state: 'attached' })
+  releaseApproval()
   const approvedHttp = await approveResponse
+  await page.unroute(`**${rejectPath}`)
   assert.equal(approvedHttp.status(), 200)
   const approvedBody = await approvedHttp.json()
   const approveRequest = requests.filter(request => request.path === rejectPath && request.method === 'POST').at(-1)
@@ -477,6 +514,12 @@ async function run() {
   assert.equal(approvedBody.attempt, 1)
   assert.equal(approvedBody.assignments.length, 1)
   await page.locator('.confirm-modal').waitFor({ state: 'hidden' })
+  // The approved decision completed, but this delayed operator's own Projects
+  // navigation must not be overwritten by an unconditional old-Ticket selection.
+  await page.getByRole('heading', { name: '项目有位置，授权有范围。', exact: true }).waitFor({ state: 'visible' })
+  assert.equal(await page.locator('.ticket-detail').count(), 0)
+  const approvalNavigationWasProjects = (await page.locator('.page-title h1').filter({ hasText: '项目有位置，授权有范围。' }).count()) === 1
+  assert.equal(approvalNavigationWasProjects, true)
   const approvedTicket = await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`)
   assert.equal(approvedTicket.status, 'running')
   assert.equal(approvedTicket.attempt, 1)
@@ -519,6 +562,19 @@ async function run() {
   assert.equal(grantedEvidence.source_authority_preserved, true)
   assert.equal(grantedEvidence.grant_created, false)
 
+  // Revisit the accepted ticket intentionally for its real Node/report evidence,
+  // rather than relying on completion to force this page on the operator.
+  const conversationNavigation = page.getByRole('button', { name: '对话', exact: true })
+  let reopenedConversation = false
+  for (let index = 0; index < await conversationNavigation.count(); index++) {
+    if (await conversationNavigation.nth(index).isVisible()) {
+      await conversationNavigation.nth(index).click()
+      reopenedConversation = true
+      break
+    }
+  }
+  assert.equal(reopenedConversation, true, 'Use the actual visible navigation to reopen the approved Ticket after preserving Projects')
+  await waitingDetail.locator('.ticket-id').getByText(thirdTicketId, { exact: false }).waitFor()
   const thirdOutcome = await deliver()
   assert.equal(thirdOutcome.status, 'succeeded')
   assert.equal(thirdOutcome.assignmentId, newAssignment.id)
@@ -700,6 +756,8 @@ async function run() {
     heartbeat_restored_before_approval: true,
     rejection_zero_runtime_and_not_cancelled: true,
     approval_source_authority_preserved_without_new_grant: true,
+    approval_navigation_preserved_after_in_flight: approvalNavigationWasProjects,
+    approval_keyboard_navigation_actual: true,
     three_source_tasks_three_immutable_specs: true,
     revoke_and_mutated_current_grant_no_new_job: true,
     narrow_viewport_real_column_no_overflow: true, screenshots: [join(root, 'source-work-desktop.png'), join(root, 'source-work-narrow.png')],

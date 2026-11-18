@@ -843,6 +843,8 @@ COMMIT只在字段校验、状态/权限、插入及audit均成功后发生，�
 
 已有真实验证覆盖 1000 字节、1001字节、非文本/空白拒绝，未经当前范围Grant/Binding错误403、状态已变409，以及SQL trigger分别阻止审批grant或retry审计时Ticket/attempt/历史完整回滚。第三条生产Source的真实UI又走过离线待审批 → 实际reason拒绝且保持零工作 → 原生Node以原Project Root inventory真heartbeat恢复 → 新reason明确批准 → 唯一首Attempt/Lease → 实际Artifact及input SHA/assignment对齐。后续撤权仍不能复活历史作业或创建第四票。[浏览器报告](/tmp/loom-approval-browser-result.json) 和[HTTP/源事务证明](/tmp/loom-approval-http-final-jrwOGs/result.json)。它们证明这一单Service的人工审批闭环，不等于多 principal 强度隔离、两Tab并发幂等或跨主机 exactly-once。
 
+审批请求已接受之后的重读也**不能改变用户后来选择的Ticket/页面**。Vue仅在当前仍选中同一ID时通过原 `selectTicket` 的完整 guarded re-read 和错误处理继续，显式保留当前page；选择已转移到另一Ticket则不重选或额外请求旧A。回执仍是原事务已接受的事实，不能因页面变化而伪造取消、回滚或失败；反之，新的UI条件也不是新身份、Grant或永久批准。重点项目验证使用真实Vue键盘导航到当前可见Projects tab、只延迟并继续原POST至真实Rust中心，完整Node/Artifact/revocation收尾，变更selection的另一分支在单元里核对没有A GET，见 [tests/sources/README.md](tests/sources/README.md)。同票原有detail-busy跳过读取仍是独立原行为，不能以一次旧版限时wait超时推断旧的重选每次都会执行。
+
 **当前公共重试的正常语义窄于任何历史状态的继续执行**。只有当前已明确 `failed` 且没有停止意图的Ticket，才能沿其原Grant（未撤销）签发一个新的Assignment/epoch。它保留本Ticket的内容、原Grant digest、Node/worker/binding等既有范围及旧Report/Artifact/Effect，而不是换Grant、冒充换机或自动回滚。新的尝试有自己的Assignment、Epoch和相应实际执行/报告证据。
 
 `reconciling`/未知结果必须先核对已有副作用，`pending`、`running`、`cancelled`、`succeeded`、已有停止意图或撤销的资源都不能由公共 `/retry` 另建执行**或记录一次虚假的“已重试”审计**。这不能靠UI禁用按钮代替后端限制。`waiting_approval` 的批准动作只通过已有人工审批门及当前Grant/Source校验后调用共享签发逻辑，仍产生合法的首次Attempt；不能把这条专门入口混同为任意直接 retry，也不能让普通 retry 成为绕过审批的变道。
