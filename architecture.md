@@ -771,6 +771,10 @@ Package Manifest 按构建 Target 区分 Rust Host 二进制、Harness 插件、
 
 二者分别版本化：用户禁止外发是 Policy，GPU 从忙碌变空闲是 Resource State。资源变化不能扩大 Grant；Policy 撤销后新执行必须停止，旧 Lease 失效，旧 Agent 的后续写入需被 fencing。
 
+**当前用户的撤权界面也分离以下事实**：撤销一条精确 Grant 由认证后的浏览器用户确认并调用现有 `/grants/{id}/revoke`，不与停止 Task/取消一个 Node 混用。它保存新 `revoked_at`、递增 Grant 版本并使原有 Lease 失效，保留原始票据、digest、历史报告与对账证据；不会删除 Ticket 或生产过的 Artifact。
+对于中心已签发、但 Node 尚未 acknowledged/admit 的普通 Assignment，之后的正常和再次 poll 都不能派发该已撤 Grant 的执行。这个 Assignment 可以已经变为 `reconciling`，但它并没有因此成为已取消、成功或失败，也不等于 `cancel_requested` 或 Node acknowledgement。零执行、零新报告/Artifact/Effect 和目标文件未产生必须分开验证，而不是仅由按钮消失推断。这种Case不同于已被宿主领取后进行中的受限 edit-file 撤权停止和本地证据隔离。
+读取当前 Grant 同样应忠于持久化字段。SQL 的事实为 `revoked_at` 与版本，不提供也无须补造独立的 `status` 列。UI以该时间戳优先呈现“已撤销”，历史状态兼容但未知状态不被误当作有效。HTTP 撤销回执已被中心确认，与之后资源列表是否成功取得最新视图是两件事：刷新失败时必须把旧卡片明确标成未刷新的先前快照，不能以关闭确认框的方式暗示仍有效的快照已经是最新权限。这些状态继承/展示本身既不重授权限，也不启动工作。
+
 ### 9.2 Assignment 的建议字段
 
 ```text

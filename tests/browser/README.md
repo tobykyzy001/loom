@@ -62,13 +62,28 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 8. 新建 write ticket，不轮询之前点真实“取消任务”和确认按钮，必须看到
    “取消意图已记录”。随后 Node 承认取消，并断言 `cancelled`、无 Artifact、
    无目标文件。Center 将 ack 映射为 `true` 或 `1` 均是已有真实表现。
-9. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
-   overflow。不是手机、锁屏、触屏、换网或 accessibility 验收。
-10. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
+9. 浏览器 UI 再创建一个**尚未领取**的 write Ticket/Assignment，先不在 Node 上
+   poll。进入权限页，选择目标 Grant，真正点「确认撤销授权」，等待该精确 Grant
+   的200回执、版本递增、`revoked_at` 与新资源列表。Ticket虽在此时已转为
+   `reconciling`，但 `cancel_requested=false`，尚未acknowledged，原
+   Assignment/Lease epoch/digest 保留，未产生 Report/Artifact/Effect。
+   针对同一已注册 Node，以不透改响应的包装观察两次真实 poll，都得到
+   `assignment:null`。临时 fail-on-call executor与Node outbox/history证明实现
+   未执行，目标文件不存在，旧Artifact/Effect不变；随后用合法字段显式复用
+   旧Grant实际得到403 `grant_scope`，没有新增 Ticket。再运行现有
+   `/audit/verify`，保存完整审计链；这里的 Grant.revoked 属全局审计而非该
+   Ticket的取消回执。此阶段不是正在执行的Agent撤权取消或多Grant清场。
+   恢复时回到对话页，并显式选定最初被取消的另一张Ticket，完成原401/
+   认证恢复路径，避免把“当前最新 的reconciling”当成先前的取消。
+10. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
+    overflow。不是手机、锁屏、触屏、换网或 accessibility 验收。
+11. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
     已不可用”的错误绿灯。
 
-除初始 Heartbeat 外，读取/写入/取消前各显式 heartbeat + poll：共 4 次 heartbeat、
-3 个确定性执行。不存在自动付费模型调用或长期主 loop。
+读取/写入/取消及两次撤权后的空闲 poll 均各有一次显式 heartbeat：加上最初
+注册后的heartbeat，共 **6次heartbeat、5次有界Node poll**。新增 revoked
+Assignment 的 executor 调用数必须为 0。没有自动付费模型调用或长期loop。
+[当前完整10阶段PASS报告](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-Q86Qf1/result.json)。
 
 ## 截图、日志、进程回收
 

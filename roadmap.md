@@ -90,6 +90,10 @@
 
 撤权后，真源diff与整体 unknown 报告在Node outbox保留。旧 Artifact实际上报被 **409 outcome_unknown** 拒绝，该Report会因引用该未接受 Artifact而被**403 artifact_lineage**拒绝，不伪装成center接受的新效果。当前 revoked Ticket无新Report/Artifact/Effect，普通用户 cancel 的严格 `cancelled_change` 例外不会被套用；重开、重复poll和新Ticket尝试均无再次原生停止或第二源码执行。此前全部正常failed/retry/cancel阶段仍过，最终只增至4 Tickets/5 Assignments维持4 Reports/7 Artifacts/4 confirmed中心 effects。原生原因仍是SDK支持的`user`而非 `revoked`。 [实际最新driver证据](/tmp/loom-code-revocation-tested-wYGIiL/result.json) 与 [CODE_TASK](tests/harness/CODE_TASK.md) 说明这一受限v1→revokedv2 file-edit闭环；`tests/runner/grant-revocation-fence.mjs`另以真实HTTP、26个未执行的受控Task和33条 socket可读审计 验证未领取不能执行、旧 artifact/report 409与grant.revoke 审计不失真。没有扩展多工作类型、新的模型/Grant或任意工具，不把物理真机/全网视为已验收。
 
+**用户撤权与普通未领取工作的实际控制也已有独立的 UI 证明**：在 Edge 中创建普通pending/running Assignment，但不先让Node领取，随后从权限页选择该精确Grant、确认撤销，收到同一Grant ID的200、真实`revoked_at`和版本1→2。原合同保持 immutable digest和原Assignment/Lease epoch，旧Lease不续，Ticket进入reconciling而非自动cancelled。两次真实Node poll均按原`LocalNodeRunner`返回`assignment:null`；临时fail-on-call executor未调用，outbox、报告、Artifact、Effect及目标文件保持零效果，以前成功Artifact的byte/hash不受影响。复用此已撤Grant的合法Ticket请求得到403 `grant_scope`且没有新任务，审计SHA链再次验证。
+
+前端修复了真实Grant SQL不返回独立status却让卡片仍显示有效的问题，状态徽标以revoked_at优先；`revokeGrant()`也只在确认id正确的撤销receipt且读取到最新资源后完成。读取失败要明确区分“中心确认撤权但还没有最新快照”，不把旧有效badge当作实时权限。确认操作在POST后的资源刷新中也不会重复进入。普通已受理源码撤权阶段与此**未acknowledged**的正常用户权限收回不是一回事，不能把后者误宣为取消/终止/自动重启Agent。原有普通cancelled Ticket和401 credential recovery在同一完整真实浏览器回归中仍通过，10阶段详细证据见 `tests/browser/README.md`。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。

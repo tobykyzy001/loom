@@ -154,6 +154,7 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 - Vue 消费版本化 API 而不是直接读取中心数据库。共享领域组件与平台外壳适配分开，适配键盘、触摸、断线、认证过期和窄屏。
 - 全局显示默认与 Ticket 自己覆盖必须按同一 scope 的偏好 GET/PUT 分离。现有 GET 额外返回 `scope`、精确 `ticket_id`、`has_override`，用于区分无 row 的 global 继承与实际显式选择；不改变 schema14 或任务权限。读取401进入认证失效，403/未知旧字段仅提示同步不可用，不伪造自己的本地 override。过程折叠不删除消息或证据；审计/轮询需校验已加载Ticket身份。当前实现、代际与审查边界见 architecture.md 第4.1.1节。
 - Web / PWA、Tauri 或薄原生壳的更新不得成为未签名或未授权的静默副作用。
+- 用户撤权界面用已返回的 `revoked_at` 与版本表现权限，**不要假设 grants 有 status 列**。中心确认撤权与资源列表刷新成功分别处理，旧快照不得冒充已同步的有效权限；确认框在取回最新资源前保持忙碌。普通未 acknowledged Assignment 的撤权不等于任务 cancel_acknowledgement，也不等于已受理源码编辑中的 native stop；前者其实际Node空poll、未执行、无文件效果和原审计保留须按用户控制链验证，参见 architecture.md §9.1 和 tests/browser/README.md。
 
 ## 7. 修改和验证协议
 

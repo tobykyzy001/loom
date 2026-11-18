@@ -18,6 +18,14 @@ node tests/runner/coordinator-admission.mjs
 
 这些场景使用临时 owned inputs、真实本地文件读写和受限返回数据。新进程/新 runner 重开同一 Native State 不等于 `kill -9` 发生在 DSH Tool 投入外部效果的精确时刻，也不是一中心三工作者 Compose。
 
+## 用户 UI 撤权 + 两次未领取空poll的补充证据
+
+在普通生产浏览器驱动 `tests/browser/run.mjs --keep-evidence` 内，用户通过权限页精确Grant的确认按钮撤回授权，做的是现有Concierge的真实 `POST /grants/{id}/revoke`，而不是 Node 直接访问管理路由。此 Ticket 已签发 Assignment，却从未被 Node acknowledged；撤权后不调用executor，连续两次原LocalNodeRunner的正常poll通过同一注册身份拿到真实 `assignment:null`。对待原响应只做只读记录、保留认证上下文和返回形状，不把缺轮询或短路包装为空poll当作通过。
+
+同时验证原Assignment/lease_epoch/digest与旧Lease窗口不续、`cancel_requested=false`、reconciling而非自动cancelled、原节点Assignments/completions与outbox不变；全局 `grant.revoked` audit与`action`属于该Grant，不能误制造本Ticket的cancel/report；SQL/HTTP现有 `/audit/verify`链检查成立。临时fail-on-call executor证明任何意外执行不能变成静默通过，随后恢复原来的executor。复用旧Grant的**合法**Ticket请求到达服务器后确实以403 `grant_scope`拒绝，没有增加任务或目标文件。该新增Proof不是代替以下已受理旧source edit停止测试，也不宣称重复revoke幂等、多Grant/multi-host等。原协议、runner与命令分列仍在下面，不应拿这些正常运行结果的围栏混同真正已经在执行的native Agent撤权停止。
+
+[当前十阶段完整真实Edge数据](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-Q86Qf1/result.json)。
+
 ## 实际中心的撤权停止帧、旧证据围栏与审计
 
 ```sh
