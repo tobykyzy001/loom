@@ -4287,9 +4287,14 @@ pub(crate) async fn register(
         request.installation_id.as_str(),
     )?;
     let (node, installation, request_id) = envelope(&body)?;
-    let store = state.lock()?;
-    let existing = store
-        .conn()
+    let mut store = state.lock()?;
+    // A signed registration, its enrollment/challenge consumption, Node writes and
+    // audit are one outcome. No failed signature or audit may burn enrollment proof
+    // or leave an apparently registered, incompletely authorized identity.
+    let tx = store
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let existing = tx
         .query_row(
             "SELECT public_key,revoked_at FROM nodes WHERE id=?1 AND installation_id=?2",
             params![node, installation],
@@ -4303,8 +4308,17 @@ pub(crate) async fn register(
                 "Revoked node may not rotate credentials",
             ));
         }
+        let existing_token = tx
+            .query_row(
+                "SELECT token_hash FROM nodes WHERE id=?1 AND installation_id=?2 AND revoked_at IS NULL",
+                params![node, installation],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let presented = bearer(&headers)?;
         if old != request.public_key
-            || !store.authenticate_node(&node, &installation, bearer(&headers)?)?
+            || !existing_token
+                .is_some_and(|expected| store::same_secret(&expected, &store::hash(presented)))
         {
             return Err(ApiError::denied(
                 "credential_rotation_denied",
@@ -4313,7 +4327,7 @@ pub(crate) async fn register(
         }
     } else {
         let code = required(&body, "enrollment_code", 128)?;
-        let changed=store.conn().execute("UPDATE enrollment_codes SET used_at=?1 WHERE token_hash=?2 AND used_at IS NULL AND expires_at>?3",params![now(),store::hash(code),now()])?;
+        let changed = tx.execute("UPDATE enrollment_codes SET used_at=?1 WHERE token_hash=?2 AND used_at IS NULL AND expires_at>?3",params![now(),store::hash(code),now()])?;
         if changed != 1 {
             return Err(ApiError::denied(
                 "enrollment_denied",
@@ -4321,26 +4335,36 @@ pub(crate) async fn register(
             ));
         }
     }
-    let (cid,expires,pubkey): (String,String,String)=store.conn().query_row("SELECT id,expires_at,public_key FROM challenges WHERE node_id=?1 AND installation_id=?2 AND nonce=?3 AND used_at IS NULL",params![node,installation,request.nonce.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or_else(||ApiError::denied("challenge_invalid","Fresh and identity-bound challenge required"))?;
+    let (cid,expires,pubkey): (String,String,String)=tx.query_row("SELECT id,expires_at,public_key FROM challenges WHERE node_id=?1 AND installation_id=?2 AND nonce=?3 AND used_at IS NULL",params![node,installation,request.nonce.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or_else(||ApiError::denied("challenge_invalid","Fresh and identity-bound challenge required"))?;
     if pubkey != request.public_key || parse_time(&expires)? <= chrono::Utc::now() {
         return Err(ApiError::denied("challenge_expired", "Expired challenge"));
     }
+    // Verify before relabeling the input or returning any credential. Transaction
+    // drop rolls back the reserved enrollment and any subsequent storage mutation.
     signature(&key, request.nonce.as_str(), &request.signed_challenge)?;
-    store.conn().execute(
-        "UPDATE challenges SET used_at=?1 WHERE id=?2 AND used_at IS NULL",
-        params![now(), cid],
+    let consumed = tx.execute(
+        "UPDATE challenges SET used_at=?1 WHERE id=?2 AND node_id=?3 AND installation_id=?4 AND nonce=?5 AND public_key=?6 AND used_at IS NULL",
+        params![now(), cid, node, installation, request.nonce.as_str(), request.public_key],
     )?;
+    if consumed != 1 {
+        return Err(ApiError::denied(
+            "challenge_invalid",
+            "The exact unused identity-bound challenge is required",
+        ));
+    }
     let token = token();
     let cap = serde_json::to_string(&request.capabilities).unwrap();
     let workers = json!([{"id":request.worker_id.as_str(),"worker_id":request.worker_id.as_str(),"profile_id":request.profile_id.as_str(),"harness_kind":request.harness_kind.as_str()}]);
     // Registration keeps a compact self-reported worker snapshot; heartbeat supplies live inventory.
-    store.conn().execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES(?1,?2,?3,?4,'online',?5,?6,?7,?8,?8) ON CONFLICT(id,installation_id) DO UPDATE SET token_hash=excluded.token_hash,status='online',last_heartbeat=excluded.last_heartbeat,workers=excluded.workers,inventory=excluded.inventory,capabilities=excluded.capabilities",params![node,installation,request.public_key,store::hash(&token),cap,serde_json::to_string(&workers).unwrap(),workers.to_string(),now()])?;
-    store.audit(
+    tx.execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES(?1,?2,?3,?4,'online',?5,?6,?7,?8,?8) ON CONFLICT(id,installation_id) DO UPDATE SET token_hash=excluded.token_hash,status='online',last_heartbeat=excluded.last_heartbeat,workers=excluded.workers,inventory=excluded.inventory,capabilities=excluded.capabilities",params![node,installation,request.public_key,store::hash(&token),cap,serde_json::to_string(&workers).unwrap(),workers.to_string(),now()])?;
+    store::audit_tx(
+        &tx,
         None,
         "node",
         "node.registered",
         &json!({"node_id":node,"installation_id":installation,"request_id":request_id}),
     )?;
+    tx.commit()?;
     Ok(Json(
         json!({"node_id":node,"installation_id":installation,"token":token,"node_token":token,"grant_digest":null,"protocol":"loom.node.v1"}),
     ))

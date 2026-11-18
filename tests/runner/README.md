@@ -2,6 +2,20 @@
 
 这些入口分别检验**节点本地的入场围栏、取消、持久完成和外发回执**，不是另一个中心权威，也不是完整 M0、数据库或多机验收。不会读取当前 desktop/DSH Profile、系统 Credential Store、真实用户项目、生产 token 或收费模型。
 
+## 首次注册的一次性交涉及失败恢复
+
+```sh
+node tests/runner/registration-atomic.mjs
+```
+
+此driver使用真实Rust Concierge、shared `NodeIdentity`的Ed25519密钥与合法客户端心跳、实际HTTP以及本测试拥有的SQLite，检验**首次code、精确identity-bound nonce、Node/token-hash和 `node.registered` audit**在同一`BEGIN IMMEDIATE` Store连接中的成交。它不以生成UUID、token或“有事务”当完成。无效签名和错误/缺失旧token等拒绝必须保持可重试且不可发行新凭据，已撤销Node不能借新code复活。
+
+修订前真实RED显示：错误signature返回400，但合法enrollment已被`used_at`标记，导致正确签名的重试返回403。当前文件先记录该差异；修后bad request的code/challenge都仍unused，同一个code配合新的正确signable challenge才能恢复注册。`node.registered`的audit还通过在服务器**同一持久数据库**里命名创建`reject_node_registration_audit`触发器注入**本例特的 audit write rejection**，随后hard-assert code/challenge/Node/audit全部没有留下。删除这一唯一测试trigger后用相同code恢复到新正确challenge；server-side audit chain仍验证通过。
+
+另覆盖同public-key原token合法rotation：不等同普通重复注册，fresh code也不会被错误额外消费，但原token必须停止接受；bad identity、原始proof without credential、跨Node凭据以及被撤销Node各有真实拒绝。SQL integrity/hash chain/token身份在真实center stop→restart后继续有效，且整个注册测试保持`grants=0,tickets=0`，**不是Product Grant或任务实际执行**。
+
+[当前回归结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-registration-atomic-proof-N4xHhw/result.json)记录status、code/challenge usage、Node/audit counts、第二次恢复/rotation/revocation/restart事实与profile cleanup；不包含secret token、私钥、Authorization或原始challenge签名。限制仍是**单进程单写者 + Immediate transaction**，非lost-HTTP reliability、任意并发/全球exact-once、远程TLS、OS凭据库、真手机/多Host或延迟的1+3拓扑。`scripts/bare-integration.mjs`另保留正常signed registration→读写→取消→重开的正向链路。
+
 ## 确定性文件与状态场景
 
 ```sh
