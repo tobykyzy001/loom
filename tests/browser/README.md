@@ -51,7 +51,13 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 
 实现使用`loom-shell-v2-pending`隔离候选；候选和正式目标都检查精确公开集合、URL、MIME及实际body SHA-256。只有空的`loom-shell-v2`可逐项复制，且仍会read-back；非空同版本release只有在所有字节与候选完全一致时才可接受。不同body、资源路径或digest的后续变化必须递增`SHELL_CACHE_VERSION`，不能在同一个桶先部分更新再清除最好的旧版本。错误候选清理pending而不删除仍然有效release。单项复制与旧版本清理不宣称CacheStorage/OS全局原子事务或保证物理回滚。网络优先的canonical HTML保留真实Response及源URL，不以丢失URL的new Response伪造缓存来源。
 
-**尚未完成严格区隔连续旧版本安装、激活、claim与正式缓存发布的跨版本浏览器验收；不得仅凭`update()`resolve或controller出现就称其通过。** 未收敛的迁移实验草稿不属于这里的正式PASS命令或支持声明。当前已验证的版本独立性场景仍是真实Rust同源build、初次安装候选与read-back、offline访问，以及同profile完整关闭后的离线进程重开。该护栏不等于离线业务事实、签名更新、任意异常后的完整rollback或手机OS生命周期。
+### 真实旧→新发布、错误候选保护及离线回访
+
+追加运行 `node tests/browser/offline-shell-update.mjs`。这是另一份**独立生产worker bytes**、真实Vue build、实际HTTP与Edge CacheStorage的验收；它使用：1. 独立旧v1对照profile，复现命名根的cache-write fault令旧cleanup删除完整工作v1；2. 另一个全新的健康迁移profile，从经过受控同域fetch/body-read调度的`c833aa8` v1升到byte-identical当前生产v2，发布并读回相同五份资源，再验证真实非canonical root（HTTP 302到有效HTML）与`DOMException(QuotaExceededError)`根写入fault后健康bucket不变、pending删除、无关cache存在，最后真正离线重载且API仍真实失败。后者的good worker源等于当前`sw.js`，两个context/进程各自有CDP核实的精确profile目录，不借用原DSH或私人profile；结束时临时profile删除都实际核验。
+
+前项是**旧故障对照**，不能当作把坏生命周期一起塞入健康迁移的证明。历史v1附带明示的fetch调度与完整body clone读取适配（不是任何历史版本的字节级保证），write fault也不是物理配额耗尽。v1人工root response的charset与v2保留真实HTTP`text/html`允许不同，但body/hash和各项合法MIME均独立检查；不得借口元数据改善而降低比较。此处没有任意历史root损坏恢复、签名软件升级、全局原子替换或保证物理回滚的证据，更没有Task/Grant/API凭据缓存。最新[完整bounds/source/driver/cleanup记录](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-update-proof-XkkpmI/result.json)及[390px离线截图](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-update-proof-XkkpmI/offline-after-failed-candidates.png)均来自非改写worker通过的最终运行，早期未完成探针不计PASS。
+
+**等待器必须等待真实布尔条件**，不能只等controller或异步Promise有值：在当前Playwright `waitForFunction`传入async predicate时，返回的Promise本身会提前通过。迁移脚本改为Node限时等待`page.evaluate(async()=>...)`的**实际布尔结果**，再逐项read-back，并对`registration.active`与controller的精确URL/state分别核对。`caches.open`会创建cache，故只是观测器打开一个名字绝不能证明旧版本存在或新桶完整；总限时函数也必须真正await race之后才clearTimeout。该owned browser fixture与真实Rust业务proof分开，不能代替真手机OS、签名更新、全部Harness或任务恢复验收。
 
 ### 同一owned profile真实浏览器进程关闭后离线重开
 
