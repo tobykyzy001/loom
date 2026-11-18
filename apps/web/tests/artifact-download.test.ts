@@ -96,6 +96,13 @@ describe('an explicit byte response preserves rather than decodes binary text', 
     vi.stubGlobal('crypto', original)
     const emptyName = artifactFrom(response({ name: '..' }), { ...scope(), encoding: 'base64' })
     expect((await verifyArtifactBytes(emptyName.content, emptyName.metadata, emptyName.truncated)).filename).toBe('artifact-artifact-a.bin')
+    const boundaryName = `A${'📦'.repeat(80)}`
+    const unicodeName = artifactFrom(response({ name: boundaryName }), { ...scope(), encoding: 'base64' })
+    const unicodeFile = await verifyArtifactBytes(unicodeName.content, unicodeName.metadata, unicodeName.truncated)
+    expect(new TextEncoder().encode(unicodeFile.filename).length).toBeLessThanOrEqual(240)
+    expect(Array.from(unicodeFile.filename).at(-1)).toBe('📦')
+    expect(unicodeFile.filename.endsWith('�')).toBe(false)
+    expect([...unicodeFile.bytes]).toEqual([...bytes])
   })
 })
 

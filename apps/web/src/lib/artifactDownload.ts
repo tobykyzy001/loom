@@ -58,8 +58,22 @@ export async function verifyArtifactBytes(content: string, metadata: {
   }
   let filename = typeof metadata.name === 'string'
     ? [...metadata.name.normalize('NFC').replace(/[<>:"|?*\\/]/g, '_').replace(/[\u0000-\u001f\u007f]/g, '')]
-      .join('').trim().replace(/\.+$/, '').slice(0, 160)
+      .join('').trim().replace(/\.+$/, '')
     : ''
+  // Bound UTF-8 bytes as well as user input character safety. Never cut
+  // through a multi-byte code point to satisfy a filename limit.
+  const encoder = new TextEncoder()
+  if (encoder.encode(filename).length > 240) {
+    let trimmed = ''
+    let encodedBytes = 0
+    for (const character of filename) {
+      const width = encoder.encode(character).length
+      if (encodedBytes + width > 240) break
+      trimmed += character
+      encodedBytes += width
+    }
+    filename = trimmed
+  }
   if (!filename || filename === '.' || filename === '..') filename = `artifact-${metadata.artifact_id.replace(/[<>:"|?*\\/]/g, '_').replace(/[\u0000-\u001f\u007f]/g, '')}.bin`
   const mediaType = typeof metadata.media_type === 'string'
     && /^(?:[a-zA-Z0-9!#$&^_.+-]+)\/(?:[a-zA-Z0-9!#$&^_.+-]+)$/.test(metadata.media_type)

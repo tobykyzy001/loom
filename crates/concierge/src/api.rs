@@ -811,6 +811,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledgement_and_audit_commit_atomically() {
+        const NODE_TOKEN: &str = "acknowledgement-node-token-123456";
+        let (directory, state) = revocation_test_state();
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE nodes SET token_hash=?1 WHERE id='node' AND installation_id='installation'",
+                [crate::store::hash(NODE_TOKEN)],
+            )
+            .unwrap();
+        let before = state
+            .lock()
+            .unwrap()
+            .get("assignments", "assignment")
+            .unwrap()
+            .unwrap();
+        assert!(before["acknowledged_at"].is_null());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(server_state)).await.unwrap();
+        });
+        let call = || {
+            reqwest::Client::new()
+                .post(format!("http://{address}/api/v1/nodes/acknowledge"))
+                .bearer_auth(NODE_TOKEN)
+                .json(&json!({
+                    "protocol":"loom.node.v1", "node_id":"node",
+                    "installation_id":"installation", "request_id":id("acknowledgement-test"),
+                    "ticket_id":"ticket", "assignment_id":"assignment", "lease_epoch":1,
+                    "accepted":true, "reason":"", "cancel_requested":false,
+                    "cancellation":false
+                }))
+        };
+
+        // This seeded Assignment and controlled SQL fault test authenticated RPC
+        // and record consistency only; neither produced an executor or DSH effect.
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER deny_acknowledgement_audit BEFORE INSERT ON audits
+                 WHEN NEW.action='assignment.acknowledged'
+                 BEGIN SELECT RAISE(ABORT,'fixture denies acknowledgement audit'); END;",
+            )
+            .unwrap();
+        let response = call().send().await.unwrap();
+        let status = response.status();
+        let denied = response.json::<Value>().await.unwrap();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{denied}");
+        assert_eq!(denied["error"]["code"], "storage_error");
+        assert!(denied["error"].get("backtrace").is_none());
+        assert!(!denied
+            .to_string()
+            .contains(directory.path().to_string_lossy().as_ref()));
+        assert!(!denied.to_string().contains(NODE_TOKEN));
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                before,
+                "a failed acknowledgement audit must roll back the assignment too"
+            );
+            assert!(revocation_audits(&store, "assignment.acknowledged").is_empty());
+        }
+
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute("DROP TRIGGER deny_acknowledgement_audit", [])
+            .unwrap();
+        let response = call().send().await.unwrap();
+        let status = response.status();
+        let accepted = response.json::<Value>().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["accepted"], true);
+        let store = state.lock().unwrap();
+        let assignment = store.get("assignments", "assignment").unwrap().unwrap();
+        let acknowledged_at = assignment["acknowledged_at"].as_str().unwrap();
+        assert_eq!(accepted["acknowledged_at"], acknowledged_at);
+        assert!(
+            parse_time(acknowledged_at).unwrap()
+                > chrono::Utc::now() - chrono::Duration::minutes(1)
+        );
+        assert_ne!(acknowledged_at, "2026-01-01T00:00:00Z");
+        let audits = revocation_audits(&store, "assignment.acknowledged");
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0]["ticket_id"], "ticket");
+        assert_eq!(audits[0]["actor"], "node");
+        let evidence: Value =
+            serde_json::from_str(audits[0]["evidence"].as_str().unwrap()).unwrap();
+        assert_eq!(evidence["event_type"], "assignment.acknowledged");
+        assert_eq!(evidence["actor"], "node");
+        assert_eq!(evidence["evidence"]["assignment_id"], "assignment");
+        assert_eq!(evidence["evidence"]["delivered_is_not_read"], true);
+        assert!(!evidence.to_string().contains(NODE_TOKEN));
+        assert!(store.verify_audit().unwrap());
+        drop(store);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn first_grant_revocation_rolls_back_when_its_audit_write_fails() {
         let (_directory, state) = revocation_test_state();
         let app = router(state.clone());
@@ -3448,25 +3556,40 @@ pub(crate) async fn acknowledge(
     body: Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let (node, _) = node(&state, &headers, &body)?;
-    let assignment = required(&body, "assignment_id", 160)?;
     let store = state.lock()?;
-    valid_lease(
+    let (ticket, assignment, _) = valid_lease(
         &store,
         &body,
         &node,
         body["cancel_requested"].as_bool().unwrap_or(false),
     )?;
-    store.conn().execute(
-        "UPDATE assignments SET acknowledged_at=?1 WHERE id=?2",
-        params![now(), assignment],
-    )?;
-    store.audit(
-        body["ticket_id"].as_str(),
-        "node",
-        "assignment.acknowledged",
-        &json!({"assignment_id":assignment,"delivered_is_not_read":true}),
-    )?;
-    Ok(Json(json!({"accepted":true})))
+    let mut store = store;
+    let acknowledged_at = now();
+    let tx = store.conn_mut().transaction()?;
+    let result = (|| -> rusqlite::Result<()> {
+        tx.execute(
+            "UPDATE assignments SET acknowledged_at=?1 WHERE id=?2 AND ticket_id=?3 AND node_id=?4",
+            params![acknowledged_at, assignment, ticket, node],
+        )?;
+        store::audit_tx(
+            &tx,
+            Some(&ticket),
+            "node",
+            "assignment.acknowledged",
+            &json!({"assignment_id":assignment,"delivered_is_not_read":true}),
+        )
+        .map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                error.to_string(),
+            )))
+        })?;
+        Ok(())
+    })();
+    result?;
+    tx.commit()?;
+    Ok(Json(
+        json!({"accepted":true,"acknowledged_at":acknowledged_at}),
+    ))
 }
 pub(crate) async fn event(
     AppState(state): AppState<Arc<State>>,

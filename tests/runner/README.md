@@ -38,6 +38,18 @@ Node的`status`与timestamp不一致或timestamp非法形式则是 `409 revocati
 
 [当前十阶段完整真实Edge数据](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-Q86Qf1/result.json)。
 
+## 原子Acknowledgement及受理来源审计
+
+```sh
+node tests/runner/ack-audit-atomic.mjs
+```
+
+`/nodes/acknowledge` 原先先单独写入`acknowledged_at`，随后再写入 `assignment.acknowledged` 审计。若审计步骤失败，Node可能看到一个错误，却留下被认为已经受理的履历，后续撤权停补门也会读取这一字段，却找不到与之匹配的来源审计。现在该项Assignment更新和审计在同一Store事务提交，字段与时间戳必须共同成立，否则一起回滚；没有将`acknowledged_at`标到assignment却不存在审计记录的状态。仍由真实Node identity/current ticket/assignment/lease/epoch以及当前authorization控制，不是冲空节点调用`accepted`也一律总能执行。
+
+这一acknowledgement保持 **`delivered_is_not_read`**：它不等于读到了Artifact bytes、模型调用、普通执行或取消 acknowledgement，亦不创造Report/Artifact/Effect或新Grant/Worker。此证据以**当前Grant与ProjectBinding**内那一笔实际assignment说明Node被正确Accept；不把原生accept代码当作exampleoperator批准。客户端在lost/unknown response时需仍以当前Ticket/assignment/audit核验结果，不能从这一次原子重放推出全体命令全局exactly-once或被复制的代码编辑已结束。
+
+验证分两部分互不混淆：router/同connection SQL TRIGGER fault验证原子回滚与后续合法ack；外层真实registered Node +真实HTTP契约由这一driver以同一临时数据库上的**持久 trigger**制造只在服务器写入connection可见的audit失败，要求`acknowledged_at`仍为NULL且匹配audit=0，禁止“审计拒绝結果テーブル却被 accept写入” 的结果。结束仅这个 fixture trigger被DROP，随后同一ack命中 `delivered_is_not_read=true`、正确assignment/timestamp和审计链路。前一脚本漏objective曾先被合法API拒绝；外部`TEMP TRIGGER`在不同SQLite connection中看不到server自己的连接，触发失败预期曾被issue归因为转录遗漏，未误作产品证明。没有grants/capability license/private身分架构扩展、其他DSH Provider/插件安装或第二物理机的执行证明，仅本节点的审批入口与审计可靠性。
+
 ## 实际中心的撤权停止帧、旧证据围栏与审计
 
 ```sh
