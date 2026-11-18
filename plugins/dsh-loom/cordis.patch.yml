@@ -9,6 +9,7 @@
         state_dir: ''
         artifact_dir: ''
         allow_dsh_agent_creation: false
+        fixture_code_tools: false
         agent_session_id: ''
         max_active_workers: 1
         heartbeat_ms: 15000

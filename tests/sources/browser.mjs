@@ -434,11 +434,15 @@ async function run() {
 async function openSourcePanel(page) {
   if (await page.locator('.source-work-panel').count()) return
   await page.locator('.conversation-column').waitFor()
+  await page.waitForFunction(() => !document.querySelector('.workspace-loading')
+    && (document.querySelector('.ticket-detail') || document.querySelector('.source-open-button')))
   if (await page.locator('.ticket-detail').count()) {
     await page.locator('.ticket-detail').getByRole('button', { name: '新的任务', exact: true }).click()
   }
-  await page.getByRole('button', { name: '打开受限 Source', exact: true }).click()
-  await page.locator('.source-work-panel').waitFor()
+  const openButton = page.getByRole('button', { name: '打开受限 Source', exact: true })
+  await openButton.waitFor({ state: 'visible' })
+  await openButton.click()
+  await page.locator('.source-work-panel').waitFor({ state: 'visible' })
 }
 
 async function recordMessage(page, content) {

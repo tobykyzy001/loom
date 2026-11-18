@@ -158,6 +158,7 @@ ${runtime.LOOM_FIXTURE_CREDENTIAL_RECORD_KEY ? `- id: loom-credential-seed
     enrollment_code: !!js process.env.LOOM_FIXTURE_ENROLLMENT_CODE || ''
     allow_dsh_agent_creation: true
     bounded_fixture_effects: true
+    fixture_code_tools: !!js process.env.LOOM_FIXTURE_CODE_TOOLS === 'true'
     model_text_tasks: !!js process.env.LOOM_FIXTURE_MODEL_TEXT_TASKS === 'true'
     model_descriptor_tasks: !!js process.env.LOOM_FIXTURE_MODEL_DESCRIPTOR_TASKS === 'true'
     credential_broker_tasks: !!js process.env.LOOM_FIXTURE_CREDENTIAL_BROKER || 'unsupported'

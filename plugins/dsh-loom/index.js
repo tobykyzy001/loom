@@ -23,6 +23,7 @@ export const Config = z.object({
   credential_broker_tasks: z.union(['unsupported', 'dsh_records']).default('unsupported').description('Opt in to exact controller-bound Host credential metadata inspection and separately granted revoke; never secret extraction.'),
   allow_dsh_agent_creation: z.boolean().default(false).description('Allow creation of an owned Agent; otherwise use existing agent_session_id and never dispose it.'),
   bounded_fixture_effects: z.boolean().default(false).description('Test-only: verify a registered synthetic fixture write, never general provider side effects. Disabled by default.'),
+  fixture_code_tools: z.boolean().default(false).description('Test-only: enable only the explicit scoped fixture source edit and fixed node:test proof. Never enables generic editors, scripts or arbitrary execution. Disabled by default.'),
   delegation_tools: z.union(['unsupported', 'scoped_fixture']).default('unsupported').description('Test-only child Agent with independently verified immutable source. Default refuses delegated ArtifactInput.'),
   delegation_project_root: z.string().default('').description('Test-only exact ProjectBinding root; never authorizes another path by prefix or cwd.'),
   agent_session_id: z.string().default('').description('Optional existing DSH Session id; resume failures are reported, not faked.'),
@@ -73,11 +74,19 @@ export async function apply(ctx, config) {
         if (typeof module.registerScopedDelegationTool !== 'function') throw new Error('Fixture does not expose its explicit scoped delegation tool installer')
         delegationAgentSetup = ({ ctx: agentCtx, scene }) => module.registerScopedDelegationTool(agentCtx, scene)
       }
+      let fixtureCodeTools
+      if (config.fixture_code_tools) {
+        const module = await import('@loom/dsh-fixture-stub-provider/code-tools').catch((error) => {
+          throw new Error('Source-code fixture was requested without its declared test-only tool package', { cause: error })
+        })
+        if (typeof module.registerScopedCodeTools !== 'function') throw new Error('Declared fixture has no scoped source-tool installer')
+        fixtureCodeTools = module.registerScopedCodeTools
+      }
       const adapter = new DshAdapter(ctx, { allowCreation: config.allow_dsh_agent_creation,
         agentSessionId: config.agent_session_id, snapshotDir: config.artifact_dir,
         sessionMapPath: `${config.state_dir}/dsh-session-map.json`,
         allowBoundedFixtureEffects: config.bounded_fixture_effects,
-        delegationAgentSetup })
+        delegationAgentSetup, fixtureCodeTools })
       const startWorker = async (credentials) => {
         let broker
         if (config.credential_broker_tasks === 'dsh_records') {

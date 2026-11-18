@@ -42,6 +42,10 @@ Token equality is supported by NodeIdentity ({token,access_token,node_token}) pe
 
 With the existing explicitly enabled `model_text_tasks` fixture route only, the DSH dispatcher reports a bounded `inventory.model_catalog` through the existing node heartbeat. It uses one cached public SDK `ctx.llm` inspection per dispatcher initialization, preserves the ordinary enrolled Worker/project-root facts, and does not invoke the prepared `stream`. See [MODEL_INVENTORY.md](MODEL_INVENTORY.md) for exact fields and `node tests/model-inventory/real-dsh.mjs` for the real isolated DSH + Concierge proof. This is observed adapter metadata, not a general model registry, cross-provider discovery, inference/right-to-use model authority, or download/activation support. Default-disabled, malformed/foreign selector, missing API/model, bad modality/context or failed preparation never invent a ready model. The paid/live LLM, production Credential Store and current `desktop` profile remain untouched.
 
+## Bounded code-proof fixture (`fixture_code_tools`)
+
+Default remains OFF. This opt-in, test-only fixture lets a current write-Grant-backed isolated DSH Agent modify the one small `src/calc.js` example and then run only a fixed `node --test test/calc.test.js`, returning a real diff and verification Artifact. It uses a clean owned Git root, exact known replacement, immutable ToolCall/ToolResult and independently read file/Git bytes. It has no generic shell, dynamic editor, arbitrary scripts, model/provider promotion, automatic rollback, or unvalidated write permission. Editor errors remain unknown/reconciled while real completed test failures preserve confirmed file effects as failed Reports. Fresh scoped Agent identity is required per code Assignment; code-session reuse is not supported, but completed Ticket reopen/report recovery remains ordinary. See [CODE_TASK.md](../../tests/harness/CODE_TASK.md) for the exact demo, boundaries and actual reproduction commands. This is not a stock code-editor or a full M0 certification.
+
 ## Unit verification without profile effects
 
 ```sh

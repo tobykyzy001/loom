@@ -4,6 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { stableArtifactId } from './ids.js'
 import { modelRef } from './model-policy.js'
+import { fixtureCodeTask, captureCodeCall, captureCodeResult, hasCodeRecord, codeEvidence } from './code-evidence.js'
 
 /**
  * DSH 0.2.2-rc.3 public adapter. Sources verified in the installed ASAR:
@@ -11,11 +12,12 @@ import { modelRef } from './model-policy.js'
  * No private event types, Session.appendPluginRecord, synthetic transcript, or hidden protocol.
  */
 export class DshAdapter {
-  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false, delegationAgentSetup } = {}) {
+  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false, delegationAgentSetup, fixtureCodeTools } = {}) {
     if (!ctx || typeof ctx.on !== 'function') throw new Error('A real Host Context is required')
     this.ctx = ctx; this.allowCreation = allowCreation; this.agentSessionId = agentSessionId; this.snapshotDir = snapshotDir
     this.allowBoundedFixtureEffects = allowBoundedFixtureEffects
     this.delegationAgentSetup = delegationAgentSetup
+    this.fixtureCodeTools = fixtureCodeTools
     this.sessionMapPath = sessionMapPath; this.sessionMap = null
     this.owned = new Map(); this.waiters = new Map(); this.latest = new Map(); this.sequence = new Map()
     this.sessionOwners = new Map()
@@ -23,6 +25,10 @@ export class DshAdapter {
       const assignmentId = this.sessionOwners.get(session.id)
       if (!assignmentId) return
       const tracked = this.sequence.get(assignmentId)
+      if (tracked?.code_task) {
+        if (event.type === 'tool/call') captureCodeCall(tracked, event.data?.name, { ...(event.data || {}), __seq: event.seq })
+        if (event.type === 'tool/result') captureCodeResult(tracked, { ...(event.data || {}), seq: event.seq }, this.sessionRef(session))
+      }
       // During SDK resume a session has a different identity but is the exact live Agent named by our mapping.
       const replacement = this.ctx.agents.get(session.id)
       if (tracked && tracked.agent.session !== session) return
@@ -99,7 +105,17 @@ export class DshAdapter {
           const reason = event.data?.reason
           if (reason?.kind === 'completed') waiter.resolve(reason)
           else if (reason?.kind === 'aborted') waiter.reject(Object.assign(new Error(`DSH turn was aborted (${reason.reason?.kind || 'unknown'})`), { state: 'cancelled', cancel_acknowledged: true, reason }))
-          else waiter.reject(Object.assign(new Error(`DSH turn ended without normal completion: ${reason?.kind || 'unknown'}${reason?.error?.message ? `: ${reason.error.message}` : ''}`), { state: reason?.kind === 'error' ? 'failed' : 'unknown', reason }))
+          else {
+            const codeTask = this.sequence.get(assignmentId)?.code_task
+            // A terminal Agent interrupted/failed outcome does not prove the
+            // bounded file effects never started. Complete their proof before choosing failed vs unknown.
+            if (codeTask && ['error', 'failed'].includes(reason?.kind)) {
+              // Resolve the Agent's turn, then assess bounded evidence instead
+              // of skipping boundedFileEffects on the catch path.
+              tracked.code_outcome_requires_review = reason
+              waiter.resolve(reason)
+            } else waiter.reject(Object.assign(new Error(`DSH turn ended without normal completion: ${reason?.kind || 'unknown'}${reason?.error?.message ? `: ${reason.error.message}` : ''}`), { state: reason?.kind === 'error' ? 'failed' : 'unknown', reason }))
+          }
         }
       }
     })
@@ -110,6 +126,14 @@ export class DshAdapter {
       && typeof agents.get === 'function' && typeof agents.list === 'function')
   }
   async boundedFileEffects(assignment, config, record) {
+    if (hasCodeRecord(record)) {
+      if (!this.fixtureCodeTools || !record.code_task) {
+        return { state: 'unknown', summary: 'A code-fixture ToolResult appeared outside the explicitly configured current scoped assignment. No code effect certification is inferred.',
+          effects: [], artifacts: [], evidence: record.code_tool_records }
+      }
+      const root = await codeEvidence(assignment, config.projectRoot || assignment.grant?.project_root, record.code_task, record)
+      if (root) return root
+    }
     const toolRecords = record?.tool_records || []
     const evidenceScope = assignment.kind === 'edit_file'
     if (!evidenceScope) {
@@ -199,11 +223,18 @@ export class DshAdapter {
     } finally { await import('node:fs/promises').then(({ rm }) => rm(file, { force: true })).catch(() => {}) }
   }
   async attach(assignment, { provider, model, reasoningEffort, maxTokens, projectRoot, reportLink, provenance } = {}) {
+    const codeTask = fixtureCodeTask(assignment)
+    if (codeTask && typeof this.fixtureCodeTools !== 'function') {
+      throw new Error('Explicit source-code fixture tools are disabled and must not be inferred from a model response')
+    }
     if (!this.available) throw new Error('Unsupported executor: live ctx.agents surface is unavailable')
     const existing = this.sequence.get(assignment.id)
     if (existing) return existing
     const sessionMap = await this.loadSessionMap()
     const ownedSessionId = sessionMap.get(assignment.id)
+    if (this.fixtureCodeTools && (this.agentSessionId || ownedSessionId)) {
+      throw new Error('Scoped code fixtures require a new isolated Agent per authorized assignment; reuse/resume of code-bearing Sessions is not supported')
+    }
     const selectedSession = this.agentSessionId || ownedSessionId || randomUUID()
     let handle
     if (this.ctx.agents.get(selectedSession)) {
@@ -218,13 +249,21 @@ export class DshAdapter {
         ...(projectRoot ? { cwd: projectRoot } : {}),
         ...(provenance ? { parentSession: provenance.parent_session.session_id, origin: 'subagent' } : {}),
       },
-      ...(provenance ? { setup: async (agentCtx) => { await this.delegationAgentSetup({ ctx: agentCtx, scene: provenance }) } } : {}),
+      ...(provenance ? { setup: async (agentCtx) => { await this.delegationAgentSetup({ ctx: agentCtx, scene: provenance }) } } :
+        codeTask ? { setup: async (agentCtx) => {
+        // The exported fixture signature is (scoped Cordis context, ticket scope), not a nested wrapper.
+        if ((provider && provider !== 'loom-stub') || (model && model !== 'loom-stub-v1')) {
+          throw new Error('Scoped code fixture cannot switch to a different model/provider')
+        }
+        await this.fixtureCodeTools(agentCtx, { assignment, project_root: projectRoot })
+      } } : {}),
       agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {}), ...(maxTokens ? { maxTokens } : {}) } })
     }
     const record = { agent: handle.agent, owned: Boolean(handle.owned), dispose: ownedDispose(handle),
       last_seq: handle.agent.session.seq, refReported: false }
     this.sequence.set(assignment.id, record)
+    record.code_task = codeTask
     this.sessionOwners.set(handle.agent.session.id, assignment.id)
     await this.persistSessionMap(assignment.id, handle.agent.session.id)
     await reportLink(this.sessionRef(handle.agent.session))
@@ -247,9 +286,16 @@ export class DshAdapter {
       const snapshot = this.latest.get(assignment.id)
       if (!snapshot || !snapshot.full_text) throw new Error('DSH completed without an assistant message; no success can be inferred')
       const fileEvidence = await this.boundedFileEffects(assignment, config, this.sequence.get(assignment.id))
-      if (assignment.kind === 'edit_file' && !fileEvidence.effects?.length && fileEvidence.state !== 'failed') throw new Error('A file-write assignment completed without a verified actual file Effect')
+      if (assignment.kind === 'edit_file' && !fileEvidence.effects?.length && fileEvidence.state !== 'failed') {
+        // Unresolved tool/size facts never authorize a successful file report.
+        throw new Error('A file-write assignment completed without a verified actual file Effect')
+      }
       if (fileEvidence.state === 'unknown') return { ...fileEvidence, artifacts: [] }
-      if (fileEvidence.state === 'failed') return { ...fileEvidence, content: Buffer.from(JSON.stringify({ tool_rejection: true, session_ref: fileEvidence.session_ref, evidence: fileEvidence.evidence })), artifacts: [] }
+      if (this.sequence.get(assignment.id)?.code_outcome_requires_review && hasCodeRecord(this.sequence.get(assignment.id))
+        && fileEvidence.state === 'succeeded') {
+        return { ...fileEvidence, state: 'unknown', summary: 'The Agent terminated abnormally after verified source/test output; task completion stays unknown and does not become a success from test output alone.' }
+      }
+      if (fileEvidence.state === 'failed' && !fileEvidence.artifacts?.length) return { ...fileEvidence, content: Buffer.from(JSON.stringify({ tool_rejection: true, session_ref: fileEvidence.session_ref, evidence: fileEvidence.evidence })), artifacts: [] }
       const text = snapshot.full_text.slice(0, 64_000)
       if (assignment.kind === 'model_text') {
         if (!config.modelObservation || !config.textRoute) throw new Error('model_text requires a confirmed public route observation')
@@ -266,7 +312,7 @@ export class DshAdapter {
       if (fileEvidence.artifacts?.length) {
         const metadata = fileEvidence.artifacts[0].metadata
         if (this.snapshotDir) await writeFile(join(this.snapshotDir, `${assignment.id}.html`), fileEvidence.artifacts[0].bytes, { mode: 0o600, flag: 'wx' })
-        return { state: 'succeeded', summary: 'DSH Agent produced a verified file effect through ordinary public tool results.',
+        return { state: fileEvidence.state || 'succeeded', summary: fileEvidence.summary || 'DSH Agent produced a verified file effect through ordinary public tool results.',
           effects: fileEvidence.effects, artifacts: fileEvidence.artifacts, session_ref: this.sessionRef(agent.session),
           evidence: [{ source: 'dsh-tool-result', session_ref: this.sessionRef(agent.session), artifact_ids: fileEvidence.artifacts.map((item) => item.artifact_id) }], metadata }
       }
@@ -282,7 +328,8 @@ export class DshAdapter {
       // Preserve the original cancellation acknowledgement and observed result.
       // A cancelled/aborted Session is not repackaged as a tool rejection.
       error.session_ref ||= this.sequence.get(assignment.id)?.session_ref
-      if (!['cancelled', 'failed'].includes(error.state) && this.sequence.get(assignment.id)?.refReported) error.state = 'unknown'
+      const codeOutcomeUncertain = this.sequence.get(assignment.id)?.code_task && error.state !== 'cancelled'
+      if (codeOutcomeUncertain || (!['cancelled', 'failed'].includes(error.state) && this.sequence.get(assignment.id)?.refReported)) error.state = 'unknown'
       process.stderr.write(`[loom-local-node] DSH execution error ${assignment.id}: ${error.message}\n`)
       throw error
     } finally { this.waiters.delete(assignment.id) }

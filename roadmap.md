@@ -68,6 +68,14 @@
 
 真实独立Edge、Rust中心与LocalNode证明两支不同Source各自创建及duplicate、一次failed Report经显式retry的新Assignment成功、源spec/digest对账、Artifact下载bytes/hash、SQL审计和当前Grant撤销时的old lease fencing；此入口桌面默认UI保留Task/Activity脉络而不再误混入Help面板。390px桌面viewport也测过实际detail/activity/artifact无横向overflow，非移动真机/锁屏/切网测试。`node tests/sources/browser.mjs` 连续两轮通过；`node tests/browser/run.mjs --keep-evidence` 普通read/write/cancel/auth-expiry-recovery也全阶段通过。这里的Proof不是Live LLM、真实IM/OAuth、通用Agent Provider或第二物理宿主/Compose验收；M0及后续里程碑继续保持各自验证边界。
 
+### M0 受限的真实编程样例（已验收，非普遍代码Agent）
+
+已在本机隔离 DSH Profile、owned 干净 Git示例库、真实Rust控制面上完成一个小的 **源码修复及其真实验证**：Agent在当前 write Grant / binding / physical Node-worker / Assignment 下，通过真实 public scoped tool 只把固定`src/calc.js`的一处错误修复，并独立读取实际bytes、原始commit与unified diff；随后只执行固定的 `node --test test/calc.test.js`。每次Attempt交付对应一个实际 diff 与一个验证 Artifact（`loom.code-change.v1`/`loom.code-verification.v1` 的**证据内容**，不是新Ticket授权或通用协议）。
+
+真实失败测试产生 failed Report和确认的文件effect，**不自动回滚或洗成unknown/无变更**；用户在driver明确准备clean的已知失败基线后正常retry，是第二个合法Assignment而非重复执行。中央与孤立DSH重启保留原历史、Session与字节hash而不再次执行。已完成一共1 ticket、2 assignments、2 reports（fail + succeed）、2 confirmed effects、4 artifacts（两个Attempt各diff/verification），不能误把重试后的新证据当成重复一份文件或把旧失败删除。失败Tool callback或源写入后续校验不完整必须保持unknown/reconciliation，不冒充“拒绝写入”。独立测试同时禁止非currentScope凭据、任意外部provider/model以及旧的ScopedAgent复用；缺许可的默认关闭配置没有code tool path。
+
+本轮**可称已验证一个 M0 受限源码任务**，而非通用自然语言编程能力、自动worktree/review pipeline、live LLM、通用shell/编辑器或全M0通过。真实production Vue可打开该Ticket的两类Artifact（与两个per-attempt effects分别关联），桌面与390视口实际尺寸without溢出，不等于iOS/Android真机。证据和代码范围见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。连接CLI `node tests/harness/real-code-task.mjs` 已反复0 exit；通用Source浏览器也完成full PASS而非只调用底层helper。
+
 ### 下一刀：M0 的最小垂直切片
 
 一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。

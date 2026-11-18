@@ -237,6 +237,21 @@ Source Ticket 的 digest、duplicate和历史身份与原 intake `ticket_id` 分
 
 当前这个入口**固定受控 Source/thread类型**（不是多租户/真实IM/OAuth multi-thread compactor），只复用已有文件读取和Report/Artifact/Lease，不新增模型推理、代码Agent、通用 DAG、全量Transcript或通用backend Connector。refresh/reconnect有自己的credential epoch，受保护读写不能把旧凭据回包或received消息提升成新权限。Source modal 位于对话分支内，Activity/Help只能由该分支自己的条件链分流；宽度/长短ID换行由实际浏览器测量，不能把无关帮助面板当可折叠来实现结果。
 
+### 3.1.3 受限源码修改与验证样例：M0 的真实编程任务
+
+在**非生产默认启用的测试 fixture** 中 现有 Rust Concierge、已授权 `ProjectBinding`、物理 `Node / Installation / Worker` 和 DSH Agent 能运行一个实际代码编辑。控制面只签发既有 `edit_file`、`write` Grant 与 Lease；没有新的 `code` 任务类型或权限类型。`fixture_code_tools` 默认关闭，真正创建的小 DSH Agent 必须通过 `ctx.agents.create({ setup })` 安装当前 Agent 范围内的两个公开工具，不能把旧场景的 Root/旧内容/Session reuse转用成不同工作。
+
+工具先核对真实、干净的 owned Git根、零倍之外的唯一旧代码片段和失败基线，按要求原子替换单一的 `src/calc.js`。另一工具读取实际结果后仅调用固定的 `node --test test/calc.test.js`，limits、clear env、shell:false、symbolic link/hard link boundaries与常设工作区权限仍然有效。不会任取 shell、Git路径、程序、其provider、测试文件或依据模型自报动作授权。
+
+适配层独立读取真实 `--test` 的 process result，再读取actual `git status / git show HEAD:<path> / git diff` 及实际文件 bytes，而不是只信工具回执。它产生每个Attempt一份统一 diff 与一份测试证明。前者对应当前confirmed file effect，后者关联前者作为证据关系，**不构造任意 parent UUID / PermissionTree 或混入其他 Artifact lineage**。基层Artifact认证/上传、Trace元素、Report审计与普通read/write任务仍走版本化Node接口。
+
+**两类结果不可混淆：**
+- 一个真实执行完成的测试若返回非零，就是 `failed` Report，实际代码修改保留为 `confirmed Effect` 并交付其diff/测试证据；不对历史回滚、复制或伪造成duplicate成功。需要重试仍是独立Assignment，并非自动重放未明副作用。
+- 编辑本身出错、malformed ToolResult或已写后校验失败，只是 `unknown/reconciliation`，不能宣称tool_rejection/零副作用或相反宣称已验证成功。即便参与过Process要而可能已部分完成文件效果，也没有fresh已核验Effect证明。只有实际序列、当前Assignment、真实Session、binding、root、真实文件及hash全部一致且当前fixture enabled时才交付这些artifact。
+- reused external/shared Session、任意 provider/model、任意commands禁止在此首片执行。Code tools恢复**只读历史Ticket/mapping与artifact**，而不是恢复一个先前能变砖源文件的Agent。其它类型任务的既有 resume机制不受影响。
+
+它的证明价值是一个真实的M0小规模编程样例，有实际源码变更和测试证据，不是生产 generic code editor、生产 LLM coding质量、通用 Worktree策略或 M3 Stage、Reviewer pipeline。doc详见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。
+
 ### 3.2 当前受限文档工作流的授权与恢复约束
 
 控制器目前支持一种受限、版本化的两阶段 Document Workflow，而不是通用的行业 Pipeline 或任意 `Command` Graph。它复用现有 Host ProjectBinding 和已授权的 Ticket 与 Lease：

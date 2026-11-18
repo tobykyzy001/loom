@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
+export { registerScopedCodeTools, CODE_FIXTURE_SOURCE, CODE_FIXTURE_TEST, CODE_SOURCE_PATH, CODE_TEST_PATH } from './code-tools.js'
 
 const abortFailure = () => ({ code: 'ABORTED', message: 'Fixture provider cancelled by DSH.' })
 function throwIfAborted(signal) {
@@ -46,7 +47,7 @@ class DeterministicAdapter extends LlmAdapter {
     for (const message of options.messages) {
       for (const block of message.content || []) {
         if (block.type === 'text') history.push({ role: message.role, text: block.text })
-        if (message.role === 'tool') history.push({ role: message.role, callId: message.toolCallId || message.source?.callId, content: message.content })
+        if (message.role === 'tool') history.push({ role: message.role, toolCallId: message.toolCallId || message.source?.callId, content: message.content })
         if (block.type === 'tool-call') toolCalls.push(block.name)
       }
     }
@@ -63,6 +64,14 @@ class DeterministicAdapter extends LlmAdapter {
       { type: 'usage', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } },
       { type: 'provider-note', note }, finish(),
     ]
+    const toolResponse = (name, parameters, suffix = id) => [
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'tool-call-delta', index: 0, id: `${name}-${suffix}`, name, argumentsDelta: parameters },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: `${name}-${suffix}`, name, arguments: parameters } },
+      { type: 'usage', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } },
+      { type: 'tool-declaration-check', declared: (options.tools || []).some((tool) => tool.name === name), name },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]
     let chunks
     if (options.purpose) {
       chunks = textResponse('Loom isolated fixture')
@@ -78,6 +87,30 @@ class DeterministicAdapter extends LlmAdapter {
       options.signal?.removeEventListener('abort', aborted)
       throwIfAborted(options.signal)
       chunks = textResponse('Unexpected release without cancellation')
+    } else if (text.includes('LOOM_FIXTURE_CODE_TASK')) {
+      // The two ordinary ToolCalls derive solely from the trigger and prior real
+      // edit result. No controlled central file effect replaces SDK execution.
+      if (!toolCalls.includes('loom_fixture_code_edit')) {
+        chunks = toolResponse('loom_fixture_code_edit', JSON.stringify({ path: 'src/calc.js' }))
+      } else if (!toolCalls.includes('loom_fixture_verify')) {
+        const editResult = history.findLast((entry) => entry.role === 'tool' && entry.toolCallId?.startsWith('loom_fixture_code_edit-'))
+          || history.filter((entry) => entry.role === 'tool').at(-1)
+        const rendered = JSON.stringify(editResult?.content || [])
+        let edit
+        // Public ToolExecutionResult carries canonical `value` plus rendered content.
+        try {
+          const block = editResult?.content?.find?.((item) => item?.type === 'text')
+          edit = editResult?.value || JSON.parse(block?.text || '{}')
+          if (edit.schema !== 'loom.fixture-code-edit.v1' || edit.path !== 'src/calc.js' || edit.created !== true
+            || !Number.isInteger(edit.baseline_test_exit_code) || edit.next_tool !== 'loom_fixture_verify') throw new Error('incomplete real edit result')
+        } catch {
+          try { edit = JSON.parse(rendered.match(/(\{[^{}]*"schema"\s*:\s*"loom\.fixture-code-edit\.v1"[^{}]*\})/)?.[1] || '{}') } catch { edit = null }
+        }
+        if (edit?.next_tool !== 'loom_fixture_verify' || !/^[0-9a-f]{64}$/.test(edit?.sha256 || '')) throw new Error('The code fixture requires the complete actual successful edit result')
+        chunks = toolResponse('loom_fixture_verify', JSON.stringify({ path: edit.path, sha256: edit.sha256 }))
+      } else {
+        chunks = textResponse(`Observed real code verification: ${JSON.stringify(history.filter((entry) => entry.role === 'tool').at(-1)?.content || [])}`)
+      }
     } else if (text.includes('LOOM_FIXTURE_DELEGATE') && !toolCalls.includes('loom_fixture_delegate_write')) {
       // A specific delegated fixture takes priority over the generic ORBITAL
       // inspect trigger, even though the parent instructed that observation.

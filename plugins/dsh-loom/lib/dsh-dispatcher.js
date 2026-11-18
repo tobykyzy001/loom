@@ -7,6 +7,7 @@ import { loadTextRequest, modelBindingSnapshot, validateModelBinding } from './m
 import { inspectModelCatalog, mergeModelCatalogFacts, emptyModelCatalog } from './model-inventory.js'
 import { credentialSnapshot } from './credential-broker.js'
 import { admissionFence, sameAuthorizedAssignment } from '../src/admission.js'
+import { fixtureCodeTask } from './code-evidence.js'
 
 /** Maps verified DSH Agent events to node Sessions, never treating file as DSH execution. */
 export class DshDispatcher {
@@ -105,6 +106,11 @@ export class DshDispatcher {
     if (!['read_summary', 'edit_file', 'dsh_agent_turn'].includes(assignment.kind)) return false
     try {
       validateAssignment(assignment, assignment.grant, this.runner.identity)
+      if (assignment.objective?.includes('LOOM_FIXTURE_CODE_TASK') && !this.config.fixture_code_tools) {
+        throw new Error('Source-code fixture requires explicit opt-in, an actual scoped fixture and the current write Grant')
+      }
+      const codeTask = this.config.fixture_code_tools ? fixtureCodeTask(assignment) : null
+      if (codeTask) this.active.set(assignment.id, { assignment: structuredClone(assignment), codeTask })
       let provenance
       if (Object.hasOwn(assignment, 'artifact_input')) {
         provenance = await verifiedDelegation({ assignment, runner: this.runner, config: this.config })
