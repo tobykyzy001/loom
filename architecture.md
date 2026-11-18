@@ -405,6 +405,15 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 - **计数和角色不以label冒充：** 实际浏览器在两个不同的`session_link`上做正例：sender=worker时原记录可见，sender=client（同一真实Node新增、用于本测试的display label）时严格只显示其带label的记录，复位null时两条还原。不是新增第二个真实用户、Host或Agent，更不是Grant/执行授权；报告/Artifact/Effect/文件SHA与Assignment ID在过滤前后一致。报告中的协作消息数按`session_link`计算，普通activity说明另行计入总数，不混成Filter可匹配条目的数量。
 - 这条归属只覆盖当前全局默认、单任务展开/再折叠/刷新和受授权过程的显示。多标签同时编辑同一坐标的冲突，尚不是全局协调协议；真实移动设备、完整 Harness 内部交流记录以及更多显示策略仍需单独证据。折叠继续显示“过程已折叠”的占位说明，不删除已授权的消息、Report、Artifact 或 Effect。
 
+### 4.1.2 浏览器与中心的连接、旧快照和读取恢复
+
+- 前端已经区分真实网络I/O错误（`network_error` / 读取超时等 `status=0`）与401认证失效、HTTP403/500等普通响应。网络错不会自动撤销Grant、停止worker或将Token替换成新凭据；401仍进入独立认证流程。连接的断开也**不是** Node heartbeat停止或桌面任务已完成的证据。
+- 顶栏有显式**只读**“重新读取工作空间”按钮，直接复用真实的 `refresh()` / `refreshWorkspace()`，而不是通过跳转项目来顺便产生一批读取。它不要求变更凭据或再签Task/Grant。普通网络错误会显示**当前客户端读取中断、已加载内容仅是此前快照**的提示；已有records仍可供查看，但不冒充最新。HTTP错误作为对应作用域的显示/操作问题另外显示；警告也不声称先前结果不确定的写入一定未被中心接受。
+- **偏好内部错误不能渗成成功的整体读取。** `loadTicket` 在当下会话的组合读取里通过内部 `{propagateTransportErrors:true}` 启用传播；`fetchPreferences`保留如实的本scope快照降级和credential401处理，但会让真实 `status=0`网络错误返回给既有外层 `run()` 识别。“不能合法解析/取回这个范围的数据”不允许变成“整个重读成功、节点在线”。HTTP403/500仍保持已有的局部显示降级，不硬译成网络断开。
+- 对外直接`readPreferences`仍使用原scopedefault：错误由原本 `run()`消费，Promise正常完成，仍展示局部错误。新增传播只用于被外层正确等待的组合Ticket/workspace读取，未要求 `void readPreferences()` 的页面调用者另接catch，避免未知的未处理 promise。错误提示和预计的resource key一起保留，不拿全局文案盖掉该任务早已记录的“保留旧显示快照”。原有read generation、credential epoch和response scope校验仍生效。
+- 恢复采用**以实际受保护读取成功作证据**，不是`navigator.onLine`。真实owned Edge通过`browserContext.setOffline`触发实际 `net::ERR_INTERNET_DISCONNECTED`；此时新警示出现。恢复Online之后警示仍在，用户点击才发出新的GET并收回原Ticket ID/currentstate，继而才能收起。原Ticket的Report、Artifact、Effect、Assignment、GrantID/digest、原写文件SHA和原Grant未撤销状态都独立比对；这条case的记录中**没有POST/PUT/PATCH/DELETE**。中心audit链仍可验证。浏览器周边没有暗造一次核发、取消或重复执行作为“refresh”效果。
+- 这是**当前已加载的浏览器工作区**在客户端断网/恢复时的只读快照及访问真实性，不是全量Service Worker离线库、关闭浏览器后持久示图、任意写入already delivered判定、跨机exactly-once或真实移动OS的锁屏/进程被杀/网络切换。真手机与其他Host OS能力另需设备及宿主验证，不能用desktop context取代。
+
 ### 4.2 展示与协议边界
 
 - 不把所有 Agent / Worker 之间消息转发到用户主聊天流。

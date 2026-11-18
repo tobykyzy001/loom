@@ -104,10 +104,13 @@ async function run<T>(key: string, action: () => Promise<T>): Promise<T | undefi
     return result
   } catch (error) {
     if (epoch !== credentialEpoch || (error instanceof ApiError && error.code === 'credential_epoch_changed')) {
+      degradedPreferenceErrors.delete(key)
       if (writeNeedsCredentials(key)) state.errors[key] = '凭据已变化。若服务端曾接受写入，只能使用相同的 Source event 与完整冻结参数明确重放；不能改绑或假定执行状态。'
       return undefined
     }
-    state.errors[key] = error instanceof Error ? error.message : '操作未完成，请稍后重试。'
+    const degradedPreferenceError = degradedPreferenceErrors.get(key)
+    degradedPreferenceErrors.delete(key)
+    state.errors[key] = degradedPreferenceError ?? (error instanceof Error ? error.message : '操作未完成，请稍后重试。')
     if (error instanceof ApiError) {
       if (error.status === 0) {
         state.connected = false
@@ -144,6 +147,9 @@ interface AcceptedPreference extends Preferences { has_override: boolean }
 const acceptedPreferences = new Map<string, AcceptedPreference>()
 const preferenceReads = new Map<string, Promise<void>>()
 const preferenceWrites = new Map<string, PreferenceWrite>()
+// Keep scoped read degradation text together with the outer run that propagates
+// its actual transport failure; a later successful read must not inherit it.
+const degradedPreferenceErrors = new Map<string, string>()
 interface PreferenceWrite {
   promise: Promise<boolean>
   previous: Preferences
@@ -176,7 +182,7 @@ function installPreferenceRead(scope: string, action: () => Promise<void>): Prom
   void current.then(cleanup, cleanup)
   return current
 }
-export async function readPreferences(ticketId?: string, readVersion?: number): Promise<void> {
+export async function readPreferences(ticketId?: string, readVersion?: number, options?: { propagateTransportErrors?: boolean }): Promise<void> {
   const scope = preferenceScope(ticketId)
   let version = readVersion
   if (ticketId) {
@@ -185,7 +191,18 @@ export async function readPreferences(ticketId?: string, readVersion?: number): 
   } else version ??= ++globalPreferenceVersion
   // Queue only same-scope retries. The ordinary credential/run path handles
   // real direct 401 responses and preserves per-scope read errors independently.
-  return installPreferenceRead(scope, () => run(preferenceReadKey(ticketId), () => fetchPreferences(version!, ticketId)))
+  return installPreferenceRead(scope, () => run(preferenceReadKey(ticketId), async () => {
+    const preserveTransportError = options?.propagateTransportErrors === true
+    if (preserveTransportError) return fetchPreferences(version!, ticketId, true)
+    // Direct/public preference reads keep the original scoped-degrade API. Only
+    // composite Ticket/workspace acquisition opts into transport propagation.
+    // The outer run() always consumes this, so a void direct call cannot become
+    // an unhandled rejection merely because the network is unavailable.
+    try { await fetchPreferences(version!, ticketId) } catch (error) {
+      if (error instanceof ApiError && error.status === 0) return
+      throw error
+    }
+  }))
 }
 
 function preferencePayload(ticketId: string | undefined, raw: unknown): { data: Preferences; hasOverride: boolean } {
@@ -204,7 +221,7 @@ function preferencePayload(ticketId: string | undefined, raw: unknown): { data: 
   return { data: preferencesFrom(raw), hasOverride: ticketId ? payload.has_override as boolean : false }
 }
 
-async function fetchPreferences(version: number, ticketId?: string) {
+async function fetchPreferences(version: number, ticketId?: string, captureDegradedError = false) {
   const scope = preferenceScope(ticketId)
   const key = preferenceReadKey(ticketId)
   const currentVersion = ticketId ? ticketPreferenceVersions.get(ticketId) : globalPreferenceVersion
@@ -243,8 +260,16 @@ async function fetchPreferences(version: number, ticketId?: string) {
     const currentVersion = ticketId ? ticketPreferenceVersions.get(ticketId) : globalPreferenceVersion
     if (version === currentVersion && (!ticketId || ticketPreferenceIsCurrent(ticketId))) {
       const detail = error instanceof Error ? error.message : String(error)
-      state.errors[key] = `显示偏好暂不可用，保留当前显示快照，不把它保存为该任务或全局的同步选择。${detail}`
+      const message = `显示偏好暂不可用，保留当前显示快照，不把它保存为该任务或全局的同步选择。${detail}`
+      state.errors[key] = message
+      if (captureDegradedError) degradedPreferenceErrors.set(key, message)
     }
+    // A failed preferences read is still an unfinished network read. Preserve
+    // the useful scoped error for its view, but do not let the outer run turn it
+    // into another successful connection just because it resolved undefined.
+    // Credential failures took the existing authentication path above; actual
+    // HTTP permission/server failures remain a scoped display degradation.
+    if (error instanceof ApiError && error.status === 0) throw error
   }
 }
 
@@ -259,7 +284,7 @@ export async function loadTicket(id: string) {
   state.ticket = ticket
   state.selectedTicketId = id
   localWrite(TICKET_KEY, id)
-  await readPreferences(id, preferenceVersion)
+  await readPreferences(id, preferenceVersion, { propagateTransportErrors: true })
   if (version === detailVersion && ticketPreferenceIsCurrent(id)) state.errors.detail = ''
 }
 

@@ -310,6 +310,45 @@ describe('scoped process display preferences', () => {
     expect(workspace.store.values.has('loom.preferences:global')).toBe(false)
   })
 
+  it('does not turn a failed scoped network read into another successful connection', async () => {
+    let disconnected = false
+    let currentSender: string | null = 'worker'
+    const workspace = await setup(async url => {
+      if (url.pathname !== '/api/v1/preferences') return serverError()
+      if (disconnected) return Promise.reject(new TypeError('fixture network unavailable'))
+      return json({ scope: 'ticket', ticket_id: 'ticket-a', has_override: true, expanded: false, sender_filter: currentSender })
+    })
+    await workspace.selectTicket('ticket-a')
+    expect(workspace.state.preferences.sender_filter).toBe('worker')
+    expect(workspace.state.connected).toBe(true)
+    disconnected = true
+    await workspace.readPreferences('ticket-a')
+    // Direct preference-only failure remains a scoped degradation without an unhandled public Promise rejection.
+    expect(workspace.state.connected).toBe(true)
+    // Retain only the last accepted display, not fabricated new credentials.
+    expect(workspace.state.preferences.sender_filter).toBe('worker')
+    expect(workspace.state.errors['preferences:ticket:ticket-a:read']).toContain('显示偏好暂不可用')
+    // Composite ticket/workspace acquisition must not leisurely infer that the
+    // whole read succeeded when this scope knows its own transport failed.
+    await workspace.readPreferences('ticket-a', undefined, { propagateTransportErrors: true })
+    expect(workspace.state.connected).toBe(false)
+    expect(workspace.state.credentialState).toBe('unknown')
+    expect(workspace.state.errors['preferences:ticket:ticket-a:read']).toContain('显示偏好暂不可用')
+    disconnected = false
+    currentSender = 'client'
+    await workspace.readPreferences('ticket-a')
+    expect(workspace.state.connected).toBe(true)
+    expect(workspace.state.credentialState).toBe('valid')
+    expect(workspace.state.preferences.sender_filter).toBe('client')
+    expect(workspace.state.errors['preferences:ticket:ticket-a:read']).toBe('')
+    workspace.state.credentialState = 'valid'
+    disconnected = false
+    currentSender = null
+    await workspace.readPreferences('ticket-a')
+    expect(workspace.state.connected).toBe(true)
+    expect(workspace.state.preferences.sender_filter).toBe(null)
+  })
+
   it('keeps a scoped 403 as a display degradation and rejects a mismatched ticket response without caching it', async () => {
     const workspace = await setup(async url => {
       if (url.pathname !== '/api/v1/preferences') return serverError()

@@ -52,7 +52,24 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 6. 查权限页 Grant 操作和 Node scope，UI 再提交写任务、Node 实际写文件。
    断言 Artifact JSON、正文落盘、SHA-256、confirmed Effect（API evidence 是 JSON
    字符串，显式 parse）及 Assignment/Lease/Grant 关系展开。
-7. 在已归属的 write Ticket/Assignment 上，通过现有 `node.client.event` 发送一条
+7. **先验证浏览器↔Concierge断网/恢复，再继续偏好测试。** 前一步的原写Ticket
+   已实际完成并持有真实Assignment/Artifact/Effect/file SHA。用真实Edge的
+   `browserContext.setOffline(true)`隔离**这个浏览器**，不停止Node或中心，点顶栏
+   “重新读取工作空间”实际触发读取；必须由`data-testid=client-read-stale`提示
+   **原先读取的快照不是最新**，并说明客户端断连不等同于Worker离线/任务停止。
+   原错误分类为`network_error`，**不是**401凭据失效，top pill显示`未连接`。
+   表达式“有`connected`即已经取回快照”不能掩盖内嵌偏好的局部resolve：
+   `loadTicket` 内层组合读取对真实status0传播网络失败；直接偏好读仍按原
+   resolve和本scope错误处理，避免新增未处理promise或将`has_override`造出。
+   恢复Online**仅**表示网络hint；警示**不会**因`navigator.onLine`自动撤销。
+   用户实际点“重新读取最新状态”后，必须等真实ticket GET 200、原ID/状态读出，
+   状态警示才可隐藏。完成恢复时逐项比较原Report/Artifact/Effect/Assignment、
+   原Grant ID与digest（原Grant仍有效）、原始文件SHA，并验证audit chain。
+   这整个断网/恢复sequence中，浏览器POST/PUT/PATCH/DELETE为空。
+   这里没有另开模型调用、创建任务或停止任务，不能将其当作真手机或物理设备验收。
+   它**只证明已打开desktop工作区的客户端网络恢复**，不证明实际OS锁屏、
+   杀进程、WiFi/蜂窝切换、Web离线存储或另一个物理Host恢复。
+8. 在已归属的 write Ticket/Assignment 上，通过现有 `node.client.event` 发送一条
    真实 Node-authored `session_link` 过程消息，并经实际 Rust 中心化保存与读取。
    在 Activity 的协作页验证初态折叠、单任务展开→收起→再展开、单独全局
    默认不串值、刷新恢复；每次动作等待精确 Ticket/Global scope 的 PUT 响应。

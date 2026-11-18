@@ -300,6 +300,9 @@ async function run() {
       await screenshot('03-desktop-write-artifact-confirmed-effect')
       result.actual_write = { byte_length: bytes.length, content_sha256: artifact.target_hash, effect_state: detail.effects[0].status, effect_id: evidence.effect_id, ticket_id: writeId }
     })
+    await phase('client-network-loss-keeps-snapshot-until-authoritative-recovery', async () => {
+      await verifyClientNetworkRecovery({ page, admin, projectRoot, result })
+    })
     await phase('process-display-preferences-keep-global-and-ticket-distinct', async () => {
       await verifyDisplayPreferences({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess })
     })
@@ -479,6 +482,93 @@ async function run() {
     return layout
   }
   async function reloadSuccess() { await page.reload(); await page.waitForFunction(() => document.querySelector('.next-action-card.success-action')?.textContent.includes('收到成功报告')) }
+}
+async function verifyClientNetworkRecovery({ page, admin, projectRoot, result }) {
+  const ticketId = result.actual_write.ticket_id
+  const before = await admin.get(`/api/v1/tickets/${ticketId}`)
+  assert.equal(before.status, 'succeeded')
+  const writtenArtifact = before.artifacts.find(artifact => artifact.id)
+  assert(writtenArtifact)
+  const writeRequests = []
+  const readFailureProbe = []
+  const observer = request => {
+    const url = new URL(request.url())
+    if (url.pathname.startsWith('/api/v1/') && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method())) writeRequests.push({ method: request.method(), path: url.pathname })
+  }
+  const failedObserver = request => {
+    const url = new URL(request.url())
+    if (url.pathname.startsWith('/api/v1/')) readFailureProbe.push({ method: request.method(), path: url.pathname, failure: request.failure()?.errorText })
+  }
+  page.on('request', observer)
+  page.on('requestfailed', failedObserver)
+  try {
+    await page.locator('.ticket-detail .ticket-id').getByText(ticketId, { exact: false }).waitFor()
+    await page.context().setOffline(true)
+    await page.getByRole('button', { name: '重新读取工作空间', exact: true }).click()
+    const notice = page.getByTestId('client-read-stale')
+    await notice.waitFor({ state: 'visible' }).catch(async error => {
+      result.network_failure_diagnostic = {
+        readFailureProbe, pill: await page.locator('.connection-pill').innerText(),
+        alerts: await page.locator('[role=alert]').allTextContents(),
+        pageText: await page.locator('#workspace-content').innerText()
+      }
+      throw error
+    })
+    assert.match(await notice.innerText(), /此前快照|尚未验证最新|不保证是最新状态/)
+    assert.match(await notice.innerText(), /客户端与中心/)
+    assert.match(await notice.innerText(), /不等同于Worker离线|不是Host|不是节点/)
+    await page.getByRole('button', { name: '重新读取最新状态', exact: true }).waitFor()
+    await page.waitForFunction(() => !document.querySelector('[data-testid="client-read-stale"] button')?.disabled)
+    assert.equal(await page.locator('.connection-pill').innerText(), '未连接', 'This real transport error is not misclassified as a 401 credential expiration')
+    assert.deepEqual(writeRequests, [], 'Rendering the offline warning and opening Projects cannot issue privileged commands')
+    // Being online is merely a browser hint. The user must complete a real
+    // authorized Ticket read to clear the stale snapshot notice.
+    await page.context().setOffline(false)
+    assert.equal(await page.evaluate(() => navigator.onLine), true)
+    assert.equal(await notice.isVisible(), true, 'navigator.onLine alone cannot certify a fresh controller snapshot')
+    const ticketRead = page.waitForResponse(response => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === `/api/v1/tickets/${ticketId}`)
+    await page.getByRole('button', { name: '重新读取最新状态', exact: true }).click()
+    const response = await ticketRead
+    assert.equal(response.status(), 200)
+    const recovered = await response.json()
+    assert.equal(recovered.id, ticketId)
+    assert.equal(recovered.status, 'succeeded')
+    await notice.waitFor({ state: 'hidden' })
+    await page.locator('.conversation-column').waitFor({ state: 'visible' })
+    await page.locator('.ticket-detail .ticket-id').getByText(ticketId, { exact: false }).waitFor()
+    const after = await admin.get(`/api/v1/tickets/${ticketId}`)
+    assert.deepEqual(after.reports, before.reports)
+    assert.deepEqual(after.artifacts, before.artifacts)
+    assert.deepEqual(after.effects, before.effects)
+    assert.deepEqual(after.assignments, before.assignments)
+    assert.equal(after.grant_id, before.grant_id)
+    assert.equal(after.grant_digest, before.grant_digest)
+    const bytes = await readFile(join(projectRoot, 'nested/browser-result.txt'))
+    assert.equal(sha256(bytes), result.actual_write.content_sha256)
+    const grants = await admin.get('/api/v1/grants')
+    const originalGrant = grants.grants.find(grant => grant.id === before.grant_id)
+    assert(originalGrant)
+    assert.equal(originalGrant.revoked_at, null)
+    const verification = await admin.get('/api/v1/audit/verify')
+    assert.equal(verification.valid, true)
+    assert.deepEqual(writeRequests, [], 'No privileged requests are made by this disconnected-read/retry sequence')
+    result.client_network_recovery = {
+      stale_snapshot_notice_actual_true: true,
+      browser_offline_recovery_without_page_reload: true,
+      completed_no_pending_write_when_failure_visible: true,
+      write_requests_during_disconnect_and_recovery: writeRequests,
+      exact_ticket_and_records_preserved: true,
+      file_sha256: result.actual_write.content_sha256,
+      ticket_id: ticketId,
+      artifact_id: writtenArtifact.id,
+      network_probe: 'real browserContext.setOffline + real HTTP retry, not a physical mobile OS network transition'
+    }
+  } finally {
+    await page.context().setOffline(false)
+    page.off('request', observer)
+    page.off('requestfailed', failedObserver)
+  }
 }
 async function verifyDisplayPreferences({ page, admin, node, server, projectRoot, result, refreshTicket }) {
   // Individual/global expected routes are asserted at their own PUT responses below,
