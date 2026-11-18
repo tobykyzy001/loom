@@ -832,6 +832,10 @@ bundle的`NodeState`对缺少文件的初始状态执行`structuredClone(EMPTY)`
 
 已执行 `node tests/harness/ack-replay.mjs` 做真实隔离DSH before/after：从提交`6b3bd71`存档的原bundle确实在HTTP ACK成功后丢失响应时缺少ACK pending、原任务不启动可控工具，只有相关的准入与未知对账记录，不能将其误述为SDK完成。修复版在**同一个原合法Assignment**中完成一次`loom_fixture_write`，Node持久ACK+Artifact+Report时，中央报告与Artifact/Effect仍为零；真正停止再启动宿主，并以保存的注册身份取回首次timestamp及`duplicate:true`，随后交付真实字节/成功Report与confirmed Effect。独立观察到的第二次真实ACK HTTP确认原准入，并非本地`duplicate`字符串补出的HTTP证明。源文件不变、AgentSession不变、原request_id不变，SQL中仍只有一条Node `assignment.acknowledged`。这是at-least-once控制面恢复与对账，**不是对任意工具中途失败、全部未知响应或全体Agent执行的全局恰好一次保证**。普通HTTP 500与网络未知本身也不简单解释为“旧Admission一定已经提交”；此次exact 200 response-loss的回归专门限定已证实提交但客户端未收到回执的时序。详见[ACK_REPLAY.md](tests/harness/ACK_REPLAY.md)与[实际proof](/tmp/loom-dsh-ack-recovery-final-XEfDLI/result.json)。
 
+两份NodeState的`once(key,digest)`还补上了**同一实例内的首笔活跃声明**。此前两个立即调用可能在首个异步pending尚未写盘时都视其为无completion，随后各自执行。实测共享及vendored两种实现均产生两个实际owned文件效果。现在每实例的纯内存 `onceInFlight` 在新的异步声明前记录key/digest和Promise；同digest随后调用必须等候原操作的持久完成再以duplicate读取，不另启动operation，不同digest按原fenced错误拒绝。其他独立Assignment不被这个局部map串行化，owner Promise结算后才以identity对应删除；这些内存entries不进入state JSON、不替代上层active assignment/权限校验，更不是跨进程锁或 全局SDK exactly-once。完成重开仍保留真实result（成功、失败或unknown），被恢复出来的running仍变unknown，不为其补执行。`once`仅保护操作及其本地完成记录，不包含之后ACK/Report/外部SDK对账的完成承诺。两份实际`state-once-race.test.js`以真实owned文件、未知与失败、抢入不同digest、独立作业等多个场景核对。
+
+同一Synthetic `coordinator-admission` 既有driver的一个混淆亦被修正：其normal ACK 本来就应先于operation被保存，因此拥有合法ACK receipt不等于durable结果已经上传。现在同时要求此ACK的accepted/timestamp/ticket/epoch与cancel flags正确，且在完整unknown/normalize之前严格保持**0份Artifact或Report delivery**；不把准入包成最终结果，更不把Synthetic driver冒充SDK宿主。
+
 ### 9.2 Assignment 的建议字段
 
 ```text

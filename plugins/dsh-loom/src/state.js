@@ -26,7 +26,7 @@ export class NodeState extends EventEmitter {
     await state.flush()
     return state
   }
-  constructor(file) { super(); this.file = file; this.setMaxListeners(20); this.queue = Promise.resolve() }
+  constructor(file) { super(); this.file = file; this.setMaxListeners(20); this.queue = Promise.resolve(); this.onceInFlight = new Map() }
   flush() {
     const promise = this.queue.then(() => writeJsonAtomic(this.file, this.data))
     this.queue = promise.catch(() => {})
@@ -66,8 +66,26 @@ export class NodeState extends EventEmitter {
       data.outbox.push(item); return item
     })
   }
-  /** Dedupe is scoped to assignment+digest; accepting a retry with a different digest is forbidden. */
+  /** Per-instance in-flight dedupe; not a cross-process lock or authority change. */
   async once(key, digest, operation) {
+    const active = this.onceInFlight.get(key)
+    if (active) {
+      if (active.digest !== digest) {
+        const error = new Error('Assignment reused with different input')
+        error.fenced = true
+        throw error
+      }
+      return { ...await active.promise, duplicate: true }
+    }
+    const promise = this.performOnce(key, digest, operation)
+    this.onceInFlight.set(key, { digest, promise })
+    try { return await promise }
+    finally {
+      if (this.onceInFlight.get(key)?.promise === promise) this.onceInFlight.delete(key)
+    }
+  }
+  /** Dedupe is scoped to assignment+digest; accepting a retry with a different digest is forbidden. */
+  async performOnce(key, digest, operation) {
     const existing = this.data.completions[key]
     if (existing) {
       const bad = typeof existing.digest !== 'string' || !existing.digest

@@ -185,8 +185,15 @@ try {
   assert.equal(normalized.artifacts[0].artifact_id, artifactId)
   assert.deepEqual(normalized.artifact_ids, [artifactId])
   assert.equal(normalized.effects.length, 1)
-  assert.equal(runner.state.data.deliveries?.filter(item => item.body?.assignment_id === normalizedAssignment.id).length || 0, 0,
-    'Observe the complete durable projection before any artifact/report delivery, not after a convenient successful upload')
+  const admissionReceipts = runner.state.data.deliveries?.filter(item => item.kind === 'ack' && item.body?.assignment_id === normalizedAssignment.id) || []
+  assert.equal(admissionReceipts.length, 1, 'This dispatcher intentionally performs the normal ACK before its operation')
+  assert.equal(admissionReceipts[0].response.accepted, true)
+  assert.equal(admissionReceipts[0].body.ticket_id, normalizedAssignment.ticket_id)
+  assert.equal(admissionReceipts[0].body.lease_epoch, normalizedAssignment.lease_epoch)
+  assert.equal(admissionReceipts[0].body.cancel_requested, false)
+  assert.equal(Number.isFinite(Date.parse(admissionReceipts[0].response.acknowledged_at || '')), true)
+  assert.equal(runner.state.data.deliveries?.filter(item => ['artifact', 'report'].includes(item.kind) && item.body?.assignment_id === normalizedAssignment.id).length || 0, 0,
+    'Normal ACK delivery is distinct from results: no Artifact/Report is delivered before the complete unknown normalization is durably projected')
   const completedBytes = JSON.parse(await readFile(join(coordinatorRoot, 'disk-state', 'node-state.json'), 'utf8')).completions[normalizedAssignment.id]
   assert.equal(completedBytes.digest, normalized.digest)
   assert.deepEqual(completedBytes.artifact_ids, [artifactId])

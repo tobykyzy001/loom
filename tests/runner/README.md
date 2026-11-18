@@ -76,6 +76,16 @@ LocalNode客户端把ACK先写入既有NodeState v1 outbox，再进行真实`nod
 
 此前的`node tests/runner/ack-audit-atomic.mjs`仍是独立首笔事务回归：持久audit fault发生时，当下Node返回`acknowledgement_pending:true`和`response:null`且ACK真实留存，但SQL直接确认timestamp为NULL、匹配audit为0，且不会生成Report/Artifact/Effect；解除自有trigger后真正成功应答才清pending并留下恰一份audit。**不是把不明5xx臆断为已提交才通过，也不要求按旧接口必然抛出异常。** 内里如此处ACK均没有创造终止或effect proof；完整原策略、priority、首达预取消、direct revocation fence和generic event replay也分别重跑通过。
 
+## Node State首笔once竞争与真实owned效果
+
+`pnpm --dir packages/node-client test` 现在是 **39** 项通过；`pnpm --dir plugins/dsh-loom test` 为 **109** 项通过。两者各自引入 `state-once-race.test.js`，用同Assignment/同digest的两个首个立即调用检查底层首次声明，而不是只看上层active guard。原实现确实会各自写A/B两个owned文件：共享before根目录 `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-once-before-CNDcmq`，vendored为 `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-once-before-irObyP`。首次`mutate`前并非已存在的completion缓存，也不是所有runner的普通重复投递都失去保护。
+
+新实现于同一Node State实例同步记录in-flight `{digest,promise}`，第二调用等原操作完成并以duplicate取得真实结果，且不能再次创建callback。两个case各自验证同逻辑工作的一个具体文件、Unknown不升格、一个失败效果不因缓存回收再执行；同key的改input digest拒绝、operation不运行，另外一个独立Assignment在holder未放gate时也能真正写另一个文件并结束。身份匹配的finally清理已被实际验证，完成或失败后缓存仍有同Digest完成记录。
+
+该保证不扩展到跨进程、同类不同Host、报告/ACK/取消或所有SDK的恰好一次。只是同实例的`once(key,digest)`开始题及其本地完成投影。外部fileDispatcher仍可在原操作之后按真实竞态置unknown。恢复亦为unknown,不从中再次执行。真正同一工作 callbacks不应自我await同一 once作为执行路径。真实Lifecycle `node tests/harness/real-lifecycle.mjs`的原始结果见 [/tmp/loom-once-sdk-L5P1nB/result.json](/tmp/loom-once-sdk-L5P1nB/result.json)，其install/register/task/programming_write/traversal/cancel/session resume全部PASS，外部模型标注NOT RUN。
+
+`node tests/runner/coordinator-admission.mjs` 还有相邻Synthetic回归的具体fixture修正。原始未修改HEAD的存档同样已发生旧断言失败，相关一个delivery其实正是合法`kind:ack`（accepted真实回执及 timestamp），并非提前Artifact/Report；这不能怪罪上方map修复。现行断言要求那一个pre-effect正常ACK与ticket、epoch、cancel标记、时间戳相符，同时仍要求任何0份Artifact/Report delivery，直到完整unknown/normalize durable完成。这是更严格地分开准入与结果证据，而不是通过删除约束或冒用真实SDK通过。执行报告仍以`synthetic_control_plane_only`为界。
+
 ## Node事件回执一致性、跨语言digest与真实重放
 
 ```sh
