@@ -14,6 +14,7 @@ use std::path::{Component, Path};
 const PATH: &str = "src/calc.js";
 const CHANGE: &str = "loom_fixture_code_edit";
 const VERIFY: &str = "loom_fixture_verify";
+const SOURCE_BASELINE: &str = "export function add(a, b) {\n  return a - b;\n}\n";
 const MAX_SOURCE: u64 = 32_768;
 const MAX_OUTPUT: usize = 8_192;
 
@@ -25,6 +26,24 @@ pub struct SessionEvidence {
     pub host_api: String,
     pub protocol: String,
     pub observed_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StopBoundaryEvidence {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub name: String,
+    pub phase: String,
+    pub reason: String,
+    pub call_id: String,
+    pub call_seq: u64,
+    pub result_id: String,
+    pub result_seq: u64,
+    pub abort_seq: u64,
+    pub session: SessionEvidence,
+    pub source_change_artifact_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -477,6 +496,8 @@ fn sha_text(value: &str, field: &str) -> Result<()> {
 /// not mutate SQLite/Artifacts, issue a Grant, run Git/tests/shell, or infer a
 /// parent/source relationship. The generic Report ownership and unknown-effect
 /// rules remain in force in `api.rs`.
+/// Legacy callers have no stop-boundary evidence. Only the dedicated canceled
+/// Report flow is allowed to supply that bounded auxiliary observation.
 pub fn validate_outcome(
     store: &Store,
     ticket_id: &str,
@@ -484,13 +505,62 @@ pub fn validate_outcome(
     artifact_ids: &[Value],
     effects: &[Value],
     state: &str,
+    cancel_acknowledged: bool,
+) -> Result<()> {
+    validate_legacy_outcome(
+        store,
+        ticket_id,
+        assignment_id,
+        artifact_ids,
+        effects,
+        state,
+        cancel_acknowledged,
+        &json!([]),
+    )
+}
+
+/// The evidence argument is added only for the bounded cancellation path; no
+/// existing source/scope/effect checks are dropped to reduce argument count.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_outcome_with_evidence(
+    store: &Store,
+    ticket_id: &str,
+    assignment_id: &str,
+    artifact_ids: &[Value],
+    effects: &[Value],
+    state: &str,
+    cancel_acknowledged: bool,
+    report_evidence: &Value,
+) -> Result<()> {
+    validate_legacy_outcome(
+        store,
+        ticket_id,
+        assignment_id,
+        artifact_ids,
+        effects,
+        state,
+        cancel_acknowledged,
+        report_evidence,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_legacy_outcome(
+    store: &Store,
+    ticket_id: &str,
+    assignment_id: &str,
+    artifact_ids: &[Value],
+    effects: &[Value],
+    state: &str,
+    cancel_acknowledged: bool,
+    report_evidence: &Value,
 ) -> Result<()> {
     let scoped = store.query(
         "SELECT * FROM artifacts WHERE ticket_id=?1 AND assignment_id=?2 ORDER BY id",
         rusqlite::params![ticket_id, assignment_id],
     )?;
     let assignment = store.query(
-        "SELECT node_id FROM assignments WHERE id=?1 AND ticket_id=?2",
+        "SELECT node_id,attempt FROM assignments WHERE id=?1 AND ticket_id=?2",
         rusqlite::params![assignment_id, ticket_id],
     )?;
     let assignment = assignment.first();
@@ -519,8 +589,22 @@ pub fn validate_outcome(
     if projected.is_empty() {
         return Ok(());
     }
-    if projected.len() != 2 || artifact_ids.len() != 2 {
-        bail!("code evidence requires exactly one linked change and verification pair");
+    if projected.len() == 1 && projected[0].1["kind"] == "change" {
+        return validate_cancelled_change(
+            store,
+            ticket_id,
+            assignment_id,
+            assignment,
+            artifact_ids,
+            effects,
+            state,
+            cancel_acknowledged,
+            &projected[0],
+            report_evidence,
+        );
+    }
+    if projected.len() != 2 || artifact_ids.len() != 2 || cancel_acknowledged {
+        bail!("code evidence pair cannot use the change-only cancellation branch");
     }
     let mut ids = std::collections::BTreeSet::new();
     for id in artifact_ids {
@@ -687,6 +771,285 @@ pub fn validate_outcome(
     Ok(())
 }
 
+/// This is only a narrowly-shaped handoff for the existing cancel path, not a
+/// general exemption for unknown-confirmed Effects. Full byte/scope/CF checking
+/// still follows in `validate_cancelled_change`; this recognizes no new grant.
+pub fn is_cancelled_change_request(
+    store: &Store,
+    artifact_ids: &[Value],
+    effects: &[Value],
+) -> Result<bool> {
+    if artifact_ids.len() != 1 || effects.len() != 1 || effects[0]["status"] != "confirmed" {
+        return Ok(false);
+    }
+    if effects[0]["artifacts"].as_array() != Some(&artifact_ids.to_vec()) {
+        return Ok(false);
+    }
+    let Some(id) = artifact_ids[0].as_str() else {
+        return Ok(false);
+    };
+    let Some(artifact) = store.get("artifacts", id)? else {
+        return Ok(false);
+    };
+    Ok(projection(&artifact)?.is_some_and(|proof| proof["kind"] == "change"))
+}
+
+/// A stopped edit also needs a place for its actual diff bytes, or its Report
+/// cannot reference them. This admits no general post-cancel Artifact upload.
+/// Validated bytes remain only evidence; source effects require the full Report.
+pub fn can_upload_cancelled_change(
+    store: &Store,
+    ticket_id: &str,
+    assignment_id: &str,
+    node_id: &str,
+    metadata: &Value,
+    bytes: &[u8],
+) -> Result<bool> {
+    let Some(serialized) = projected_metadata(metadata)? else {
+        return Ok(false);
+    };
+    let proof: Value = serde_json::from_str(&serialized)
+        .context("cancelled source evidence must be a valid projected JSON object")?;
+    if proof["kind"] != "change"
+        || metadata["name"] != format!("code-change-{assignment_id}.diff")
+        || metadata["media_type"] != "text/x-diff"
+        || metadata["origin_node_id"].as_str() != Some(node_id)
+        || !metadata["parents"]
+            .as_array()
+            .is_some_and(|parents| parents.is_empty())
+        || metadata["sha256"].as_str() != Some(crate::sha256(bytes).as_str())
+        || metadata["size_bytes"].as_u64() != Some(bytes.len() as u64)
+    {
+        return Ok(false);
+    }
+    let ticket = store.query(
+        "SELECT t.kind,t.relative_path,t.content,t.cancel_requested FROM tickets t WHERE t.id=?1 AND EXISTS (SELECT 1 FROM assignments a WHERE a.id=?2 AND a.ticket_id=t.id AND a.node_id=?3)",
+        rusqlite::params![ticket_id, assignment_id, node_id],
+    )?;
+    let Some(ticket) = ticket.into_iter().next() else {
+        return Ok(false);
+    };
+    let Some(content) = ticket["content"].as_str() else {
+        return Ok(false);
+    };
+    Ok(ticket["kind"] == "edit_file"
+        && ticket["relative_path"] == "src/calc.js"
+        && ticket["cancel_requested"] == true
+        && proof["path"] == "src/calc.js"
+        && proof["previous_sha256"].as_str()
+            == Some(crate::sha256(SOURCE_BASELINE.as_bytes()).as_str())
+        && proof["sha256"].as_str() == Some(crate::sha256(content.as_bytes()).as_str())
+        && proof["size_bytes"].as_u64() == Some(content.len() as u64)
+        && validate_change_diff(bytes, content.as_bytes()).is_ok())
+}
+
+/// Validate that an authenticated Node's bounded SDK tool/terminal observations
+/// address the same held verification phase, source bytes and current Ticket.
+/// This checks reported facts; it does not claim a direct view into the Host clock.
+fn validate_stop_boundary(
+    store: &Store,
+    ticket_id: &str,
+    report_evidence: &Value,
+    projected: &(Value, Value),
+) -> Result<()> {
+    let ticket = store
+        .get("tickets", ticket_id)?
+        .context("code evidence Ticket not found")?;
+    let evidence: StopBoundaryEvidence = if let Some(records) = report_evidence.as_array() {
+        let matching: Vec<&Value> = records
+            .iter()
+            .filter(|record| record["schema"] == "loom.code-stop-boundary.v1")
+            .collect();
+        if matching.len() != 1 {
+            bail!("change-only proof requires exactly one stop-boundary observation");
+        }
+        decode(matching[0].clone(), "stop-boundary")?
+    } else {
+        bail!("change-only proof requires bounded structured stop-boundary evidence");
+    };
+    let objective = required_string(&ticket, "objective")?;
+    if !objective.contains("LOOM_FIXTURE_CODE_TASK")
+        || !objective.contains("LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY")
+    {
+        bail!("change-only proof is restricted to the explicit held verifier fixture");
+    }
+    let change_id = projected.0["id"]
+        .as_str()
+        .context("change Artifact id is required")?;
+    let editor_result_seq = projected.1["result_seq"]
+        .as_u64()
+        .context("editor result sequence is required")?;
+    if evidence.schema != "loom.code-stop-boundary.v1"
+        || evidence.record_type != "dsh-tool-abort"
+        || evidence.name != VERIFY
+        || evidence.phase != "before-test-subprocess"
+        || evidence.reason != "user"
+        || evidence.source_change_artifact_id != change_id
+    {
+        bail!("stop-boundary must describe this exact source Artifact's held verifier");
+    }
+    tool_id_text(&evidence.call_id, "stop call_id")?;
+    tool_id_text(&evidence.result_id, "stop result_id")?;
+    let session = evidence.session.clone();
+    validate_session(&session)?;
+    if session.observed_seq != evidence.abort_seq
+        || Some(session.session_id.as_str()) != projected.1["session"]["session_id"].as_str()
+    {
+        bail!("stop-boundary must belong to the exact source Session and aborted turn");
+    }
+    if evidence.call_seq <= editor_result_seq
+        || evidence.call_seq >= evidence.result_seq
+        || evidence.abort_seq < evidence.result_seq
+    {
+        bail!("stop-boundary must follow the completed edit and precede its aborted user turn");
+    }
+    uuid_text(
+        &evidence.source_change_artifact_id,
+        "stop source_change_artifact_id",
+    )?;
+    Ok(())
+}
+
+/// A cancelled, unverified edit certifies only the one source-byte change.
+/// It never promotes the Ticket to a completed test or successful task.
+#[allow(clippy::too_many_arguments)]
+fn validate_cancelled_change(
+    store: &Store,
+    ticket_id: &str,
+    assignment_id: &str,
+    assignment: Option<&Value>,
+    artifact_ids: &[Value],
+    effects: &[Value],
+    state: &str,
+    cancel_acknowledged: bool,
+    projected: &(Value, Value),
+    report_evidence: &Value,
+) -> Result<()> {
+    validate_stop_boundary(store, ticket_id, report_evidence, projected)?;
+    if state != "unknown" || !cancel_acknowledged {
+        bail!("change-only proof requires unknown state and explicit cancellation acknowledgement");
+    }
+    let ticket = store
+        .get("tickets", ticket_id)?
+        .context("code evidence Ticket not found")?;
+    if ticket["cancel_requested"] != true {
+        bail!("change-only proof requires durable Ticket cancellation intent");
+    }
+    if artifact_ids.len() != 1 || artifact_ids[0].as_str() != projected.0["id"].as_str() {
+        bail!("change-only proof requires exactly its one projected Artifact UUID");
+    }
+    let change_id = projected.0["id"]
+        .as_str()
+        .context("change Artifact id is required")?;
+    uuid_text(change_id, "change Artifact id")?;
+    let node = assignment
+        .and_then(|assignment| assignment["node_id"].as_str())
+        .context("code evidence Assignment or origin Node scope is invalid")?;
+    if projected.0["ticket_id"] != ticket_id
+        || projected.0["assignment_id"] != assignment_id
+        || projected.0["origin_node_id"] != node
+    {
+        bail!("change-only Artifact ticket, assignment or origin_node_id scope differs");
+    }
+    if ticket["kind"] != "edit_file" || ticket["relative_path"] != PATH {
+        bail!("code evidence requires the existing edit_file scope exactly at src/calc.js");
+    }
+    let content = ticket["content"]
+        .as_str()
+        .context("Ticket.content bytes are required for code evidence")?
+        .as_bytes();
+    if content.is_empty() || content.len() > MAX_SOURCE as usize {
+        bail!("Ticket.content must be bounded source bytes");
+    }
+    let change = &projected.1;
+    if change["sha256"] != crate::sha256(content)
+        || change["size_bytes"].as_u64() != Some(content.len() as u64)
+    {
+        bail!("change source hash and size must match exact Ticket.content bytes");
+    }
+    if change["previous_sha256"] != crate::sha256(SOURCE_BASELINE.as_bytes()) {
+        bail!("change-only previous_sha256 must match the fixed fixture baseline");
+    }
+    let bytes = code_artifact(store, &projected.0, "change", 8 * 1024)?;
+    validate_change_diff(&bytes, content)?;
+
+    if effects.len() != 1 {
+        bail!("change-only proof requires exactly one source-change Effect");
+    }
+    let effect = &effects[0];
+    let effect_fields = [
+        "effect_id",
+        "ticket_id",
+        "assignment_id",
+        "node_id",
+        "attempt",
+        "input_digest",
+        "status",
+        "evidence",
+        "artifacts",
+    ];
+    let Some(object) = effect.as_object() else {
+        bail!("change-only Effect must be an object");
+    };
+    if object
+        .keys()
+        .any(|field| !effect_fields.contains(&field.as_str()))
+    {
+        bail!("change-only Effect contains an unpermitted top-level field");
+    }
+    for (field, expected) in [
+        ("ticket_id", ticket_id),
+        ("assignment_id", assignment_id),
+        ("node_id", node),
+    ] {
+        if effect[field].as_str() != Some(expected) {
+            bail!("change-only Effect identity must match its current Ticket, Assignment and Node");
+        }
+    }
+    let attempt = assignment
+        .and_then(|entry| entry["attempt"].as_i64())
+        .context("change-only Effect requires a concrete current Assignment attempt")?;
+    if effect["attempt"].as_i64() != Some(attempt)
+        || required_string(effect, "effect_id")?.is_empty()
+        || required_string(effect, "input_digest")?.is_empty()
+        || effect["status"] != "confirmed"
+    {
+        bail!("change-only Effect requires identity, input_digest and confirmed status");
+    }
+    if effect["artifacts"] != json!([change_id]) {
+        bail!("change-only Effect.artifacts must contain only the change Artifact UUID");
+    }
+    for field in [
+        "verification_artifact_id",
+        "test_tool_result_id",
+        "test_exit_code",
+        "verification_tool_result_id",
+    ] {
+        if effect.get(field).is_some_and(|value| !value.is_null()) {
+            bail!("change-only Effect cannot contain verification evidence");
+        }
+    }
+    let records = bounded_effect_evidence(effect)?;
+    if records.len() != 1 {
+        bail!("change-only Effect.evidence must contain exactly one change record");
+    }
+    let evidence: ChangeEvidence = decode(records[0].clone(), "change-only Effect evidence")?;
+    validate_change(&evidence)?;
+    if serde_json::to_value(&evidence)?
+        != json!({
+            "schema":"loom.code-change.v1", "type":"dsh-tool-result", "name":CHANGE,
+            "call_id":change["call_id"], "call_seq":change["call_seq"],
+            "result_id":change["result_id"], "result_seq":change["result_seq"],
+            "session":change["session"], "path":change["path"],
+            "previous_sha256":change["previous_sha256"], "sha256":change["sha256"],
+            "size_bytes":change["size_bytes"],
+        })
+    {
+        bail!("change-only Effect evidence must exactly agree with the public projection");
+    }
+    Ok(())
+}
+
 fn effect_has_known_evidence(effect: &Value) -> bool {
     bounded_effect_evidence(effect).is_ok_and(|records| {
         records.iter().any(|record| {
@@ -722,9 +1085,13 @@ fn bounded_effect_evidence(effect: &Value) -> Result<Vec<Value>> {
 }
 
 fn verification_artifact(store: &Store, row: &Value) -> Result<Vec<u8>> {
+    code_artifact(store, row, "verification", 128 * 1024)
+}
+
+fn code_artifact(store: &Store, row: &Value, label: &str, max_bytes: u64) -> Result<Vec<u8>> {
     let storage = row["storage_name"]
         .as_str()
-        .context("verification storage_name is required")?;
+        .with_context(|| format!("{label} storage_name is required"))?;
     let path = Path::new(storage);
     if path.is_absolute()
         || path
@@ -732,22 +1099,101 @@ fn verification_artifact(store: &Store, row: &Value) -> Result<Vec<u8>> {
             .any(|component| !matches!(component, Component::Normal(_)))
         || path.components().count() != 1
     {
-        bail!("verification storage_name must be one ordinary relative filename");
+        bail!("{label} storage_name must be one ordinary relative filename");
     }
     let file = store.root.join("artifacts").join(path);
-    let metadata =
-        std::fs::symlink_metadata(&file).context("verification Artifact storage unavailable")?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 128 * 1024 {
-        bail!("verification Artifact must be a bounded ordinary non-symlink file");
+    let metadata = std::fs::symlink_metadata(&file)
+        .with_context(|| format!("{label} Artifact storage unavailable"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
+        bail!("{label} Artifact must be a bounded ordinary non-symlink file");
     }
-    let bytes = std::fs::read(file).context("verification Artifact bytes unavailable")?;
+    let bytes =
+        std::fs::read(file).with_context(|| format!("{label} Artifact bytes unavailable"))?;
     if row["sha256"].as_str() != Some(crate::sha256(&bytes).as_str()) {
-        bail!("verification Artifact bytes do not match immutable row.sha256");
+        bail!("{label} Artifact bytes do not match immutable row.sha256");
     }
     if row["size_bytes"].as_u64() != Some(bytes.len() as u64) {
-        bail!("verification Artifact size does not match actual bytes");
+        bail!("{label} Artifact size does not match actual bytes");
     }
     Ok(bytes)
+}
+
+/// Validate the fixed source patch as bytes; the center neither runs nor trusts
+/// a Git/Node command to establish this evidence.
+fn validate_change_diff(bytes: &[u8], corrected: &[u8]) -> Result<()> {
+    if bytes.len() > 8 * 1024 || bytes.starts_with(b"\xef\xbb\xbf") || bytes.contains(&0) {
+        bail!("change diff must be bounded plain UTF-8 bytes");
+    }
+    let text = std::str::from_utf8(bytes).context("change diff must be valid UTF-8")?;
+    if text.contains('\r') {
+        bail!("change diff cannot contain CRLF or carriage returns");
+    }
+    let mut lines = text.split('\n').peekable();
+    if lines.next() != Some("diff --git a/src/calc.js b/src/calc.js") {
+        bail!("change diff must contain the exact root Git header");
+    }
+    if lines.peek().is_some_and(|line| line.starts_with("index ")) {
+        let index = lines.next().unwrap_or_default();
+        let suffix = index
+            .strip_prefix("index ")
+            .and_then(|tail| tail.strip_suffix(" 100644"))
+            .context("change diff index must specify regular mode 100644")?;
+        let (before, after) = suffix
+            .split_once("..")
+            .context("change diff index must have two blob identifiers")?;
+        if !valid_git_abbrev(before) || !valid_git_abbrev(after) || before == after {
+            bail!("change diff index has invalid or equal Git object identifiers");
+        }
+    }
+    if lines.next() != Some("--- a/src/calc.js")
+        || lines.next() != Some("+++ b/src/calc.js")
+        || lines.next() != Some("@@ -1,3 +1,3 @@")
+    {
+        bail!("change diff must contain exactly the fixed source paths and 3-line hunk");
+    }
+    let no_newline = "\\ No newline at end of file";
+    let mut no_final_newline = false;
+    for expected in [
+        " export function add(a, b) {",
+        "-  return a - b;",
+        "+  return a + b;",
+        " }",
+    ] {
+        if lines.next() != Some(expected) {
+            bail!("change diff must contain only the exact baseline addition change");
+        }
+        if lines.peek() == Some(&no_newline) {
+            if expected != " }" {
+                bail!("change diff no-newline marker is only valid at end of file");
+            }
+            lines.next();
+            no_final_newline = true;
+            if corrected.ends_with(b"\n") {
+                bail!("change diff no-newline marker disagrees with Ticket.content");
+            }
+        }
+    }
+    if bytes.last() == Some(&b'\n') && lines.next() != Some("") {
+        bail!("change diff final newline is malformed");
+    }
+    if lines.next().is_some() {
+        bail!("change diff cannot contain extra hunks, files, output or trailing bytes");
+    }
+    if bytes.last() == Some(&b'\n') {
+        if !corrected.ends_with(b"\n") {
+            bail!("change diff final newline disagrees with Ticket.content");
+        }
+    } else if corrected.ends_with(b"\n") || !no_final_newline {
+        bail!("missing-final-LF diff requires no-newline marker and matching content");
+    }
+    Ok(())
+}
+
+fn valid_git_abbrev(value: &str) -> bool {
+    (7..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]
@@ -871,6 +1317,85 @@ mod tests {
     }
     fn ids() -> Vec<Value> {
         vec![json!(CHANGE_ID), json!(VERIFY_ID)]
+    }
+
+    fn stop_boundary() -> Value {
+        json!({
+            "schema":"loom.code-stop-boundary.v1", "type":"dsh-tool-abort", "name":VERIFY,
+            "phase":"before-test-subprocess", "reason":"user",
+            "call_id":"loom_fixture_verify-loom-stub-3", "call_seq":15,
+            "result_id":"aborted-verify-result-1", "result_seq":16, "abort_seq":18,
+            "session":session(18), "source_change_artifact_id":CHANGE_ID,
+        })
+    }
+
+    fn cancel_diff() -> Vec<u8> {
+        b"diff --git a/src/calc.js b/src/calc.js\nindex 1234567..89abcde 100644\n--- a/src/calc.js\n+++ b/src/calc.js\n@@ -1,3 +1,3 @@\n export function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n".to_vec()
+    }
+
+    fn cancel_effects() -> Vec<Value> {
+        vec![
+            json!({"effect_id":"effect-cancelled-edit-1","ticket_id":"ticket","assignment_id":"assignment","node_id":"node","attempt":1,"input_digest":"edit-input-digest","status":"confirmed","evidence":[change()],"artifacts":[CHANGE_ID]}),
+        ]
+    }
+
+    fn cancel_fixture() -> (tempfile::TempDir, Store) {
+        let (directory, store) = fixture(true);
+        store.conn().execute(
+            "UPDATE tickets SET objective='LOOM_FIXTURE_CODE_TASK held LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY' WHERE id='ticket'",
+            [],
+        ).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE tickets SET cancel_requested=1 WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute("DELETE FROM artifacts WHERE id=?1", [VERIFY_ID])
+            .unwrap();
+        std::fs::remove_file(
+            store
+                .root
+                .join("artifacts")
+                .join(format!("{VERIFY_ID}.artifact")),
+        )
+        .unwrap();
+        replace_cancel_diff(&store, cancel_diff());
+        (directory, store)
+    }
+
+    fn replace_cancel_diff(store: &Store, bytes: Vec<u8>) {
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET sha256=?1,size_bytes=?2 WHERE id=?3",
+                params![crate::sha256(&bytes), bytes.len(), CHANGE_ID],
+            )
+            .unwrap();
+        std::fs::write(
+            store
+                .root
+                .join("artifacts")
+                .join(format!("{CHANGE_ID}.artifact")),
+            bytes,
+        )
+        .unwrap();
+    }
+
+    fn cancel_outcome(store: &Store, state: &str, ack: bool, effects: &[Value]) -> Result<()> {
+        validate_outcome_with_evidence(
+            store,
+            "ticket",
+            "assignment",
+            &[json!(CHANGE_ID)],
+            effects,
+            state,
+            ack,
+            &json!([stop_boundary()]),
+        )
     }
 
     #[test]
@@ -1018,6 +1543,7 @@ mod tests {
                 &ids(),
                 &effects(if passed { 0 } else { 1 }),
                 state,
+                false,
             )
             .unwrap();
             // The helper never upgrade unknown; the existing generic Report gate does that rejection.
@@ -1027,7 +1553,8 @@ mod tests {
                 "assignment",
                 &ids(),
                 &effects(0),
-                "running"
+                "running",
+                false,
             )
             .is_err());
         }
@@ -1041,6 +1568,7 @@ mod tests {
             &ids(),
             &uncertain,
             "unknown",
+            false,
         )
         .unwrap();
         assert!(validate_outcome(
@@ -1049,7 +1577,8 @@ mod tests {
             "assignment",
             &ids(),
             &effects(0),
-            "unknown"
+            "unknown",
+            false,
         )
         .is_err());
     }
@@ -1058,19 +1587,19 @@ mod tests {
     fn legacy_and_unrelated_outcomes_remain_no_op() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
-        validate_outcome(&store, "absent", "absent", &[], &[], "succeeded").unwrap();
+        validate_outcome(&store, "absent", "absent", &[], &[], "succeeded", false).unwrap();
         let (_directory, store) = fixture(true);
         store
             .conn()
             .execute("UPDATE artifacts SET code_evidence_json=NULL", [])
             .unwrap();
-        validate_outcome(&store, "ticket", "assignment", &[], &[], "succeeded").unwrap();
+        validate_outcome(&store, "ticket", "assignment", &[], &[], "succeeded", false).unwrap();
         store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) SELECT 'other',project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at FROM tickets WHERE id='ticket'",[]).unwrap();
         store
             .conn()
             .execute("UPDATE artifacts SET ticket_id='other'", [])
             .unwrap();
-        validate_outcome(&store, "ticket", "assignment", &[], &[], "succeeded").unwrap();
+        validate_outcome(&store, "ticket", "assignment", &[], &[], "succeeded", false).unwrap();
     }
 
     #[test]
@@ -1082,7 +1611,8 @@ mod tests {
             "assignment",
             &[],
             &effects(0),
-            "succeeded"
+            "succeeded",
+            false,
         )
         .is_err());
         for (label, sql, submitted) in [
@@ -1106,7 +1636,8 @@ mod tests {
                     "assignment",
                     &submitted,
                     &effects(0),
-                    "succeeded"
+                    "succeeded",
+                false,
                 )
                 .is_err(),
                 "{label}"
@@ -1124,7 +1655,8 @@ mod tests {
                 "assignment",
                 &bad,
                 &effects(0),
-                "succeeded"
+                "succeeded",
+                false,
             )
             .is_err());
         }
@@ -1156,7 +1688,8 @@ mod tests {
                     "assignment",
                     &ids(),
                     &submitted,
-                    "succeeded"
+                    "succeeded",
+                    false,
                 )
                 .is_err(),
                 "{field}"
@@ -1181,7 +1714,8 @@ mod tests {
             "assignment",
             &ids(),
             &effects(0),
-            "succeeded"
+            "succeeded",
+            false,
         )
         .is_err());
         // Ordinary per-record ordering is insufficient if verification can be
@@ -1207,7 +1741,8 @@ mod tests {
                 "assignment",
                 &ids(),
                 &effects(0),
-                "succeeded"
+                "succeeded",
+                false,
             )
             .is_err());
         }
@@ -1244,7 +1779,8 @@ mod tests {
                     "assignment",
                     &ids(),
                     &submitted,
-                    "succeeded"
+                    "succeeded",
+                    false,
                 )
                 .is_err(),
                 "{label}"
@@ -1264,19 +1800,28 @@ mod tests {
             &ids(),
             &uncertain,
             "unknown",
+            false,
         )
         .unwrap();
         let promoted = effects(0);
-        assert!(
-            validate_outcome(&store, "ticket", "assignment", &ids(), &promoted, "unknown").is_err()
-        );
+        assert!(validate_outcome(
+            &store,
+            "ticket",
+            "assignment",
+            &ids(),
+            &promoted,
+            "unknown",
+            false,
+        )
+        .is_err());
         assert!(validate_outcome(
             &store,
             "ticket",
             "assignment",
             &ids(),
             &uncertain,
-            "running"
+            "running",
+            false,
         )
         .is_err());
         // Existing generic api.rs rejects this particular draft with "effect_unknown";
@@ -1298,6 +1843,7 @@ mod tests {
             &ids(),
             &effects(1),
             "failed",
+            false,
         )
         .unwrap();
         assert_eq!(store.query("SELECT * FROM grants", []).unwrap().len(), 1);
@@ -1349,11 +1895,578 @@ mod tests {
                     "assignment",
                     &ids(),
                     &effects(0),
-                    "succeeded"
+                    "succeeded",
+                    false,
                 )
                 .is_err(),
                 "{mutation}"
             );
+        }
+    }
+
+    #[test]
+    fn cancelled_diff_upload_needs_current_intent_exact_bytes_scope_and_change_projection() {
+        let (_directory, store) = cancel_fixture();
+        let bytes = cancel_diff();
+        let artifact = store.get("artifacts", CHANGE_ID).unwrap().unwrap();
+        let mut metadata = artifact["metadata"].clone();
+        metadata["name"] = json!("code-change-assignment.diff");
+        metadata["media_type"] = json!("text/x-diff");
+        metadata["origin_node_id"] = json!("node");
+        metadata["parents"] = json!([]);
+        metadata["evidence"] = json!([change()]);
+        metadata["sha256"] = json!(crate::sha256(&bytes));
+        metadata["size_bytes"] = json!(bytes.len());
+        let allowed = || {
+            can_upload_cancelled_change(&store, "ticket", "assignment", "node", &metadata, &bytes)
+                .unwrap()
+        };
+        validate_change_diff(&bytes, CORRECTED.as_bytes()).unwrap();
+        assert!(allowed());
+        for wrong in ["other-ticket", "assignment-other"] {
+            assert!(!can_upload_cancelled_change(
+                &store,
+                wrong,
+                "assignment",
+                "node",
+                &metadata,
+                &bytes
+            )
+            .unwrap());
+            assert!(!can_upload_cancelled_change(
+                &store, "ticket", wrong, "node", &metadata, &bytes
+            )
+            .unwrap());
+        }
+        for (label, mutation) in [
+            ("foreign origin", {
+                let mut changed = metadata.clone();
+                changed["origin_node_id"] = json!("other-node");
+                changed
+            }),
+            ("foreign parents", {
+                let mut changed = metadata.clone();
+                changed["parents"] = json!([VERIFY_ID]);
+                changed
+            }),
+            ("verification instead of change", {
+                let mut changed = metadata.clone();
+                changed["evidence"] = json!([reference()]);
+                changed
+            }),
+            ("wrong digest", {
+                let mut changed = metadata.clone();
+                changed["sha256"] = json!("00".repeat(32));
+                changed
+            }),
+        ] {
+            assert!(
+                !can_upload_cancelled_change(
+                    &store,
+                    "ticket",
+                    "assignment",
+                    "node",
+                    &mutation,
+                    &bytes
+                )
+                .unwrap(),
+                "{label}"
+            );
+        }
+        let mut mixed = bytes.clone();
+        mixed.extend_from_slice(b"trailing unexpected content\n");
+        assert!(!can_upload_cancelled_change(
+            &store,
+            "ticket",
+            "assignment",
+            "node",
+            &metadata,
+            &mixed
+        )
+        .unwrap());
+        store
+            .conn()
+            .execute(
+                "UPDATE tickets SET cancel_requested=0 WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        assert!(!allowed());
+    }
+
+    #[test]
+    fn cancelled_change_only_accepts_exact_confirmed_source_effect_and_bytes() {
+        let (_directory, store) = cancel_fixture();
+        cancel_outcome(&store, "unknown", true, &cancel_effects()).unwrap();
+        assert!(store.query("SELECT * FROM effects", []).unwrap().is_empty());
+        assert_eq!(
+            store.get("tickets", "ticket").unwrap().unwrap()["status"],
+            "running",
+        );
+        let mut without_index = String::from_utf8(cancel_diff()).unwrap();
+        without_index = without_index.replace("index 1234567..89abcde 100644\n", "");
+        replace_cancel_diff(&store, without_index.into_bytes());
+        cancel_outcome(&store, "unknown", true, &cancel_effects()).unwrap();
+        for mismatch in [
+            "\n\\ No newline at end of file\n",
+            " trailing output\n",
+            "\n",
+            "\n\\ No newline at end of file\n\\ No newline at end of file",
+        ] {
+            let mut bytes = String::from_utf8(cancel_diff()).unwrap();
+            bytes.push_str(mismatch);
+            replace_cancel_diff(&store, bytes.into_bytes());
+            assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
+        }
+        let no_lf_source = CORRECTED.trim_end_matches('\n');
+        let mut no_lf_change = change();
+        no_lf_change["sha256"] = json!(crate::sha256(no_lf_source.as_bytes()));
+        no_lf_change["size_bytes"] = json!(no_lf_source.len());
+        store
+            .conn()
+            .execute(
+                "UPDATE tickets SET content=?1 WHERE id='ticket'",
+                [no_lf_source],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET code_evidence_json=?1 WHERE id=?2",
+                params![
+                    projected_metadata(&json!({"evidence":[no_lf_change.clone()]})).unwrap(),
+                    CHANGE_ID,
+                ],
+            )
+            .unwrap();
+        let no_lf_effects = vec![
+            json!({"effect_id":"effect-cancelled-edit-1","ticket_id":"ticket","assignment_id":"assignment","node_id":"node","attempt":1,"input_digest":"edit-input-digest","status":"confirmed","evidence":[no_lf_change],"artifacts":[CHANGE_ID]}),
+        ];
+        let mut no_lf_patch = String::from_utf8(cancel_diff()).unwrap();
+        assert!(no_lf_patch.ends_with('\n'));
+        no_lf_patch.pop();
+        replace_cancel_diff(&store, no_lf_patch.clone().into_bytes());
+        assert!(cancel_outcome(&store, "unknown", true, &no_lf_effects).is_err());
+        no_lf_patch.push_str("\n\\ No newline at end of file");
+        replace_cancel_diff(&store, no_lf_patch.into_bytes());
+        cancel_outcome(&store, "unknown", true, &no_lf_effects).unwrap();
+    }
+
+    #[test]
+    fn cancelled_change_requires_exact_bounded_phase_scope_and_sequence() {
+        let (_directory, store) = cancel_fixture();
+        let (_ticket, _assignment, ids, effects) = (
+            "ticket",
+            "assignment",
+            vec![json!(CHANGE_ID)],
+            cancel_effects(),
+        );
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &ids,
+            &effects,
+            "unknown",
+            true,
+            &json!([])
+        )
+        .is_err());
+        for (label, boundary) in [
+            ("wrong phase", {
+                let mut b = stop_boundary();
+                b["phase"] = json!("after-test-subprocess");
+                b
+            }),
+            ("wrong tool", {
+                let mut b = stop_boundary();
+                b["name"] = json!(CHANGE);
+                b
+            }),
+            ("wrong cause", {
+                let mut b = stop_boundary();
+                b["reason"] = json!("parent");
+                b
+            }),
+            ("before completed edit", {
+                let mut b = stop_boundary();
+                b["call_seq"] = json!(11);
+                b
+            }),
+            ("wrong session", {
+                let mut b = stop_boundary();
+                b["session"]["session_id"] = json!("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+                b
+            }),
+            ("extra field", {
+                let mut b = stop_boundary();
+                b["prompt"] = json!("unexpected private data");
+                b
+            }),
+        ] {
+            assert!(
+                validate_outcome_with_evidence(
+                    &store,
+                    "ticket",
+                    "assignment",
+                    &ids,
+                    &effects,
+                    "unknown",
+                    true,
+                    &json!([boundary])
+                )
+                .is_err(),
+                "{label}"
+            );
+        }
+        let base = stop_boundary();
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &ids,
+            &effects,
+            "unknown",
+            true,
+            &json!([base.clone(), base])
+        )
+        .is_err());
+        store.conn().execute("UPDATE tickets SET objective='LOOM_FIXTURE_CODE_TASK without the exact held phase' WHERE id='ticket'", []).unwrap();
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &ids,
+            &effects,
+            "unknown",
+            true,
+            &json!([stop_boundary()])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cancelled_change_only_requires_cancel_intent_ack_unknown_and_one_change() {
+        for state in ["succeeded", "failed", "cancelled", "running"] {
+            let (_directory, store) = cancel_fixture();
+            assert!(
+                cancel_outcome(&store, state, true, &cancel_effects()).is_err(),
+                "{state}"
+            );
+        }
+        for (state, ack) in [("unknown", false), ("succeeded", false)] {
+            let (_directory, store) = cancel_fixture();
+            assert!(cancel_outcome(&store, state, ack, &cancel_effects()).is_err());
+        }
+        let (_directory, store) = cancel_fixture();
+        store
+            .conn()
+            .execute(
+                "UPDATE tickets SET cancel_requested=0 WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
+        for submitted in [
+            vec![],
+            vec![json!(VERIFY_ID)],
+            ids(),
+            vec![json!(CHANGE_ID), json!(CHANGE_ID)],
+        ] {
+            let (_directory, store) = cancel_fixture();
+            assert!(validate_outcome(
+                &store,
+                "ticket",
+                "assignment",
+                &submitted,
+                &cancel_effects(),
+                "unknown",
+                true,
+            )
+            .is_err());
+        }
+        let (_directory, store) = fixture(true);
+        // A normal success/verification pair never takes the cancellation shortcut.
+        assert!(validate_outcome(
+            &store,
+            "ticket",
+            "assignment",
+            &ids(),
+            &effects(0),
+            "succeeded",
+            true,
+        )
+        .is_err());
+        assert!(validate_outcome(
+            &store,
+            "ticket",
+            "assignment",
+            &ids(),
+            &effects(0),
+            "unknown",
+            true,
+        )
+        .is_err());
+        store
+            .conn()
+            .execute(
+                "UPDATE tickets SET cancel_requested=1 WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        // A single change does not certify a normal success even with durable stop intent.
+        store
+            .conn()
+            .execute("DELETE FROM artifacts WHERE id=?1", [VERIFY_ID])
+            .unwrap();
+        for state in ["succeeded", "failed"] {
+            assert!(validate_outcome(
+                &store,
+                "ticket",
+                "assignment",
+                &[json!(CHANGE_ID)],
+                &cancel_effects(),
+                state,
+                true,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn cancelled_change_only_rejects_foreign_scope_malformed_or_verification_effects() {
+        let (_directory, store) = cancel_fixture();
+        assert!(validate_outcome(
+            &store,
+            "ticket",
+            "different-assignment",
+            &[json!(CHANGE_ID)],
+            &cancel_effects(),
+            "unknown",
+            true,
+        )
+        .is_err());
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET origin_node_id='different-node' WHERE id=?1",
+                [CHANGE_ID],
+            )
+            .unwrap();
+        assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
+        let (_directory, store) = cancel_fixture();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) SELECT 'other-ticket',project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at FROM tickets WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES('other-assignment','other-ticket','node','default',1,'other-lease',1,'2099-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,code_evidence_json) SELECT 'dddddddd-dddd-4ddd-8ddd-dddddddddddd','other-ticket','other-assignment',origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,code_evidence_json FROM artifacts WHERE id=?1",
+                [CHANGE_ID],
+            )
+            .unwrap();
+        assert!(validate_outcome(
+            &store,
+            "ticket",
+            "assignment",
+            &[
+                json!(CHANGE_ID),
+                json!("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+            ],
+            &cancel_effects(),
+            "unknown",
+            true,
+        )
+        .is_err());
+        for (label, sql) in [
+            (
+                "wrong ticket kind",
+                "UPDATE tickets SET kind='read_summary' WHERE id='ticket'",
+            ),
+            (
+                "read-only ticket",
+                "UPDATE tickets SET kind='read_summary',relative_path='src/calc.js' WHERE id='ticket'",
+            ),
+            (
+                "wrong path",
+                "UPDATE tickets SET relative_path='test/calc.test.js' WHERE id='ticket'",
+            ),
+            (
+                "changed node",
+                "UPDATE assignments SET node_id='different-node' WHERE id='assignment'",
+            ),
+        ] {
+            let (_directory, store) = cancel_fixture();
+            store.conn().execute(sql, []).unwrap();
+            assert!(
+                cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err(),
+                "{label}"
+            );
+        }
+        let (_directory, store) = cancel_fixture();
+        store
+            .conn()
+            .execute(
+                "UPDATE tickets SET content=?1 WHERE id='ticket'",
+                [SOURCE_BASELINE],
+            )
+            .unwrap();
+        assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
+        for field in CHANGE_FIELDS {
+            let (_directory, store) = cancel_fixture();
+            let mut submitted = cancel_effects();
+            submitted[0]["evidence"][0][field] = match field {
+                "type" => json!("dsh-session-log"),
+                "name" => json!(VERIFY),
+                "schema" => json!("loom.code-change.v2"),
+                "session" => session(99),
+                "previous_sha256" | "sha256" => json!(crate::sha256(b"other source")),
+                "size_bytes" => json!(CORRECTED.len() + 1),
+                "path" => json!("src/other.js"),
+                "call_seq" | "result_seq" => json!(99),
+                _ => json!("different-tool-evidence"),
+            };
+            assert!(
+                cancel_outcome(&store, "unknown", true, &submitted).is_err(),
+                "{field}"
+            );
+        }
+        for label in [
+            "missing",
+            "additional_effect",
+            "unknown_effect",
+            "wrong_artifacts",
+            "verification_id",
+            "test_result",
+            "exit_code",
+            "malformed_name",
+            "additional_evidence",
+            "missing_digest",
+        ] {
+            let (_directory, store) = cancel_fixture();
+            let mut submitted = cancel_effects();
+            match label {
+                "missing" => submitted.clear(),
+                "additional_effect" => submitted.push(json!({"effect_id":"other","input_digest":"other","status":"unknown","evidence":[],"artifacts":[]})),
+                "unknown_effect" => submitted[0]["status"] = json!("unknown"),
+                "wrong_artifacts" => submitted[0]["artifacts"] = json!([CHANGE_ID, VERIFY_ID]),
+                "verification_id" => submitted[0]["verification_artifact_id"] = json!(VERIFY_ID),
+                "test_result" => submitted[0]["test_tool_result_id"] = json!("verify-result-loom-stub-1"),
+                "exit_code" => submitted[0]["test_exit_code"] = json!(0),
+                "malformed_name" => submitted[0]["evidence"][0]["name"] = json!("loom_fixture_code_edit_pending"),
+                "additional_evidence" => submitted[0]["evidence"][0]["verification_artifact_id"] = json!(VERIFY_ID),
+                "missing_digest" => submitted[0]["input_digest"] = json!(""),
+                _ => unreachable!(),
+            }
+            assert!(
+                cancel_outcome(&store, "unknown", true, &submitted).is_err(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_change_only_rejects_tampered_diffs_hashes_sizes_and_nonfiles() {
+        let canonical = String::from_utf8(cancel_diff()).unwrap();
+        let cases = [
+            (
+                "root header",
+                canonical.replacen(
+                    "diff --git a/src/calc.js b/src/calc.js",
+                    "diff --git a/other.js b/other.js",
+                    1,
+                ),
+            ),
+            (
+                "wrong index",
+                canonical.replace("1234567..89abcde", "12345..89abcde"),
+            ),
+            ("wrong mode", canonical.replace(" 100644\n", " 100755\n")),
+            (
+                "wrong old path",
+                canonical.replace("--- a/src/calc.js", "--- a/other.js"),
+            ),
+            (
+                "wrong new path",
+                canonical.replace("+++ b/src/calc.js", "+++ b/other.js"),
+            ),
+            (
+                "wrong hunk",
+                canonical.replace("@@ -1,3 +1,3 @@", "@@ -2,3 +2,3 @@"),
+            ),
+            (
+                "wrong removal",
+                canonical.replace("-  return a - b;", "-  return a + b;"),
+            ),
+            (
+                "wrong addition",
+                canonical.replace("+  return a + b;", "+  return b + a;"),
+            ),
+            ("second file", canonical.clone() + &canonical),
+            ("CRLF", canonical.replace('\n', "\r\n")),
+        ];
+        for (label, text) in cases {
+            let (_directory, store) = cancel_fixture();
+            replace_cancel_diff(&store, text.into_bytes());
+            assert!(
+                cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err(),
+                "{label}"
+            );
+        }
+        let (_directory, store) = cancel_fixture();
+        let original = std::fs::read(
+            store
+                .root
+                .join("artifacts")
+                .join(format!("{CHANGE_ID}.artifact")),
+        )
+        .unwrap();
+        std::fs::write(
+            store
+                .root
+                .join("artifacts")
+                .join(format!("{CHANGE_ID}.artifact")),
+            b"different bytes",
+        )
+        .unwrap();
+        assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
+        std::fs::write(
+            store
+                .root
+                .join("artifacts")
+                .join(format!("{CHANGE_ID}.artifact")),
+            original,
+        )
+        .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET size_bytes=size_bytes+1 WHERE id=?1",
+                [CHANGE_ID],
+            )
+            .unwrap();
+        assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
+        #[cfg(unix)]
+        {
+            let (_directory, store) = cancel_fixture();
+            let file = store
+                .root
+                .join("artifacts")
+                .join(format!("{CHANGE_ID}.artifact"));
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink("missing-target", file).unwrap();
+            assert!(cancel_outcome(&store, "unknown", true, &cancel_effects()).is_err());
         }
     }
 }

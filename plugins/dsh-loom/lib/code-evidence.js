@@ -1,9 +1,5 @@
 // Explicit test-fixture source-code proof. This is not general Agent/tool authority.
-import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstat, readFile, realpath } from 'node:fs/promises'
-import { dirname, resolve, sep } from 'node:path'
-import { promisify } from 'node:util'
 import { stableArtifactId } from './ids.js'
 
 export const CODE_EDIT_TOOL = 'loom_fixture_code_edit'
@@ -12,9 +8,9 @@ const SOURCE = 'src/calc.js'
 const TEST = 'test/calc.test.js'
 const MAX_SOURCE = 32 * 1024
 const MAX_OUTPUT = 4096
-const hash = value => createHash('sha256').update(value).digest('hex')
-const execute = promisify(execFile)
 const bounded = (value, max = MAX_OUTPUT) => typeof value === 'string' && Buffer.byteLength(value) <= max
+const hash = value => createHash('sha256').update(value).digest('hex')
+// Actual root, file type and Git patch verification use the shared source helper.
 
 export function fixtureCodeTask(assignment) {
   if (assignment?.kind !== 'edit_file' || !assignment.objective?.includes('LOOM_FIXTURE_CODE_TASK')) return null
@@ -83,13 +79,16 @@ export function captureCodeResult(record, data, session) {
 
 export function hasCodeRecord(record) { return Array.isArray(record?.code_tool_records) && record.code_tool_records.length > 0 }
 
-export async function codeEvidence(assignment, projectRoot, task, record) {
+import { sourceChangeProof, sourceArtifact, sourceEffectId } from './source-change-evidence.js'
+
+export async function codeEvidence(assignment, projectRoot, task, record, options = {}) {
   const records = record.code_tool_records || []
   const failure = (summary, state = 'failed', evidence = records) => ({ state, summary,
     effects: [], artifacts: [], evidence,
     ...(record.agent?.session ? { session_ref: record.session_ref } : {}) })
   if (!task || records.length === 0) return null
-  if (records.some(entry => entry.invalid_error)) {
+  if (records.some(entry => entry.invalid_error
+    && !(options.cancelled === true && record.abort_stage?.phase === 'before-test-subprocess' && entry.call?.name === CODE_VERIFY_TOOL))) {
     return failure('The ordinary DSH ToolResult is incomplete or violates the bounded code-proof schema; actual effects remain uncertain.', 'unknown')
   }
   const edits = records.filter(entry => entry.call?.name === CODE_EDIT_TOOL)
@@ -102,71 +101,61 @@ export async function codeEvidence(assignment, projectRoot, task, record) {
     return failure('The public ToolCall and ToolResult were not matched to the persisted source target.', 'unknown', [edit])
   }
   if (!record.agent?.session) return failure('A real DSH Session is required for code evidence.', 'unknown', [edit])
-  const tests = records.filter(entry => entry.call?.name === CODE_VERIFY_TOOL)
-  if (tests.length !== 1) return failure('The source edit has no single completed verification result; a changed file cannot be labelled test-successful.', 'unknown')
-  const verify = tests[0]
-  if (!verify.verify) return failure(`The fixed verification tool failed: ${verify.text || verify.invalid_error || 'verification not completed'}`, 'failed', [edit, verify])
-  if (verify.is_error && verify.verify.passed) return failure('The SDK declared an execution error despite a purported passing test; verification is unresolved.', 'unknown', [edit, verify])
-  if (verify.call.args === null || verify.call.args?.path !== task.relative_path || verify.call.args?.sha256 !== edit.edit.sha256
-    || !Number.isSafeInteger(edit.seq) || !Number.isSafeInteger(verify.seq) || verify.seq <= edit.seq
-    || verify.verify.sha256 !== edit.edit.sha256 || verify.verify.previous_test_exit_code !== edit.edit.baseline_test_exit_code) {
-    return failure('Verification did not follow the observed source edit with the same content and original failing baseline.', 'unknown', [edit, verify])
+  const cancelled = options.cancelled === true
+  // The ABORTED verifier is a transport outcome, never a fabricated completed test.
+
+  if (cancelled && (record.cancel_requested !== true || record.abort_reason !== 'user'
+    || !Number.isSafeInteger(record.abort_seq) || edit.seq >= record.abort_seq)) {
+    return failure('Only an observed later user cancellation can certify an interrupted source change; an unfinished editor stays uncertain.', 'unknown', [edit])
   }
-  const rootInput = projectRoot || assignment.grant?.project_root
-  if (!rootInput) return failure('Code change requires the exact ProjectBinding root', 'unknown')
-  const root = await realpath(resolve(rootInput))
-  if (assignment.grant?.project_root && await realpath(resolve(assignment.grant.project_root)) !== root) {
-    return failure('Current Code Evidence root differs from the exact ProjectBinding root', 'unknown')
+  // A cancelled verifier ToolResult is an abort transport event, not a
+  // completed `loom.fixture-code-verification.v1` record. Count only real tests.
+  const tests = records.filter(entry => entry.call?.name === CODE_VERIFY_TOOL && entry.verify)
+  if (cancelled && !assignment.objective?.includes('LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')) {
+    return failure('Change-only cancellation is restricted to the explicitly held pre-subprocess fixture.', 'unknown', [edit])
   }
-  // Every path and every actual byte is checked again outside the tool's text.
+  const stop_boundary = cancelled ? cancelledBoundary(record, edit, records) : undefined
+  if (cancelled && stop_boundary.error) return failure(stop_boundary.error, 'unknown', [edit, ...tests])
+  if (cancelled && (tests.length > 0
+    || record.abort_stage?.phase !== 'before-test-subprocess'
+    || ![...(record.code_calls?.values() || [])].some(call => call.name === CODE_VERIFY_TOOL))) {
+    return failure('A change-only cancellation must stop the real verifier before its test process and completed ToolResult, not after validation is done.', 'unknown', [edit, ...tests])
+  }
+  let verify
+  if (!cancelled) {
+    if (tests.length !== 1) return failure('The source edit has no single completed verification result; a changed file cannot be labelled test-successful.', 'unknown')
+    verify = tests[0]
+    if (!verify.verify) return failure(`The fixed verification tool failed: ${verify.text || verify.invalid_error || 'verification not completed'}`, 'failed', [edit, verify])
+    if (verify.is_error && verify.verify.passed) return failure('The SDK declared an execution error despite a purported passing test; verification is unresolved.', 'unknown', [edit, verify])
+    if (verify.call.args === null || verify.call.args?.path !== task.relative_path || verify.call.args?.sha256 !== edit.edit.sha256
+      || !Number.isSafeInteger(edit.seq) || !Number.isSafeInteger(verify.seq) || verify.seq <= edit.seq
+      || verify.verify.sha256 !== edit.edit.sha256 || verify.verify.previous_test_exit_code !== edit.edit.baseline_test_exit_code) {
+      return failure('Verification did not follow the observed source edit with the same content and original failing baseline.', 'unknown', [edit, verify])
+    }
+  }
   const relative = task.relative_path
-  const directory = await realpath(resolve(root, dirname(relative)))
-  const expectedDirectory = await realpath(resolve(root, 'src'))
-  if (directory !== expectedDirectory || !directory.startsWith((await realpath(root)) + sep)) {
-    return failure('Actual edit is outside the selected source directory', 'unknown')
-  }
-  const stat = await lstat(resolve(directory, 'calc.js'))
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > MAX_SOURCE) {
-    return failure('The changed target is not a bounded ordinary non-symlink file', 'unknown')
-  }
-  const actual = await readFile(resolve(directory, 'calc.js'))
   const content = Buffer.from(assignment.content, 'utf8')
-  if (content.length > MAX_SOURCE || !actual.equals(content) || !hex(hash(actual)) || hash(actual) !== edit.edit.sha256
-    || stat.size !== edit.edit.size_bytes || verify.verify.sha256 !== hash(actual)) {
-    return failure('Actual post-edit bytes or digest differ from the Ticket and one observed test target.', 'unknown')
+  const source = await sourceChangeProof(assignment, projectRoot, task, edit, failure)
+  if (source.state) return source
+  const actual = source.actual
+  const { changeRef, changeId, patch } = source
+  const effectId = sourceEffectId(assignment, edit, actual, source.previous)
+  if (cancelled) {
+    const artifact = sourceArtifact(assignment, changeId, patch)
+    artifact.metadata.evidence = [changeRef]
+    return { state: 'unknown', cancel_acknowledged: true,
+      summary: 'The real source edit and diff are confirmed, but the user cancelled before verification. This operation remains unknown, not a successful completion or an invented rollback.',
+      effects: [{ effect_id: effectId, ticket_id: assignment.ticket_id, assignment_id: assignment.id,
+        node_id: assignment.node_id, attempt: assignment.attempt,
+        input_digest: hash(JSON.stringify({ assignment_id: assignment.id, kind: assignment.kind, path: relative, content })),
+        status: 'confirmed', evidence: [changeRef], artifacts: [changeId] }],
+      artifacts: [artifact], evidence: [changeRef], stop_boundary: { ...stop_boundary, source_change_artifact_id: changeId }, session_ref: record.session_ref }
   }
-  // Run only real, read-only Git commands in this explicitly authorized root.
-  // No arbitrary user command, shell, git reset/stash/checkout, hooks or Provider.
-  const environment = { PATH: '/usr/bin:/bin', HOME: root, TMPDIR: root, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' }
-  const git = async (...args) => (await execute('/usr/bin/git', ['--no-pager', ...(args)], {
-    cwd: root, env: environment, shell: false, windowsHide: true, timeout: 5000, maxBuffer: 96 * 1024,
-  })).stdout
-  const head = Buffer.from(await git('show', `HEAD:${relative}`), 'binary')
-  // Git's `encoding` is deliberately UTF-8 only on text output; this payload is a JS source Buffer.
-  // maxBuffer protects all read-only command output; compute the actual baseline hash below.
-  const status = (await git('status', '--porcelain=v1', '--untracked-files=all', '--', '.')).trimEnd()
-  if (status !== ` M ${relative}`) return failure('Only the exact one-file change is permitted in this fixture; observed unrelated or staged changes.', 'unknown')
-  const staged = (await git('diff', '--cached', '--no-ext-diff', '--no-color', '--exit-code', '--', relative)).trim()
-  if (staged) return failure('Source is already staged; no read-only change evidence may hide another approved change.', 'unknown')
-  const patch = await git('-c', 'diff.external=', 'diff', '--no-ext-diff', '--no-color', '--unified=3', '--', relative)
-  if (!patch.includes(`--- a/${relative}`) || !patch.includes(`+++ b/${relative}`)
-    || !patch.includes('-  return a - b;') || !patch.includes('+  return a + b;')
-    || Buffer.byteLength(patch) > 96 * 1024) return failure('Only a genuine one-source baseline-to-result unified diff is accepted.', 'unknown')
-  const previous = hash(head)
-  const expectedOld = hash("export function add(a, b) {\n  return a - b;\n}\n")
-  if (previous !== edit.edit.previous_sha256 || previous !== expectedOld) {
-    return failure('Observed baseline is not the committed source whose actual edit result was reported.', 'unknown')
-  }
-  const changeRef = { type: 'dsh-tool-result', name: edit.call.name, call_id: edit.call_id,
-    call_seq: edit.call.seq, result_id: edit.result_id, result_seq: edit.seq, session: edit.session,
-    schema: 'loom.code-change.v1', path: relative, previous_sha256: previous,
-    sha256: hash(actual), size_bytes: actual.length }
-  const changeId = stableArtifactId(`${assignment.id}:code-change:${edit.call_id}:${previous}:${hash(actual)}`)
   const verificationId = stableArtifactId(`${assignment.id}:code-verification:${verify.call_id}:${verify.result_id}:${hash(actual)}`)
   const verificationRef = { type: 'dsh-tool-result', name: verify.call.name, call_id: verify.call_id,
     call_seq: verify.call.seq, result_id: verify.result_id, result_seq: verify.seq, session: verify.session,
     code_change_artifact_id: changeId, path: relative, sha256: hash(actual) }
-  const output = value => typeof value === 'string' ? value.split(root).join('<authorized_project_root>').split(root.replaceAll('\\', '/')).join('<authorized_project_root>') : ''
+  const output = value => typeof value === 'string' ? value.split(source.root).join('<authorized_project_root>') : ''
   const reportBytes = Buffer.from(JSON.stringify({ schema: 'loom.code-verification.v1',
     path: relative, sha256: hash(actual), source_change_artifact_id: changeId,
     edit_tool_result: edit.result_id, verification_tool_result: verify.result_id,
@@ -175,14 +164,12 @@ export async function codeEvidence(assignment, projectRoot, task, record) {
     previous_test_exit_code: verify.verify.previous_test_exit_code,
     stdout: output(verify.verify.stdout), stderr: output(verify.verify.stderr),
     dsh_session: verify.session }, null, 2))
-  if (!hex(hash(head)) || previous === hash(actual)) return failure('The source task did not have a measurable original-to-new change', 'unknown')
-  const changeArtifact = { artifact_id: changeId, bytes: Buffer.from(patch),
-    metadata: { artifact_id: changeId, name: `code-change-${assignment.id}.diff`, media_type: 'text/x-diff',
-      origin_node_id: assignment.node_id, size_bytes: Buffer.byteLength(patch), sha256: hash(patch), parents: [], evidence: [changeRef] } }
+  const changeArtifact = sourceArtifact(assignment, changeId, patch)
+  changeArtifact.metadata.evidence = [changeRef]
   const verificationArtifact = { artifact_id: verificationId, bytes: reportBytes,
     metadata: { artifact_id: verificationId, name: `code-verification-${assignment.id}.json`, media_type: 'application/json',
       origin_node_id: assignment.node_id, size_bytes: reportBytes.length, sha256: hash(reportBytes), parents: [], evidence: [verificationRef] } }
-  const effectId = stableArtifactId(`${assignment.id}:code-effect:${edit.call_id}:${previous}:${hash(actual)}`)
+  // sourceEffectId preserves the original immutable Effect's derivation.
   const effects = [{ effect_id: effectId, ticket_id: assignment.ticket_id, assignment_id: assignment.id,
     node_id: assignment.node_id, attempt: assignment.attempt,
     input_digest: hash(JSON.stringify({ assignment_id: assignment.id, kind: assignment.kind,
@@ -193,6 +180,34 @@ export async function codeEvidence(assignment, projectRoot, task, record) {
     summary: verify.verify.passed ? 'An isolated DSH Agent changed the exact fixture source and the real fixed node:test succeeded with an independently verified diff.' : 'The source edit is confirmed, but the real fixed node:test failed. The changed code and failure are retained; this is not a rollback.',
     effects, artifacts: [changeArtifact, verificationArtifact],
     evidence: [changeRef, verificationRef], session_ref: record.session_ref }
+}
+
+function cancelledBoundary(record, edit, records) {
+  if (record.abort_stage?.aborted !== true || record.abort_stage.phase !== 'before-test-subprocess'
+    || record.abort_stage.reason !== 'user' || record.abort_reason !== 'user'
+    || records.some(entry => entry.verify)
+    || !record.session_ref?.session_id || !Number.isSafeInteger(record.abort_seq)) {
+    return { error: 'The precise held verifier abort or matching user stop-intent proof is missing; change-only certification stays unknown.' }
+  }
+  const calls = [...(record.code_calls?.values() || [])].filter(call => call.name === CODE_VERIFY_TOOL)
+  if (calls.length !== 1) return { error: 'Change-only proof needs exactly one held verification ToolCall.' }
+  const call = calls[0]
+  const stopped = records.find(entry => entry.call === call)
+  const id = [...(record.code_calls?.entries() || [])].find(([, value]) => value === call)?.[0]
+  if (!stopped) return { error: 'The held verification ToolResult was not bound to that specific invocation.' }
+  if (!stopped || stopped.call_id !== id || !stopped.result_id || stopped.is_error !== true
+    || !['Fixture verification cancelled before its test subprocess', 'Error: Fixture verification cancelled before its test subprocess'].includes(stopped.text)
+    || !Number.isSafeInteger(call.seq) || call.seq <= edit.seq
+    || !Number.isSafeInteger(stopped.seq) || call.seq >= stopped.seq || record.abort_seq < stopped.seq) {
+    return { error: 'The observed verifier abort is not an exact ordered ABORTED ToolResult before any completed test.' }
+  }
+  return {
+    schema: 'loom.code-stop-boundary.v1', type: 'dsh-tool-abort', name: CODE_VERIFY_TOOL,
+    phase: 'before-test-subprocess', reason: 'user',
+    call_id: id, call_seq: call.seq,
+    result_id: stopped.result_id, result_seq: stopped.seq,
+    abort_seq: record.abort_seq, session: record.session_ref,
+  }
 }
 
 function hex(value) { return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) }

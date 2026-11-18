@@ -209,7 +209,7 @@ export class LocalNodeRunner {
     return this.state.data.assignments[assignment.id]
   }
   async report(assignment, result) {
-    const effects = Array.isArray(result.effects) ? [...result.effects] : []
+    let effects = Array.isArray(result.effects) ? [...result.effects] : []
     const uploads = new Map()
     for (const item of [...(Array.isArray(result.artifacts) ? result.artifacts : []), ...(result.artifact ? [result.artifact] : [])]) {
       const id = item.artifact_id || item.id
@@ -225,12 +225,13 @@ export class LocalNodeRunner {
       ids.push(artifactId)
     }
     if (result.effect) effects.push(result.effect)
-    if (result.state === 'unknown' && effects.length === 0 && result.session_ref) {
+    if (result.state === 'unknown' && effects.length === 0) {
       effects = [{ effect_id: `dsh-turn-${assignment.id}`, status: 'unknown', input_digest: result.digest || '', evidence: { description: 'Actual DSH turn outcome or its delivery needs reconciliation; no external file effect is claimed.', session_ref: result.session_ref }, artifacts: [] }]
     }
     return this.client.report({ ticketId: assignment.ticket_id, assignmentId: assignment.id, leaseEpoch: assignment.lease_epoch,
       state: result.state, summary: result.summary, cancelAcknowledged: Boolean(result.cancel_acknowledged),
-      evidence: result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : []), artifactIds: ids, effects })
+      evidence: [...(result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : [])),
+        ...(result.stop_boundary ? [result.stop_boundary] : [])], artifactIds: ids, effects })
   }
   async rejectAssignment(assignment, reason, localStatus = 'fenced') {
     const fingerprint = rejectionFingerprint(assignment)

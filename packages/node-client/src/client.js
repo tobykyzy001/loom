@@ -40,7 +40,7 @@ export class LoomNodeClient {
       ...(sessionRef ? { session_ref: sessionRef } : {}), kind, content: summary, activity: summary }
     return this.state.enqueue('event', body, { digest: this.logicalDigest(body) })
   }
-  async report({ ticketId, assignmentId, leaseEpoch, state: requestedState, summary, evidence = [], artifacts = [], artifactIds = [], effects = [], signal }) {
+  async report({ ticketId, assignmentId, leaseEpoch, state: requestedState, summary, evidence = [], artifacts = [], artifactIds = [], effects = [], cancelAcknowledged = false, signal }) {
     if (!['running', 'succeeded', 'failed', 'cancelled', 'unknown'].includes(requestedState)) throw new TypeError('Invalid report state')
     const artifact_ids = artifactIds.concat(artifacts.map((artifact) => typeof artifact === 'string' ? artifact : artifact.artifact_id))
     if (!artifact_ids.every((artifact) => typeof artifact === 'string' && artifact.length > 0)) {
@@ -48,7 +48,7 @@ export class LoomNodeClient {
     }
     const body = { ...envelope(this, id()), ticket_id: ticketId, assignment_id: assignmentId, lease_epoch: leaseEpoch,
       requested_state: requestedState, summary, evidence, artifacts, effects,
-      artifact_ids, cancel_acknowledged: requestedState === 'cancelled' }
+      artifact_ids, cancel_acknowledged: requestedState === 'cancelled' || cancelAcknowledged === true }
     if (leaseEpoch === undefined) delete body.lease_epoch
     const digest = this.logicalDigest(body)
     // The receipt identity of the same immutable report survives reopen and replay.

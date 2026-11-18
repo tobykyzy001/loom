@@ -216,9 +216,14 @@ export class LocalNodeRunner {
       artifacts = [...artifacts, { ...result.artifact.metadata, artifact_id: result.artifact.artifact_id }]
     }
     if (result.effect) effects = [...effects, result.effect]
+    if (result.state === 'unknown' && effects.length === 0) {
+      effects.push({ effect_id: `dsh-turn-${assignment.id}`, status: 'unknown', input_digest: result.digest || '', evidence: { description: 'The observed outcome still requires reconciliation; no unobserved file effect is claimed.', ...(result.session_ref ? { session_ref: result.session_ref } : {}) }, artifacts: [] })
+    }
     return this.client.report({ ticketId: assignment.ticket_id, assignmentId: assignment.id, leaseEpoch: assignment.lease_epoch,
       state: result.state, summary: result.summary,
-      evidence: result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : []), artifacts, effects })
+      cancelAcknowledged: result.cancel_acknowledged === true,
+      evidence: [...(result.effect ? [result.effect.evidence] : (result.session_ref ? [result.session_ref] : [])),
+        ...(result.stop_boundary ? [result.stop_boundary] : [])], artifacts, effects })
   }
   async rejectAssignment(assignment, reason, localStatus = 'fenced') {
     const fingerprint = rejectionFingerprint(assignment)

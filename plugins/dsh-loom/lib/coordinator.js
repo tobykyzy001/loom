@@ -50,6 +50,7 @@ export class CoordinatorLoop {
     if (this.lastAssignment?.id === assignment.id && this.lastAssignment.lease_epoch === assignment.lease_epoch && this.lastAssignment.grant_digest === assignment.grant_digest && !assignment.cancel_requested) return
     this.lastAssignment = assignment
     const task = this.handle(assignment).catch((error) => {
+      // Report failed delivery truthfully; never fabricate cancellation acknowledgement.
       this.lastError = error.message
       process.stderr.write(`[loom-local-node] ${assignment.id}: ${error.message}\n`)
     })

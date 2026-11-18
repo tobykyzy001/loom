@@ -21,18 +21,38 @@ export class DshAdapter {
     this.sessionMapPath = sessionMapPath; this.sessionMap = null
     this.owned = new Map(); this.waiters = new Map(); this.latest = new Map(); this.sequence = new Map()
     this.sessionOwners = new Map()
+    this.pendingCancellations = new Set()
+    this.attachClaims = new Set()
+    this.expiredClaims = new Set()
+    this.cancellationDeadlines = new Map()
+    this.verificationGates = new Map()
     ctx.on('session/event', (session, event) => {
       const assignmentId = this.sessionOwners.get(session.id)
-      if (!assignmentId) return
+      if (!assignmentId || this.expiredClaims.has(assignmentId)) return
       const tracked = this.sequence.get(assignmentId)
-      if (tracked?.code_task) {
+      const previousSeq = tracked?.last_seq
+      // Reject an older terminal replay before updating the latest observation.
+      const wrongTurn = event.data?.turn !== undefined
+        && tracked?.active_turn !== event.data.turn
+      const wrongRequestWindow = tracked?.request_seq !== undefined && event.seq < tracked.request_seq
+      if (event.type === 'turn/end' && tracked) {
+        if (event.seq <= previousSeq || wrongRequestWindow || wrongTurn) {
+          return
+        }
+      }
+      // still selects only this assignment's terminal waiter, never new tools.
+      if (tracked?.code_task && tracked.agent.session === session
+        && (tracked.request_seq === undefined || event.seq >= tracked.request_seq)) {
+        // Ordinary tool evidence still requires the exact live Session object.
         if (event.type === 'tool/call') captureCodeCall(tracked, event.data?.name, { ...(event.data || {}), __seq: event.seq })
         if (event.type === 'tool/result') captureCodeResult(tracked, { ...(event.data || {}), seq: event.seq }, this.sessionRef(session))
       }
       // During SDK resume a session has a different identity but is the exact live Agent named by our mapping.
       const replacement = this.ctx.agents.get(session.id)
+      // Only the attached Agent's exact Session object can provide ordinary
+      // ToolCall/ToolResult evidence. A lookup cannot create a terminal claim.
       if (tracked && tracked.agent.session !== session) return
-      if (!tracked && !replacement) return
+      if (!tracked && (event.type === 'turn/end' || !replacement || replacement.session !== session)) return
       if (!tracked) this.sequence.set(assignmentId, { agent: replacement, owned: false, dispose: async () => {}, refReported: true, last_seq: session.seq })
       this.sequence.get(assignmentId).last_seq = event.seq
       this.sequence.get(assignmentId).session_ref = {
@@ -99,12 +119,31 @@ export class DshAdapter {
         }
         this.latest.set(assignmentId, previous)
       }
+      if (event.type === 'turn/start' && (tracked?.request_seq === undefined || event.seq >= tracked.request_seq)) {
+        tracked.active_turn = event.data?.turn
+      }
       if (event.type === 'turn/end') {
         const waiter = this.waiters.get(assignmentId)
+        if (!waiter) return
+        const deadline = this.cancellationDeadlines.get(assignmentId)
+        if (deadline) clearTimeout(deadline)
+        this.cancellationDeadlines.delete(assignmentId)
+        this.pendingCancellations.delete(assignmentId)
+        // The first observed terminal event is the only resolver for this operation.
+        this.waiters.delete(assignmentId)
         if (waiter) {
           const reason = event.data?.reason
           if (reason?.kind === 'completed') waiter.resolve(reason)
-          else if (reason?.kind === 'aborted') waiter.reject(Object.assign(new Error(`DSH turn was aborted (${reason.reason?.kind || 'unknown'})`), { state: 'cancelled', cancel_acknowledged: true, reason }))
+          else if (reason?.kind === 'aborted') {
+            tracked.abort_reason = reason.reason?.kind || 'unknown'
+            tracked.abort_seq = event.seq
+            const startedCodeWork = Boolean(tracked.code_task) && [...(tracked.code_calls?.values() || [])].some(call => call.name === 'loom_fixture_code_edit')
+            if (startedCodeWork) {
+              waiter.reject(Object.assign(new Error('The scoped code work was aborted after a tool began; file and verification outcomes need reconciliation.'), {
+                state: 'unknown', cancel_acknowledged: tracked.cancel_requested === true, aborted_user: reason.reason?.kind === 'user', reason,
+              }))
+            } else waiter.reject(Object.assign(new Error(`DSH turn was aborted (${reason.reason?.kind || 'unknown'})`), { state: 'cancelled', cancel_acknowledged: true, reason }))
+          }
           else {
             const codeTask = this.sequence.get(assignmentId)?.code_task
             // A terminal Agent interrupted/failed outcome does not prove the
@@ -245,17 +284,39 @@ export class DshAdapter {
     } else {
       if (!this.allowCreation) throw new Error('DSH Agent creation is disabled; explicitly configure an existing session or opt in')
       if (provenance && typeof this.delegationAgentSetup !== 'function') throw new Error('Source delegation requires a declared scoped tool installer; execution unavailable')
+      const pauseBeforeVerify = codeTask && assignment.objective?.includes('LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')
+        ? (agent) => async (signal) => {
+          if (signal?.aborted) throw Object.assign(new Error('Verification was cancelled before its pause'), { name: 'AbortError' })
+          let gate = this.verificationGates.get(assignment.id)
+          if (!gate) {
+            gate = Promise.withResolvers()
+            gate.timer = setTimeout(() => {
+              this.verificationGates.delete(assignment.id)
+              gate.reject(new Error(`The scoped pre-verification pause timed out for ${assignment.id}`))
+            }, 12000)
+            this.verificationGates.set(assignment.id, gate)
+            process.stderr.write(`[loom-local-node] code-pause-before-verify ${JSON.stringify({ assignment_id: assignment.id, session_id: agent.session.id, phase: 'before-test-subprocess' })}\n`)
+          }
+          await gate.promise
+          if (signal?.aborted) {
+            // Record the actual SDK abort at this precise tool-body boundary,
+            // separately from the center's durable cancel-intent flag.
+            this.sequence.get(assignment.id).abort_stage = { aborted: true, reason: signal.reason?.kind, phase: 'before-test-subprocess' }
+          }
+          // Abort data belongs to the actual SDK invocation, not a synthetic session event.
+        }
+        : undefined
       handle = await this.ctx.agents.create({ sessionId: selectedSession, meta: {
         ...(projectRoot ? { cwd: projectRoot } : {}),
         ...(provenance ? { parentSession: provenance.parent_session.session_id, origin: 'subagent' } : {}),
       },
       ...(provenance ? { setup: async (agentCtx) => { await this.delegationAgentSetup({ ctx: agentCtx, scene: provenance }) } } :
-        codeTask ? { setup: async (agentCtx) => {
+        codeTask ? { setup: async (agentCtx, agent) => {
         // The exported fixture signature is (scoped Cordis context, ticket scope), not a nested wrapper.
         if ((provider && provider !== 'loom-stub') || (model && model !== 'loom-stub-v1')) {
           throw new Error('Scoped code fixture cannot switch to a different model/provider')
         }
-        await this.fixtureCodeTools(agentCtx, { assignment, project_root: projectRoot })
+        await this.fixtureCodeTools(agentCtx, { assignment, project_root: projectRoot, agent_session_id: agent.session.id, before_verify_pause: pauseBeforeVerify?.(agent) })
       } } : {}),
       agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {}), ...(maxTokens ? { maxTokens } : {}) } })
@@ -272,9 +333,48 @@ export class DshAdapter {
     return record
   }
   async executeAssignment(assignment, config) {
+    if (this.attachClaims.has(assignment.id) || this.waiters.has(assignment.id)) {
+      throw new Error('One Assignment cannot have concurrent execution claims')
+    }
+    this.attachClaims.add(assignment.id)
+    try { return await this.executeClaim(assignment, config) }
+    finally { this.attachClaims.delete(assignment.id) }
+  }
+  async executeClaim(assignment, config) {
     const { agent } = await this.attach(assignment, config)
+    const tracked = this.sequence.get(assignment.id)
+    if (tracked?.pre_start_outcome) return { ...tracked.pre_start_outcome }
+    if (tracked) {
+      tracked.request_seq = Number.isSafeInteger(tracked.last_seq) ? tracked.last_seq : 0
+      tracked.active_turn = undefined
+      tracked.request_started = false
+    }
     const { promise: settled, resolve, reject } = Promise.withResolvers()
     this.waiters.set(assignment.id, { resolve, reject })
+    if (this.pendingCancellations.has(assignment.id)) {
+      const record = tracked ?? this.sequence.get(assignment.id)
+      this.sequence.set(assignment.id, { ...record, cancel_requested: true })
+      if (record?.request_started === true && agent.status === 'running') {
+        agent.cancel({ kind: 'user' })
+        return this.awaitCancelledTurn(settled, agent)
+      } else if (agent.status === 'idle') {
+        // Creation/attach completed, but no request was issued for this Assignment.
+        // This is an actual pre-start stop, not a fabricated SDK turn event.
+        return this.settlePendingCancellation(assignment, agent, { state: 'cancelled', cancel_acknowledged: true,
+          summary: 'The center cancellation arrived before a model request was issued for this Assignment. No tools were executed.',
+          effects: [], artifacts: [],
+        })
+      } else if (agent.status === 'running') {
+        // A shared/pre-existing running Session is not this claim's execution.
+        // Do not cancel it or claim its aborted user terminal as our acknowledgement.
+        return this.settlePendingCancellation(assignment, agent, { state: 'unknown', cancel_acknowledged: false,
+          summary: 'Pending cancellation predates this Assignment’s followup, while a different running turn exists. It remains unresolved and cannot be acknowledged as this operation’s cancellation.',
+          effects: [], artifacts: [] })
+      } else {
+        return this.settlePendingCancellation(assignment, agent, { state: 'unknown', summary: 'Cancellation arrived before execution, but the current Agent state is not proven. No model request was issued.',
+          cancel_acknowledged: false, effects: [], artifacts: [] })
+      }
+    }
     try {
       const objective = typeof assignment.objective === 'string' && assignment.objective
         ? assignment.objective : `Perform the authorized ${assignment.kind} operation.`
@@ -282,6 +382,7 @@ export class DshAdapter {
          ? `\nVerified source delegation: call only the scoped delegated HTML tool. LOOM_FIXTURE_DELEGATE parent_artifact=${config.provenance.ref.artifact_id} sha256=${config.provenance.ref.sha256}`
          : '') }]
       agent.followup(Object.freeze({ id: randomUUID(), role: 'user', content: Object.freeze(content), source: Object.freeze({ kind: 'loom' }) }))
+      if (tracked) tracked.request_started = true
       await settled
       const snapshot = this.latest.get(assignment.id)
       if (!snapshot || !snapshot.full_text) throw new Error('DSH completed without an assistant message; no success can be inferred')
@@ -325,33 +426,129 @@ export class DshAdapter {
       return { state: outcome, summary: outcome === 'failed' ? fileEvidence.summary : 'DSH Agent completed an observed turn; report text is collected from ordinary Session messages.',
         content: bytes, metadata: { ...metadata, size_bytes: bytes.length, sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex') }, session_ref: this.sessionRef(agent.session), effects: [] }
     } catch (error) {
+      const state = this.sequence.get(assignment.id)
+      // A real user abort may leave known write effects without a known final task outcome.
+      if (error.aborted_user && state?.code_task && state.cancel_requested === true && state.abort_reason === 'user') {
+        let partial
+        try {
+          partial = await codeEvidence(assignment, config.projectRoot || assignment.grant?.project_root, state.code_task, state, { cancelled: true })
+          // Reconcile exact source effects without declaring overall completion.
+        } catch (proofError) {
+          partial = { state: 'unknown', summary: `Cancellation interrupted source work and its byte proof could not be completed: ${proofError.message}`, effects: [], artifacts: [] }
+        }
+        return { ...partial, cancel_acknowledged: true, session_ref: partial.session_ref || state.session_ref }
+      }
       // Preserve the original cancellation acknowledgement and observed result.
       // A cancelled/aborted Session is not repackaged as a tool rejection.
-      error.session_ref ||= this.sequence.get(assignment.id)?.session_ref
+      error.session_ref ||= state?.session_ref
       const codeOutcomeUncertain = this.sequence.get(assignment.id)?.code_task && error.state !== 'cancelled'
       if (codeOutcomeUncertain || (!['cancelled', 'failed'].includes(error.state) && this.sequence.get(assignment.id)?.refReported)) error.state = 'unknown'
       process.stderr.write(`[loom-local-node] DSH execution error ${assignment.id}: ${error.message}\n`)
       throw error
-    } finally { this.waiters.delete(assignment.id) }
+    } finally {
+      // The terminal waiter is single-use, including later SDK history readback.
+      this.waiters.delete(assignment.id)
+      this.clearCancellationDeadline(assignment.id)
+      this.releaseVerificationGate(assignment.id)
+    }
+  }
+  async awaitCancelledTurn(settled, agent) {
+    let timer
+    const deadline = Promise.withResolvers()
+    timer = setTimeout(() => {
+      deadline.reject(Object.assign(new Error('The SDK did not settle cancellation within the bounded wait'), {
+        state: 'unknown', cancel_acknowledged: false, session_ref: this.sessionRef(agent.session),
+      }))
+    }, 12_000)
+    try { return await Promise.race([settled, deadline.promise]) }
+    finally { clearTimeout(timer) }
+  }
+  clearCancellationDeadline(assignmentId) {
+    const timer = this.cancellationDeadlines.get(assignmentId)
+    if (timer) clearTimeout(timer)
+    this.cancellationDeadlines.delete(assignmentId)
+    this.pendingCancellations.delete(assignmentId)
+  }
+  armCancellationDeadline(assignmentId) {
+    if (this.expiredClaims.has(assignmentId) || this.cancellationDeadlines.has(assignmentId)) return
+    if (!this.waiters.has(assignmentId)) return
+    this.cancellationDeadlines.set(assignmentId, setTimeout(() => {
+      const waiter = this.waiters.get(assignmentId)
+      if (!waiter) return
+      // Expiry is a terminal unknown for this claim, never a late SDK abort.
+      this.expiredClaims.add(assignmentId)
+      const record = this.sequence.get(assignmentId)
+      if (record) record.pre_start_outcome = { state: 'unknown', cancel_acknowledged: false,
+        summary: 'Cancellation was not acknowledged within the bounded wait; late events cannot rewrite it.',
+        effects: [], artifacts: [], session_ref: this.sessionRef(record.agent.session) }
+      this.clearCancellationDeadline(assignmentId)
+      this.waiters.delete(assignmentId)
+      waiter.reject(Object.assign(new Error('The bound Agent did not confirm cancellation within the bounded wait'), {
+        state: 'unknown', cancel_acknowledged: false,
+      }))
+    }, 12_000))
+  }
+  settlePendingCancellation(assignment, agent, outcome) {
+    const result = { ...outcome, session_ref: this.sessionRef(agent.session) }
+    const record = this.sequence.get(assignment.id)
+    if (record) record.pre_start_outcome = result
+    this.clearCancellationDeadline(assignment.id)
+    this.waiters.delete(assignment.id)
+    return result
+  }
+  releaseVerificationGate(assignmentId) {
+    const gate = this.verificationGates.get(assignmentId)
+    if (gate) {
+      clearTimeout(gate.timer)
+      gate.resolve()
+      this.verificationGates.delete(assignmentId)
+    }
   }
   async cancel(assignmentId) {
+    if (this.expiredClaims.has(assignmentId)) return false
+    // Remember intent across ctx.agents.create(), not only after attach is complete.
+    this.pendingCancellations.add(assignmentId)
     // Only the exact Agent registered for this Assignment is cancelled; never another user's idle Session.
     const record = this.sequence.get(assignmentId)
-    if (record) record.cancel_requested = true
+    if (record && typeof record === 'object') {
+      // Keep cancellation intent in adapter-owned state, not on the immutable
+      // controller/Grant assignment input. Do not assume the request is mutable.
+      this.sequence.set(assignmentId, { ...record, cancel_requested: true })
+    }
     const entry = this.sequence.get(assignmentId)
-    const id = entry?.agent?.session?.id
-    const agent = this.ctx.agents.get(id) || entry?.agent
-    if (agent?.status === 'running') { agent.cancel({ kind: 'user' }); return true }
-    return false
+    const agent = entry?.agent
+    const id = agent?.session?.id
+    try {
+      if (entry && typeof id === 'string' && this.sessionOwners.get(id) === assignmentId
+        && entry.request_started === true && agent?.status === 'running') {
+        agent.cancel({ kind: 'user' })
+        this.armCancellationDeadline(assignmentId)
+        return true
+      }
+      return false
+    } finally {
+      // Timer expiry is not an acknowledgement; only a real observed turn proves stop.
+      // Releasing a pause is the controller's observation handoff, not test success.
+      // Native Agent cancellation still has to confirm the actual aborted turn.
+      this.releaseVerificationGate(assignmentId)
+    }
   }
   agents() { return [...new Set([...this.sequence.values()].map((value) => value.agent))] }
   async dispose() {
+    // Resolve every owner-scoped bounded gate when the plugin is torn down.
+    for (const gate of this.verificationGates.values()) { clearTimeout(gate.timer); gate.resolve() }
+    this.pendingCancellations.clear()
+    for (const timer of this.cancellationDeadlines.values()) clearTimeout(timer)
+    this.cancellationDeadlines.clear()
+    this.attachClaims.clear()
+    this.verificationGates.clear()
     for (const agent of this.agents()) { if (agent.status === 'running') agent.cancel({ kind: 'user' }) }
     for (const entry of this.waiters.values()) entry.reject(Object.assign(new Error('Loom plugin disposing'), { state: 'unknown' }))
     this.waiters.clear()
     // Existing/attached user agents are not Loom's disposal capability.
     for (const dispose of this.owned.values()) await dispose()
     this.owned.clear(); this.sequence.clear(); this.sessionOwners.clear()
+    this.expiredClaims.clear()
   }
 }
 function ownedDispose(handle) { return typeof handle.dispose === 'function' ? () => handle.dispose() : async () => {} }

@@ -161,6 +161,8 @@ export async function registerScopedCodeTools(ctx, scope) {
   }
   const root = await canonicalOwnedRoot(projectRoot)
   const state = { edit: null, verification: null }
+  // A cancellation pause belongs at the start of the actual SDK tool body,
+  // not in an asynchronous waterfall whose lifecycle differs from tool drains.
   const edit = ctx.tools.register({
     name: 'loom_fixture_code_edit',
     description: 'Perform only this ticket’s fixed src/calc.js correction after a clean Git baseline and failing real node test. No arbitrary path, content or command.',
@@ -220,6 +222,14 @@ export async function registerScopedCodeTools(ctx, scope) {
       checkVerifyArguments(args, CODE_SOURCE_PATH)
       if (!state.edit) throw new Error('Verification requires the successful preceding edit and its captured failing baseline')
       if (state.verification) throw new Error('Verification is single-use for the authoritative tool result')
+      if (assignment.objective.includes('LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')) {
+        if (typeof scope.before_verify_pause !== 'function') throw new Error('The scoped cancel fixture requires an owner-specific bounded pause resolver')
+        await scope.before_verify_pause(invocation.signal)
+        if (invocation.signal?.aborted) {
+          // Before fixed child process spawn: cancel means no test verification bytes.
+          throw Object.assign(new Error('Fixture verification cancelled before its test subprocess'), { name: 'AbortError' })
+        }
+      }
       const current = await checkedFile(root, CODE_SOURCE_PATH)
       const digest = sha256(current)
       if (args.sha256 !== undefined && args.sha256 !== state.edit.result.sha256) throw new Error('Verification digest does not match the Ticket edit result')

@@ -5,6 +5,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { copyFile, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -74,7 +75,7 @@ try {
   pass('actual owned example Git repo is clean and the unmodified source test genuinely fails', { initial_sha256: initialSha, command: ['node', '--test', 'test/calc.test.js'] })
   await writeFile(join(root, 'private', 'fixture-control.jsonl'), '', { mode: 0o600 })
   server = await startRustConcierge({ root: join(root, 'rust'), env: { PATH: process.env.PATH } })
-  const admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
+  let admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
   const project = await admin.post('/api/v1/projects', { name: 'Bounded source code example, not a real user repo', root: projectRoot, mode: 'read_write' })
   const projectId = project.project.id
   const enrollment = await admin.post('/api/v1/enrollment-codes', {})
@@ -106,7 +107,16 @@ try {
       if (['succeeded', 'failed', 'reconciling', 'cancelled'].includes(detail.status)) return detail
       await sleep(150)
     }
-    throw new Error(`Code Ticket ${ticket.id} did not reach a definite evidence state`)
+    const final = await admin.get(`/api/v1/tickets/${ticket.id}`)
+    const persisted = JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8'))
+    const pending = persisted.outbox.filter(item => item.body.ticket_id === ticket.id).map(item => ({
+      kind: item.kind, attempts: item.attempts, last_error: item.last_error,
+      requested_state: item.body.requested_state, cancel_acknowledged: item.body.cancel_acknowledged,
+      effects: item.body.effects?.map(effect => ({ id: effect.effect_id, status: effect.status, assignment_id: effect.assignment_id })),
+    }))
+    const memory = final.assignments?.[0] ? persisted.completions[final.assignments[0].id] : undefined
+    if (process.env.LOOM_TEST_OUTPUT) await writeFile(join(dirname(process.env.LOOM_TEST_OUTPUT), 'cancel-debug.log'), redact(host.stderr.join('')), { mode: 0o600 })
+    throw new Error(redact(`Code Ticket ${ticket.id} did not reach a definite evidence state: ${JSON.stringify({ status: final.status, cancel: final.cancel_requested, reports: final.reports?.length, completion: memory?.state, summary: memory?.summary, acknowledgement: memory?.cancel_acknowledged, pending })}`))
   }
   const assertion = async ({ failedTest = false, resetFixture = false } = {}) => {
     const ticket = await task('with real tests')
@@ -220,6 +230,130 @@ try {
   browserReports.push(browserEvidence)
   pass('production Vue opens the real diff and verification Artifacts from this DSH Ticket', { desktop: 1280, desktop_viewport_only_narrow: 390 })
 
+  // The next owned baseline is explicitly constructed by the driver, not Agent rollback.
+  // A user may stop after a real completed source edit and before verification begins.
+  await rm(join(projectRoot, 'src'), { recursive: true, force: true })
+  await rm(join(projectRoot, 'test'), { recursive: true, force: true })
+  await rm(join(projectRoot, '.git'), { recursive: true, force: true })
+  await rm(join(projectRoot, 'package.json'), { force: true })
+  await newProject()
+  const pending = await task('stop before verification LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')
+  await host.waitFor(() => {
+    if (!host.diagnostics().includes(`"assignment_id":"${pending.assignments[0].id}"`)) return undefined
+    let candidate
+    try { candidate = JSON.parse(readFileSync(join(root, 'node-state', 'dsh-session-map.json'), 'utf8')) }
+    catch (error) { if (error.code === 'ENOENT') return undefined; throw error }
+    const sessionId = candidate.assignments.find(entry => entry.assignment_id === pending.assignments[0].id)?.session_id
+    const verifyCall = host.sessionEvents(sessionId, ['tool/call']).some(call => call.event.data.name === 'loom_fixture_verify')
+    return sessionId && verifyCall ? candidate : undefined
+  }, 12_000, 'real verification ToolCall held before its test subprocess').catch(async error => {
+    const map = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+    const id = map.assignments.find(entry => entry.assignment_id === pending.assignments[0].id)?.session_id
+    const details = host.sessionEvents(id, ['tool/call', 'tool/result', 'turn/end']).map(item => ({ type: item.event.type, seq: item.event.seq,
+      name: item.event.data.name, result: item.event.data.message?.content?.[0]?.text?.slice(0, 200), reason: item.event.data.reason }))
+    throw new Error(`${error.message}\n${JSON.stringify(details)}`)
+  })
+  const pendingMap = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+  const interruptedSessionId = pendingMap.assignments.find(entry => entry.assignment_id === pending.assignments[0].id)?.session_id
+  assert.ok(interruptedSessionId)
+  assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
+  assert.notEqual(sha256(await readFile(join(projectRoot, 'src', 'calc.js'))), initialSha)
+  const heldVerifyCall = host.sessionEvents(interruptedSessionId, ['tool/call']).find(call => call.event.data.name === 'loom_fixture_verify')
+  assert.ok(heldVerifyCall, 'The exact verifier ToolCall is held before its test subprocess')
+  assert.equal(host.sessionEvents(interruptedSessionId, ['tool/result']).some(result => result.event.data.message?.toolCallId === heldVerifyCall.event.data.callId), false, 'No actual test ToolResult exists before user cancellation')
+  const interruptedResponse = await admin.post(`/api/v1/tickets/${pending.id}/cancel`, {})
+  assert.equal(interruptedResponse.status, 'cancel_requested')
+  const interrupted = await terminal(pending)
+  assert.equal(interrupted.status, 'reconciling', JSON.stringify(interrupted))
+  assert.equal(interrupted.reports.length, 1)
+  assert.equal(interrupted.reports[0].state, 'unknown')
+  assert.ok([true, 1].includes(interrupted.reports[0].cancel_acknowledged))
+  assert.equal(interrupted.effects.length, 1)
+  assert.equal(interrupted.effects[0].status, 'confirmed')
+  assert.equal(interrupted.artifacts.length, 1)
+  assert.equal(interrupted.artifacts[0].media_type, 'text/x-diff')
+  assert.equal(interrupted.effects[0].artifacts[0], interrupted.artifacts[0].id)
+  const interruptedArtifact = await admin.get(`/api/v1/tickets/${pending.id}/artifacts/${interrupted.artifacts[0].id}`)
+  assert.equal(interruptedArtifact.artifact.sha256, sha256(Buffer.from(interruptedArtifact.content)))
+  assert.equal(interruptedArtifact.content, (await git('diff', '--no-ext-diff', '--no-color', '--unified=3', '--', 'src/calc.js')).stdout)
+  assert.equal(interruptedArtifact.artifact.code_evidence.kind, 'change')
+  assert.equal(interruptedArtifact.artifact.code_evidence.path, 'src/calc.js')
+  const aborted = host.sessionEvents(interruptedSessionId, ['turn/end']).at(-1)
+  assert.equal(aborted.event.data.reason.kind, 'aborted')
+  assert.equal(aborted.event.data.reason.reason?.kind, 'user')
+  const verifierCalls = host.sessionEvents(interruptedSessionId, ['tool/call']).filter(call => call.event.data.name === 'loom_fixture_verify')
+  assert.equal(verifierCalls.length, 1, 'There must be exactly the one verification invocation which was stopped before its test subprocess')
+  const verifierResults = host.sessionEvents(interruptedSessionId, ['tool/result'])
+  assert.equal(verifierResults.filter(result => result.event.data.message?.toolCallId === verifierCalls[0].event.data.callId).length, 1)
+  const abortedResult = verifierResults.find(result => result.event.data.message?.toolCallId === verifierCalls[0].event.data.callId)
+  assert.equal(abortedResult.event.data.message.isError, true)
+  assert.match(abortedResult.event.data.message.content[0]?.text || '', /Fixture verification cancelled before its test subprocess/)
+  assert.equal(interrupted.artifacts.some(artifact => artifact.media_type === 'application/json'), false)
+  await pass('completed source edit stays reconciling with its actual byte effect before any test, after real user cancellation', { ticket: pending.id, session_id: interruptedSessionId, effect: interrupted.effects[0].id })
+
+  await host.stop(); host = null
+  await server.stop()
+  server = await startRustConcierge({ root: join(root, 'rust'), env: { PATH: process.env.PATH } })
+  admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
+  env.LOOM_FIXTURE_ENROLLMENT_CODE = ''
+  env.LOOM_FIXTURE_COORDINATOR_URL = server.baseUrl
+  host = await new FixtureHost(root, env, [server.clientToken]).start()
+  const recoveryDeadline = Date.now() + 10_000
+  let interruptedRecovered, recoveryError
+  while (!interruptedRecovered && Date.now() < recoveryDeadline) {
+    try { interruptedRecovered = await admin.get(`/api/v1/tickets/${pending.id}`) }
+    catch (error) {
+      recoveryError = error
+      const transient = error?.cause?.code === 'ECONNREFUSED' || /fetch failed|ECONNRESET|socket hang up/i.test(String(error?.cause?.message || error?.message || error))
+      if (!transient) throw error
+      await sleep(100)
+    }
+  }
+  if (!interruptedRecovered) throw new Error(`${server.baseUrl} unavailable after the real restart: ${recoveryError?.cause?.code || recoveryError?.message}`)
+  assert.equal(interruptedRecovered.status, 'reconciling')
+  assert.deepEqual(interruptedRecovered.reports.map(report => report.id), interrupted.reports.map(report => report.id))
+  assert.deepEqual(interruptedRecovered.effects.map(effect => effect.id), interrupted.effects.map(effect => effect.id))
+  assert.deepEqual(interruptedRecovered.artifacts.map(artifact => artifact.id), interrupted.artifacts.map(artifact => artifact.id))
+  assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
+  // A fresh Host has no required in-memory copy of the prior Host's EventEmitter
+  // array. Either way, no post-abort ToolCall may be introduced by reopening state.
+  assert.equal(host.sessionEvents(interruptedSessionId, ['tool/call']).some(call => call.event.seq > aborted.event.seq), false, 'No new source or verifier ToolCall may follow the restored aborted Session')
+  await pass('cancelled source diff, unknown report and confirmed source Effect survive center and Host reopen without new execution', { ticket: pending.id, report: interrupted.reports[0].id })
+
+  // A reconciling Cancel Intent is not a fresh authorization to replay the old task.
+  const refusedRetry = await fetch(`${server.baseUrl}/api/v1/tickets/${pending.id}/retry`, { method: 'POST', headers: { Authorization: `Bearer ${server.clientToken}`, 'Content-Type': 'application/json' }, body: '{}' })
+  assert.equal(refusedRetry.status, 400)
+  assert.equal((await refusedRetry.json()).error.code, 'invalid_request')
+  const noNewAssignment = await admin.get(`/api/v1/tickets/${pending.id}`)
+  assert.equal(noNewAssignment.status, 'reconciling')
+  assert.equal(noNewAssignment.assignments.length, 1, 'Stopped/reconciling entries cannot automatically mint a new Assignment')
+  await rm(join(projectRoot, 'src'), { recursive: true, force: true })
+  await rm(join(projectRoot, 'test'), { recursive: true, force: true })
+  await rm(join(projectRoot, '.git'), { recursive: true, force: true })
+  await rm(join(projectRoot, 'package.json'), { force: true })
+  await newProject()
+  const fresh = await task('explicit fresh assignment after stopping an earlier edit')
+  const freshDone = await terminal(fresh)
+  assert.equal(freshDone.status, 'succeeded')
+  assert.equal(freshDone.assignments.length, 1)
+  assert.equal(freshDone.reports.length, 1)
+  assert.equal(freshDone.reports[0].state, 'succeeded')
+  assert.equal(freshDone.effects.length, 1)
+  assert.equal(freshDone.artifacts.length, 2)
+  const freshVerificationMetadata = freshDone.artifacts.find(artifact => artifact.media_type === 'application/json')
+  const freshVerification = JSON.parse((await admin.get(`/api/v1/tickets/${fresh.id}/artifacts/${freshVerificationMetadata.id}`)).content)
+  assert.equal(freshVerification.passed, true)
+  assert.equal(freshVerification.exit_code, 0)
+  assert.notEqual(fresh.assignments[0].id, pending.assignments[0].id)
+  const freshMapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+  const freshSession = freshMapping.assignments.find(entry => entry.assignment_id === fresh.assignments[0].id)?.session_id
+  assert.notEqual(freshSession, interruptedSessionId)
+  const stillInterrupted = await admin.get(`/api/v1/tickets/${pending.id}`)
+  assert.equal(stillInterrupted.status, 'reconciling')
+  assert.deepEqual(stillInterrupted.effects.map(effect => effect.id), interrupted.effects.map(effect => effect.id))
+  assert.deepEqual(stillInterrupted.artifacts.map(artifact => artifact.id), interrupted.artifacts.map(artifact => artifact.id))
+  await pass('a separately authorized fresh Task completes source editing and real node test without altering interrupted evidence', { old_ticket: pending.id, new_ticket: fresh.id, session_id: freshSession, exit_code: freshVerification.exit_code })
+
   // Reopen the same center and DSH identity; a completed task must not execute a second editor/test.
   const sourceBytes = await readFile(join(projectRoot, 'src', 'calc.js'))
   const mappingBeforeRestart = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
@@ -230,6 +364,7 @@ try {
   await host.stop(); host = null
   await server.stop()
   server = await startRustConcierge({ root: join(root, 'rust'), env: { PATH: process.env.PATH } })
+  admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
   env.LOOM_FIXTURE_ENROLLMENT_CODE = ''
   env.LOOM_FIXTURE_COORDINATOR_URL = server.baseUrl
   host = await new FixtureHost(root, env, [server.clientToken]).start()
@@ -251,12 +386,12 @@ try {
   pass('real controller and local DSH reopen preserve source, effect lineage, Session mapping and no second execution')
   const db = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'), { readOnly: true })
   try {
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tickets').get().n, 1)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 2)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM reports').get().n, 2)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get().n, 4)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tickets').get().n, 3)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 4)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM reports').get().n, 4)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get().n, 7)
     assert.deepEqual(second.artifacts.map(entry => entry.id).sort(), restored.artifacts.map(entry => entry.id).sort())
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM effects').get().n, 2)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM effects').get().n, 4)
     assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
   } finally { db.close() }
   const audit = await new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken }).get('/api/v1/audit/verify')
@@ -287,6 +422,7 @@ try {
         }
       }
     }
+    if (!settled) await copyFile(join(root, 'node-state', 'node-state.json'), join(dirname(output), 'cancel-node-state.json')).catch(() => {})
     await writeFile(output, JSON.stringify(report(settled ? 'PASS' : 'FAIL'), null, 2), { mode: 0o600 })
   }
   // The target is constructed and canonicalized once from our own mkdtemp fixtureRoot.

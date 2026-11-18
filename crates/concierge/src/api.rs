@@ -2100,7 +2100,9 @@ async fn artifact_upload(
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
     let (node, _) = node(&state, &headers, &body)?;
-    let (ticket, assignment, _) = valid_lease(&state.lock().unwrap(), &body, &node, false)?;
+    // Validate ordinary uploads exactly as before. A narrowly validated source
+    // diff may be retained for an already cancelled edit so it can be reported.
+
     let metadata = if body["metadata"].is_object() {
         body["metadata"].clone()
     } else {
@@ -2121,6 +2123,30 @@ async fn artifact_upload(
         return Err(ApiError::bad(
             "Inline artifact must be 1 byte through 8 MiB",
         ));
+    };
+    let initial_lease = {
+        let store = state.lock().unwrap();
+        valid_lease(&store, &body, &node, false)
+    };
+    let (ticket, assignment, _) = match initial_lease {
+        Ok(binding) => binding,
+        Err(original) => {
+            let candidate = code_evidence.as_ref().is_some_and(|text| {
+                serde_json::from_str::<Value>(text).is_ok_and(|proof| proof["kind"] == "change")
+            }) && crate::code_evidence::can_upload_cancelled_change(
+                &state.lock().unwrap(),
+                body["ticket_id"].as_str().unwrap_or_default(),
+                body["assignment_id"].as_str().unwrap_or_default(),
+                &node,
+                &metadata,
+                &data,
+            )
+            .map_err(|error| ApiError::denied("cancelled_source_evidence", error.to_string()))?;
+            if !candidate {
+                return Err(original);
+            }
+            valid_lease(&state.lock().unwrap(), &body, &node, true)?
+        }
     };
     let digest = sha256(&data);
     if metadata["sha256"].as_str().is_some_and(|s| s != digest)
@@ -2518,7 +2544,11 @@ pub(crate) async fn report(
         ) {
             return Err(ApiError::bad("Effect status is not recognized"));
         }
-        if requested_state == "unknown" && effect_status == "confirmed" {
+        let cancelled_change = requested_state == "unknown"
+            && cancelled
+            && body["cancel_acknowledged"].as_bool() == Some(true)
+            && crate::code_evidence::is_cancelled_change_request(&store, &artifacts, &effects)?;
+        if requested_state == "unknown" && effect_status == "confirmed" && !cancelled_change {
             return Err(ApiError::conflict(
                 "effect_unknown",
                 "Unknown outcome cannot promote unobserved external effects to confirmed",
@@ -2550,13 +2580,15 @@ pub(crate) async fn report(
             effects_to_insert.push(effect.clone());
         }
     }
-    crate::code_evidence::validate_outcome(
+    crate::code_evidence::validate_outcome_with_evidence(
         &store,
         &ticket,
         &assignment,
         &artifacts,
         &effects,
         requested_state,
+        body["cancel_acknowledged"].as_bool() == Some(true),
+        &body["evidence"],
     )
     .map_err(|error| ApiError::bad(error.to_string()))?;
     let authority_status = if requested_state == "unknown" {
@@ -2574,7 +2606,7 @@ pub(crate) async fn report(
     let tx = store.conn_mut().transaction()?;
     tx.execute(
         "INSERT INTO reports(id,assignment_id,ticket_id,node_id,lease_epoch,request_id,state,summary,evidence,session_ref,cancel_acknowledged,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-        params![report_id,assignment,ticket,node,epoch,request_id,requested_state,body["summary"].as_str().unwrap_or("No summary"),body["evidence"].to_string(),body["session_ref"].as_str(), requested_state == "cancelled",at],
+        params![report_id,assignment,ticket,node,epoch,request_id,requested_state,body["summary"].as_str().unwrap_or("No summary"),body["evidence"].to_string(),body["session_ref"].as_str(), cancelled && body["cancel_acknowledged"].as_bool() == Some(true),at],
     )?;
     for effect in &effects_to_insert {
         tx.execute(

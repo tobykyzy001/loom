@@ -149,6 +149,22 @@ test('fixture file-effect verification is opt-in and reads actual bounded file b
   assert.strictEqual(cancelled.length, 0)
 })
 
+test('missing session evidence leaves a structured unknown Effect, never a fake Session or success', async () => {
+  let body
+  const runner = new LocalNodeRunner({})
+  runner.client = { report: async value => { body = value; return value } }
+  await runner.report({ ticket_id: 'ticket-unknown', id: 'assignment-unknown', lease_epoch: 1 }, {
+    state: 'unknown', digest: 'task-input-digest', summary: 'The actual effect could not be certified.', effects: [], artifacts: [],
+  })
+  assert.equal(body.state, 'unknown')
+  assert.equal(body.cancelAcknowledged, false)
+  assert.equal(body.effects.length, 1)
+  assert.equal(body.effects[0].status, 'unknown')
+  assert.equal(body.effects[0].artifacts.length, 0)
+  assert.equal(body.effects[0].evidence.session_ref, undefined)
+  assert.deepEqual(body.artifactIds, [])
+})
+
 test('a repeated completed Assignment does not execute twice, while its cancellation reaches the active Agent', async () => {
   const completion = Promise.withResolvers()
   const calls = []
