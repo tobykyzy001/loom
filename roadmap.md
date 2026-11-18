@@ -68,6 +68,8 @@
 
 真实独立Edge、Rust中心与LocalNode证明两支不同Source各自创建及duplicate、一次failed Report经显式retry的新Assignment成功、源spec/digest对账、Artifact下载bytes/hash、SQL审计和当前Grant撤销时的old lease fencing；此入口桌面默认UI保留Task/Activity脉络而不再误混入Help面板。390px桌面viewport也测过实际detail/activity/artifact无横向overflow，非移动真机/锁屏/切网测试。`node tests/sources/browser.mjs` 连续两轮通过；`node tests/browser/run.mjs --keep-evidence` 普通read/write/cancel/auth-expiry-recovery也全阶段通过。这里的Proof不是Live LLM、真实IM/OAuth、通用Agent Provider或第二物理宿主/Compose验收；M0及后续里程碑继续保持各自验证边界。
 
+**显示偏好已有同一条真实 Edge 链的专门检查**：全局默认折叠与 Task 自己的展开、再次折叠、刷新恢复相互不串值；并非把任意读取到的 effective bool 固化为本 Ticket 的 override。真正的 Node-authored `session_link` 通过中心读取后仅按显示偏好隐藏/展示，原消息、Ticket/Report/Artifact/Effect ID 与真实文件 hash 不变。各自的 scoped PUT 都有实际200响应与 payload 校验。API仍沿用 schema14 的 `settings.global_expanded` 和 Ticket preference 行，读取额外返回精确 scope/ID/是否有该行，帮助 frontend 区分继承与显式覆盖；不建立新 Grant、消息授权或 Worker 任务。认证失效、同一 Ticket 重复读、切换 Ticket 和 audit/轮询代际由 Vue 专项负例覆盖，见 `apps/web/tests/display-preferences.test.ts`、`tests/browser/run.mjs` 和架构第4.1.1节。这仍非多标签冲突协调、完整 DSH transcript、真手机或整个 M0 完成证明。
+
 ### M0 受限的真实编程样例（已验收，非普遍代码Agent）
 
 已在本机隔离 DSH Profile、owned 干净 Git示例库、真实Rust控制面上完成一个小的 **源码修复及其真实验证**：Agent在当前 write Grant / binding / physical Node-worker / Assignment 下，通过真实 public scoped tool 只把固定`src/calc.js`的一处错误修复，并独立读取实际bytes、原始commit与unified diff；随后只执行固定的 `node --test test/calc.test.js`。每次Attempt交付对应一个实际 diff 与一个验证 Artifact（`loom.code-change.v1`/`loom.code-verification.v1` 的**证据内容**，不是新Ticket授权或通用协议）。

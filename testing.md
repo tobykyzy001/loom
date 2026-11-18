@@ -170,6 +170,7 @@ Compose driver 确认后再发任务：
 | Unknown Outcome | 不可证明的成功进入对账或人工处理，不无条件重跑 |
 | 权限负例 | 越权路径、伪造 Node、错误 Grant digest、过期 Token 和跨 Profile 读取被拒绝并记录 |
 | 会话可见性 | 默认折叠、单任务展开不改变数据；消息可见性与 Artifact 访问权限各自成立 |
+| 偏好作用域（当前真实 Edge 子集） | 没有 Task override 时继承 global；显式折叠和 absent row 不混淆。单任务 PUT 仅带该 Ticket ID，global PUT 不带；四类显示切换与恢复不重写 message/Ticket/Report/Artifact/Effect。偏好读取 401 应为认证失效，403 为该显示的降级而非伪造同步成功。见 `tests/browser/README.md` 与 `apps/web/tests/display-preferences.test.ts` |
 
 正是这些场景决定 Loom 的可靠性，因此不以“Live LLM 不在线”为理由跳过。
 

@@ -52,13 +52,20 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 6. 查权限页 Grant 操作和 Node scope，UI 再提交写任务、Node 实际写文件。
    断言 Artifact JSON、正文落盘、SHA-256、confirmed Effect（API evidence 是 JSON
    字符串，显式 parse）及 Assignment/Lease/Grant 关系展开。
-7. 新建 write ticket，不轮询之前点真实“取消任务”和确认按钮，必须看到
+7. 在已归属的 write Ticket/Assignment 上，通过现有 `node.client.event` 发送一条
+   真实 Node-authored `session_link` 过程消息，并经实际 Rust 中心化保存与读取。
+   在 Activity 的协作页验证初态折叠、单任务展开→收起→再展开、单独全局
+   默认不串值、刷新恢复；每次动作等待精确 Ticket/Global scope 的 PUT 响应。
+   SQL、Ticket/Report/Artifact/Effect ID 集合与真实文件 hash 在折叠后不变。
+   这里的消息是用于验证展示协议的普通本地 Node记录，**不是**伪造的
+   DSH transcript，也不代表完整 Harness 交流均已接入。
+8. 新建 write ticket，不轮询之前点真实“取消任务”和确认按钮，必须看到
    “取消意图已记录”。随后 Node 承认取消，并断言 `cancelled`、无 Artifact、
    无目标文件。Center 将 ack 映射为 `true` 或 `1` 均是已有真实表现。
-8. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
+9. `--narrow-viewport` 只改变真实 Chromium viewport 到 390x844，检查无横向
    overflow。不是手机、锁屏、触屏、换网或 accessibility 验收。
-9. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
-   已不可用”的错误绿灯。
+10. 桌面还检查实际 Ticket 宽度和非活动 Help 不可见，防止“DOM 有文字但是布局
+    已不可用”的错误绿灯。
 
 除初始 Heartbeat 外，读取/写入/取消前各显式 heartbeat + poll：共 4 次 heartbeat、
 3 个确定性执行。不存在自动付费模型调用或长期主 loop。

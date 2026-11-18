@@ -152,6 +152,7 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 - 外部 Connector 必须显式声明支持操作与平台依赖；不支持的取消、事件或 Transcript 能力显示为缺口。
 - 平台文件路径、进程 / 服务、凭据库、目录 ACL 分离到桌面适配，不假设 `POSIX == Windows`，也不假设可以一条 Shell 跨平台。
 - Vue 消费版本化 API 而不是直接读取中心数据库。共享领域组件与平台外壳适配分开，适配键盘、触摸、断线、认证过期和窄屏。
+- 全局显示默认与 Ticket 自己覆盖必须按同一 scope 的偏好 GET/PUT 分离。现有 GET 额外返回 `scope`、精确 `ticket_id`、`has_override`，用于区分无 row 的 global 继承与实际显式选择；不改变 schema14 或任务权限。读取401进入认证失效，403/未知旧字段仅提示同步不可用，不伪造自己的本地 override。过程折叠不删除消息或证据；审计/轮询需校验已加载Ticket身份。当前实现、代际与审查边界见 architecture.md 第4.1.1节。
 - Web / PWA、Tauri 或薄原生壳的更新不得成为未签名或未授权的静默副作用。
 
 ## 7. 修改和验证协议
