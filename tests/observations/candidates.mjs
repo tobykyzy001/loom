@@ -72,6 +72,34 @@ try {
   ]) {
     await assert.rejects(() => post('/candidates', { project_id: projectId, kind: 'memory', ...input }), error => error.message.includes(reason), `${label}: expected ${reason}`)
   }
+  // A source reference is a durable claim of origin, not an optional user string.
+  // Project memory may cite only that project's actual Ticket; independent
+  // explicit Remember without any source remains valid and is separately deleted.
+  const auditBefore = await get('/audit')
+  for (const [source_ticket_id, reason, expectedStatus] of [
+    [other.id, 'belongs to another project, not this Memory', 400],
+    ['tkt_not_a_real_source', 'Source Ticket not found', 404],
+    [7, 'source_ticket_id', 400],
+  ]) {
+    await assert.rejects(() => post('/memories', { project_id: projectId, scope: 'project',
+      content: 'A bounded project preference with an invalid origin', source_ticket_id }),
+      error => error.status === expectedStatus && new RegExp(reason).test(error.message), `Rejected a forged direct Memory source: ${reason}`)
+    assert.equal((await get('/memories')).memories.length, 0, 'Rejected provenance must leave no visible Memory')
+    assert.deepEqual(await get('/audit'), auditBefore, 'A rejected Memory source cannot write memory.explicit_saved or any corresponding audit mutation')
+  }
+  const sourcedMemory = await post('/memories', { project_id: projectId, scope: 'project',
+    content: 'A real explicit Memory may refer to a same-project Ticket', source_ticket_id: firstSource })
+  assert.equal(sourcedMemory.grant_created, false)
+  let directMemory = (await get('/memories')).memories.find(memory => memory.id === sourcedMemory.id)
+  assert.equal(directMemory.project_id, projectId)
+  assert.equal(directMemory.source_ticket_id, firstSource)
+  await admin.request('DELETE', `/api/v1/memories/${sourcedMemory.id}`)
+  const unboundMemory = await post('/memories', { project_id: projectId, scope: 'project',
+    content: 'An explicit standalone preference does not require the user to explain a source Ticket' })
+  directMemory = (await get('/memories')).memories.find(memory => memory.id === unboundMemory.id)
+  assert.equal(directMemory.project_id, projectId)
+  assert.equal(directMemory.source_ticket_id, null)
+  await admin.request('DELETE', `/api/v1/memories/${unboundMemory.id}`)
   assert.equal((await get('/memories')).memories.length, 0)
   assert.equal((await get('/candidates')).candidates.length, 0)
   assert.equal((await get('/grants')).grants.length, 2)
@@ -182,7 +210,7 @@ try {
   assert.equal((await get('/memories')).memories.length, 0)
   assert.equal((await get('/candidates')).candidates.filter(row => row.id.startsWith('candidate_')).length, 3 + Number(process.argv.includes('--browser')))
   assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'SELECT COUNT(*) FROM candidate_memory_links'), 0)
-  assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 11)
+  assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 14)
   assert.equal((await get('/audit/verify')).valid, true)
 
   const initialToken = server.clientToken
@@ -194,7 +222,7 @@ try {
   assert.equal((await reopenAdmin.get('/api/v1/memories')).memories.length, 0)
   assert.equal((await reopenAdmin.get('/api/v1/audit/verify')).valid, true)
   console.log(JSON.stringify({ overall: 'PASS', source_and_expiry_checks: true, real_derived_memory_and_link: true, undo_does_not_duplicate: true, never_does_not_suggest_again: true,
-    route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: 11,
+    route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: 14,
     no_generic_learning_or_automatic_listener: true, uses_real_registered_node_and_http: true, browser: browserProof, root }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: String(error.stack || error), fixture_root: root, controller: server?.diagnostics() }, null, 2))

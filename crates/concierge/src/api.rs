@@ -3834,9 +3834,27 @@ async fn create_memory(
             "Project memory must have an explicit valid project",
         ));
     }
-    store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at,source_ticket_id) VALUES(?1,?2,?3,?4,1,?5,?5,?6)",params![id,project,content,scope,now(),body["source_ticket_id"].as_str()])?;
+    // An explicit origin reference is a persisted relationship, not a freeform UI label.
+    // A missing source remains valid for an independent user-saved preference;
+    // validating provenance does not grant any execution authority over that Ticket.
+    let source_ticket_id = match body.get("source_ticket_id") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(required(&body, "source_ticket_id", 160)?),
+    };
+    if let Some(source) = source_ticket_id {
+        let ticket = store
+            .get("tickets", source)?
+            .ok_or_else(|| ApiError::missing("Source Ticket not found"))?;
+        let source_project = ticket["project_id"].as_str();
+        if (scope == "project" || project.is_some()) && source_project != project {
+            return Err(ApiError::bad(
+                "Memory source Ticket belongs to another project, not this Memory",
+            ));
+        }
+    }
+    store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at,source_ticket_id) VALUES(?1,?2,?3,?4,1,?5,?5,?6)",params![id,project,content,scope,now(),source_ticket_id])?;
     store.audit(
-        body["source_ticket_id"].as_str(),
+        source_ticket_id,
         "client",
         "memory.explicit_saved",
         &json!({"memory_id":id,"scope":scope}),

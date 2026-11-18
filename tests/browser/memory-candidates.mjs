@@ -106,6 +106,50 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.equal((await readCandidate(rootId)).status, 'accepted')
     assert.equal((await memories()).length, 1)
     await dialog.waitFor({ state: 'hidden' })
+    // The preference is explicitly edited after candidate acceptance. Its original
+    // provenance and exact link are not silently rewritten into a new origin.
+    const acceptedProjection = await readCandidate(rootId)
+    const firstSourceId = (typeof acceptedProjection.source_refs === 'string' ? JSON.parse(acceptedProjection.source_refs) : acceptedProjection.source_refs)[0]
+    const savedBeforeEdit = (await memories())[0]
+    assert.equal(savedBeforeEdit.source_ticket_id, firstSourceId)
+    await page.locator('.memory-list .memory-item').getByRole('button', { name: '编辑记忆', exact: true }).click()
+    const correctedText = 'User corrected preference, preserving the original conservative source'
+    await page.locator('#memory-content').fill(correctedText)
+    await page.locator('#memory-scope').selectOption('user')
+    const savedEdit = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === `/api/v1/memories/${savedBeforeEdit.id}`)
+    await page.getByRole('button', { name: '保存修改', exact: true }).click()
+    const editResponse = await savedEdit
+    assert.equal(editResponse.status(), 200)
+    const editBody = editResponse.request().postDataJSON()
+    assert.equal(editBody.scope, 'user')
+    assert.equal(editBody.project_id, null)
+    assert.equal(Object.hasOwn(editBody, 'source_ticket_id'), false, 'Manual edit does not invent a new Ticket origin')
+    const editedMemory = (await memories())[0]
+    assert.equal(editedMemory.id, savedBeforeEdit.id)
+    assert.equal(editedMemory.content, correctedText)
+    assert.equal(editedMemory.scope, 'user')
+    assert.equal(editedMemory.project_id, null)
+    assert.equal(editedMemory.source_ticket_id, firstSourceId)
+    const preservedCandidate = await readCandidate(rootId)
+    assert.equal(preservedCandidate.status, 'accepted')
+    assert.equal(preservedCandidate.derived_memory_id, editedMemory.id)
+    const originalSourceRefs = typeof acceptedProjection.source_refs === 'string' ? JSON.parse(acceptedProjection.source_refs) : acceptedProjection.source_refs
+    assert.deepEqual(typeof preservedCandidate.source_refs === 'string' ? JSON.parse(preservedCandidate.source_refs) : preservedCandidate.source_refs, originalSourceRefs)
+    const manualDelete = page.waitForResponse(response => response.request().method() === 'DELETE'
+      && new URL(response.url()).pathname === `/api/v1/memories/${savedBeforeEdit.id}`)
+    await page.locator('.memory-list .memory-item').getByRole('button', { name: '删除记忆', exact: true }).click()
+    await dialog.getByRole('button', { name: '删除这条记忆', exact: true }).click()
+    const removal = await manualDelete
+    assert.equal(removal.status(), 200)
+    assert.equal((await removal.json()).candidate_withdrawal, true)
+    assert.deepEqual(await memories(), [])
+    assert.equal((await readCandidate(rootId)).status, 'pending')
+    const reopened = await review(card('Concise reports with citations'), '审阅后保存', '确认保存这条偏好')
+    assert.equal(reopened.status, 'accepted')
+    assert.notEqual(reopened.derived_memory_id, savedBeforeEdit.id)
+    assert.equal((await memories()).length, 1)
+    assert.equal((await memories())[0].source_ticket_id, firstSourceId)
     await page.getByRole('combobox', { name: '审核候选项过滤', exact: true }).selectOption('accepted')
     const accepted = card('Concise reports with citations')
     await accepted.getByRole('button', { name: '撤回保存的偏好', exact: true }).waitFor()
@@ -208,10 +252,12 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     const body = await page.locator('body').innerText()
     assert.ok(!body.includes(server.clientToken))
     await page.screenshot({ path: join(root, 'memory-pending-narrow.png'), fullPage: true })
-    assert.deepEqual(reviewRequests.map(request => request.decision), ['accept', 'undo', 'later', 'never', 'undo', 'accept', 'undo'])
+    assert.deepEqual(reviewRequests.map(request => request.decision), ['accept', 'accept', 'undo', 'later', 'never', 'undo', 'accept', 'undo'])
     assert.deepEqual(logs, [], `Unexpected browser error: ${logs.join('\n')}`)
     assert.equal((await controller.get('/api/v1/grants')).grants.length, 2, 'No review action invents a new Grant')
     return { actual_ui_candidate_accept: true, actual_ui_withdraw: true,
+      explicit_ui_edit_preserves_original_source_link: true,
+      explicit_ui_delete_withdraws_only_same_linked_memory: true,
       later_and_never_restore: true, rejected_history_read_only: true,
       refresh_failure_remains_visible_and_recovers: true,
       actual_backend_snapshot_matches_ui: true,

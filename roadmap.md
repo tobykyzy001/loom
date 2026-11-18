@@ -45,7 +45,7 @@
 
 这并不等同于完整 M0 完成。下述状态在没有对应证据前均不能视为已完成：
 
-- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复；隔离 DSH Profile 的真实安装/Agent工具任务/取消/Session重启恢复也已验证；独立真实桌面浏览器8阶段与受限 Agent 文件 Tool Effect亦有证据，但这些仍不是完整 M0 业务与多端验收；
+- 已通过真实 HTTP 的确定性读写、取消/失败、重放与恢复；隔离 DSH Profile 的真实安装/Agent工具任务/取消/Session重启恢复也已验证；当前独立真实桌面浏览器完整链已达11阶段（含偏好、正常取消、撤权及重试确认期间撤权）与受限 Agent 文件 Tool Effect亦有证据，详见 [tests/browser/README.md](tests/browser/README.md)，但这些仍不是完整 M0 业务与多端验收；
 - 受限文档流水线已真实跑通（`read_summary` → 四种允许的文本变换之一 → `edit_file`），包含两张精确Grant 的下发、真实Artifact 接收转换、Node作用域校验、不可变谱系、重复执行保护和中心恢复。这里仍然只是当前受限场景，不能当作后面模型生命周期、任意 DAG、跨机部署、通用 Harness 或 M6 已完成；
 - 已有最小 Host / Project / ResourceBinding / Grant Registry 与 `loom.inventory.v1` 的事实矩阵、来源/freshness 和 PlacementDecision；现有单一隔离 DSH `loom-stub/loom-stub-v1` 文本 SDK adapter observation 的真实 heartbeat 只读投影，匹配已认证 Node/Installation/Worker、保留源时间并拒绝其他provider/模态/授权包装；多心跳不重复prepare，未调用stream/生成或产Grant，控制面HTTP重启后一致。`model-inventory`只是观测，`tests/model-inventory/browser.mjs`另已让设备视图在真实Edge中根据认证心跳的projection显示 Node/Worker、text/context/source与未激活边界；仅读没有模型POST/Grant，390 viewport没有溢出。尚不支持download/install/activate/general_provider_registry、通用 Model Registry、真实模型生命周期、跨 Host 大 Artifact 直传和完整设备能力发现的全平台验证；
 - 已完成受限 `model_descriptor` 本地文件读取、proof Artifact 原始字节 SHA 与完整 metadata 注册/独立 `place_model` 批准/撤销/撤档和 SQLite v9 重启保留；真实 `tests/models/local-descriptor.mjs` 通过，输出始终 `registered` 或“批准的放置元数据（未运行）”，并非安装/加载/模型推理。Provider Registry、模型执行与下载部署尚未支持，只有冻结的本地文本 descriptor 元数据 chain，详见 [tests/models/README.md](tests/models/README.md)；
@@ -115,7 +115,10 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 
 ## 3. 里程碑
 
-### M0 — 单机任务闭环与会话可控
+**显式Memory来源现在是经过中心核验的关系。** 项目Memory不能把另一个项目的Ticket直接从客户端填入source_ticket_id；未知ID明确404、bogus数字字段拒绝且不写入任何Memory/审计。合法同项目引用、完全不引用历史的独立Memory、既有项目／用户scope编辑、linked Candidate撤销与再次接受均保留真实流程。候选撤回编辑后的Memory仍使用同一关联事务，没有自动学习、借引用来激活Ticket或创建新的执行Grant。实浏览器另已走过接受→显式project→user编辑且保留出处→直接删除linkedMemory使候选pending→再次接受新ID。另有先前driver没有随当前存储schema14同步更新而失败的问题已修正，当前重启重新读取schema14，而不是沿用user_version11的旧断言。`POST /memories`仍保留allowed optional source，校验来源本身不意味着原Ticket已成功或可继续执行。普通Memory编辑／删除的独立action审计仍缺一项，另列M0补片，不能将candidate-withdrawn现有审计混称为每个用户改动都有审计。
+详见 [tests/observations/README.md](tests/observations/README.md)。
+
+## M0 — 单机任务闭环与会话可控
 
 **要证明什么**
 

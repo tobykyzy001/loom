@@ -172,6 +172,7 @@ Compose driver 确认后再发任务：
 | 权限负例 | 越权路径、伪造 Node、错误 Grant digest、过期 Token 和跨 Profile 读取被拒绝并记录 |
 | 重试确认框已打开、随后撤权（当前真实 Edge 子集） | 已形成的失败报告不能因打开过确认框而占用旧Grant。真正撤销原Grant后才点击确认，实际400 grant-revoked，原attempt/assignment/digest/Report和已交付bytes仍在。无新Assignment、Report、Artifact、Effect或后续Node执行；所有原Ticket ID仍存在，数量仅增加预期的失读Ticket。模态显示实际错误与返回检查，无另一个Grant被换成执行权限，也不是cancel_requested/native abort证明。见`tests/browser/README.md`与`run.mjs` |
 | 撤权的普通未领取工作（当前真实 Edge 子集） | 用户 UI 确认同一Grant撤销，版本/revoked_at与权威资源刷新一致，而不是只看按钮消失。 Ticket保持reconciling且cancel_requested=false，Assignment尚未acknowledged，旧Lease不续、旧报告/字节仍在。连续两次Node poll均返回assignment:null，executor/outbox/Report/Artifact/Effect/目标文件均无新产生。旧Grant的合法形状复用必须403且不新增Ticket。快照刷新失败不能回收中心已确认撤权的语义或声称列表当前有效；见`tests/browser/run.mjs` |
+| Memory来源与精确撤回（当前受限Rust+真实Edge子集） | `source_ticket_id`如果提供，只能是实际存在的Ticket；显式 project必须与原票据同项目。伪造关联、未知404、非文本拒绝均不得创建Memory或对应审计；无来源Memory仍允许。真实UI编辑后不伪造来源或候选创建，删除同一linkedMemory使原候选pending，又是新ID而不是恢复旧ID。原Ticket/Grant、原候选source_refs保持不变，schema14重启可用。见`tests/observations/README.md`。普通独立Memory编辑/删除的专门审计尚未补齐，不把此记录冒充已经存在 |
 | 会话可见性 | 默认折叠、单任务展开不改变数据；消息可见性与 Artifact 访问权限各自成立 |
 | 偏好作用域（当前真实 Edge 子集） | 没有 Task override 时继承 global；显式折叠和 absent row 不混淆。单任务 PUT 仅带该 Ticket ID，global PUT 不带；四类显示切换与恢复不重写 message/Ticket/Report/Artifact/Effect。偏好读取 401 应为认证失效，403 为该显示的降级而非伪造同步成功。见 `tests/browser/README.md` 与 `apps/web/tests/display-preferences.test.ts` |
 
