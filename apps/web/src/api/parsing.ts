@@ -59,6 +59,7 @@ export interface ArtifactDownloadScope {
   assignmentId?: string
   sha256?: string
   sizeBytes?: number
+  encoding?: 'utf8' | 'base64'
 }
 
 export function artifactFrom(value: unknown, expected?: ArtifactDownloadScope): ArtifactContent {
@@ -79,8 +80,16 @@ export function artifactFrom(value: unknown, expected?: ArtifactDownloadScope): 
       || (expected.sizeBytes !== undefined && metadata.size_bytes !== expected.sizeBytes)) {
       throw new Error('Artifact response does not belong to the requested Ticket, Artifact, source worker and immutable SHA')
     }
-    if (typeof result.content !== 'string') throw new Error('Artifact response must contain its actual bounded text bytes')
-    if (result.encoding !== undefined && result.encoding !== 'utf8') throw new Error('This Artifact viewer only supports an explicitly declared UTF-8 text response')
+    if (typeof result.content !== 'string') throw new Error('Artifact response must contain its actual bounded bytes')
+    const declaredEncoding = result.encoding === undefined ? 'utf8' : result.encoding
+    const expectedEncoding = expected.encoding ?? 'utf8'
+    if (expectedEncoding === 'base64' && result.truncated !== false) {
+      throw new Error('An original-byte download requires an explicit truncated:false response')
+    }
+    if (declaredEncoding !== expectedEncoding) {
+      if (expectedEncoding === 'base64') throw new Error('This byte download requires the explicit bounded base64 encoding')
+      throw new Error('This Artifact viewer only supports an explicitly declared UTF-8 text response')
+    }
   }
   return {
     metadata,

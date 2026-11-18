@@ -8,6 +8,7 @@ import { SkillActions, type SkillWorkspaceReference } from '../lib/skillActions'
 import { InstallPlanActions, type InstallPlanRefresh } from '../lib/installPlan'
 import { modelReadError, parseModelInventory } from '../lib/modelInventory'
 import { canRetryTicket } from '../lib/retryControl'
+import { handOffArtifactDownload, verifyArtifactBytes, type ArtifactByteFile } from '../lib/artifactDownload'
 export interface WorkspaceState {
   page: Page
   installPlans: InstallPlan[]
@@ -802,6 +803,47 @@ export async function loadArtifact(ticketId: string, artifact: ArtifactRef) {
   if (result && version === detailVersion && state.selectedTicketId === ticketId && state.ticket?.id === ticketId
     && state.ticket.artifacts?.some(item => item.artifact_id === artifactId && item.sha256 === listed.sha256 && item.origin_node_id === listed.origin_node_id)) {
     state.artifacts = { ...state.artifacts, [artifactId]: result }
+  }
+}
+
+export async function downloadArtifact(ticketId: string, artifact: ArtifactRef): Promise<ArtifactByteFile | null> {
+  const artifactId = typeof artifact?.artifact_id === 'string' ? artifact.artifact_id : ''
+  const errorKey = artifactId ? `artifact-download:${artifactId}` : 'artifact-download:unidentified'
+  const listed = state.selectedTicketId === ticketId && state.ticket?.id === ticketId
+    ? state.ticket.artifacts?.find(item => item.artifact_id === artifactId) : undefined
+  if (!listed || listed.sha256 === undefined || listed.size_bytes === undefined) {
+    state.errors[errorKey] = '缺少当前Ticket中已验证Artifact的身份、SHA或字节长度，未生成下载文件。'
+    return null
+  }
+  const snapshot = JSON.stringify(listed)
+  const version = detailVersion
+  const result = await run(`artifact-download:${artifactId}`, async () => {
+    const value = await client.get<unknown>(`/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(artifactId)}?encoding=base64`)
+    const parsed = artifactFrom(value, {
+      ticketId, artifactId, originNodeId: listed.origin_node_id,
+      assignmentId: (listed as ArtifactRef & { assignment_id?: string }).assignment_id,
+      sha256: listed.sha256, sizeBytes: listed.size_bytes, encoding: 'base64',
+    })
+    return verifyArtifactBytes(parsed.content, parsed.metadata, parsed.truncated)
+  }).catch(error => {
+    // A browser Blob/click error belongs only to this explicit byte action. It
+    // must not silently turn into a text-view success or become a URL retained forever.
+    state.errors[errorKey] = error instanceof Error ? error.message : '原始字节下载未能完成。'
+    return null
+  })
+  if (!result) return null
+  if (version !== detailVersion || state.selectedTicketId !== ticketId || state.ticket?.id !== ticketId
+    || JSON.stringify(state.ticket.artifacts?.find(item => item.artifact_id === artifactId)) !== snapshot) {
+    state.errors[errorKey] = '读取期间已切换Ticket或Artifact快照已改变，未交付已失效的下载内容。'
+    return null
+  }
+  try {
+    handOffArtifactDownload(result)
+    state.errors[errorKey] = ''
+    return result
+  } catch (error) {
+    state.errors[errorKey] = error instanceof Error ? error.message : '浏览器未能开始原始字节下载。'
+    return null
   }
 }
 

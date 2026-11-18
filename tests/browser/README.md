@@ -144,7 +144,13 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 
 临时损坏了哪些byte/file和storage_name均会明确恢复原状；outside sibling对照的原始bytes 也仅来自owned fixture固定runtime，不是当前用户其它目录或凭据。保留的7张真实截图仍是原职掌各阶段的截图，**不要**把没专门捕获的新byte错误卡截图说成随报告保存。非UTF-8的精确HTTP code、真实payload和native Vue正文空断言在result.json而不是靠“看截图是否像UTF-8”验证。
 
-最终实际身份与namespace属于**center权威**；浏览器只按当前工单快照校验下载响应，不制造permission、Grant 或 Assignment。当前reader只处理实际UTF-8纯文本，非UTF-8拒绝可保留原byte记录而没有所谓“failed text completion”。通用binary传输、跨Principal授权服务、Windows/TOCTOU或真实手机依然均未验证。
+最终实际身份与namespace属于**center权威**；浏览器只按当前工单快照校验下载响应，不制造permission、Grant 或 Assignment。默认reader只处理实际UTF-8纯文本，非UTF-8拒绝可保留原byte记录而没有所谓“failed text completion”。同一端点也可**显式请求 `?encoding=base64`**，以同一owner/path/hash约束交付不超过8MiB的完整原始bytes，既有未知/重复encoding值会400，实际过大文件有409 `artifact_too_large`。
+
+这项原始byte下载与文本缓存、错误域分离。浏览器要求字面 `truncated:false`，校验canonical编码（包括非规范unused pad bits）、逐块decoded实际bytes、WebCrypto SHA-256和预期size；原始bytes不会放进纯文本/CodeArtifactView。切票、详情代际或目标snapshot变化后不创建ObjectURL。只有sanitized持久化name成为下载filename，`storage_name`不能当保存路径；临时Blob只挂`a[download]`，随后remove/revoke，不渲染/执行HTML/SVG/PDF，也不宣称JS click本身就证明保存成功。
+
+**真实落盘证据**见 [最终完整13阶段报告](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-29qqRG/result.json)：它使用真实Node在既有Assignment有效lease上传的合法3字节附件，先保留正文本UTF-8错误，再在实际`artifact-item`点击“下载原始字节”，等真实Edge下载事件和`bounded-non-utf8.bin`文件名，保存到owned `owned-artifact-download/`子目录，随后独立读出正好 `[ff,fe,00]`、SHA `ba778c0261008c8f71ae4061ad0162ffcbe63b52c91f89f236738131d1217ec7`。可打开[这份实际字节文件](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-29qqRG/owned-artifact-download/bounded-non-utf8.bin)；不是把rendered文件预览称作binary。原Report/Effect/Assignment/Grant/digest和完整后续撤权/认证链保持。最终Vue **20files/148 tests**、Node24以及Rust workspace（Concierge 109 + 2 integration）和clippy均过，另有新的九项byte边界/代际测试。独立review初返REJECT后，canonical pad bits与required truncated:false已修复，再由review ACCEPT。
+
+这仍**不是**Range/resumable大数据流、跨物理Host取源、任意HTML/SVG/PDF执行、生产磁盘整体验证、多个principal授权服务、Windows/TOCTOU或真手机断点恢复。三byte上传附件在既有证据中没有新Agent执行，只有可核验原附件的独立读取与用户保存。
 
 ## 截图、日志、进程回收
 

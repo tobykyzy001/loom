@@ -12,6 +12,9 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Read;
+
+const MAX_INLINE_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
@@ -23,13 +26,20 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use tower::ServiceExt;
-    async fn artifact_response(app: &Router, ticket: &str, artifact: &str) -> (StatusCode, Value) {
+    async fn artifact_response_with_query(
+        app: &Router,
+        ticket: &str,
+        artifact: &str,
+        query: &str,
+    ) -> (StatusCode, Value) {
         let response = app
             .clone()
             .oneshot(
                 axum::extract::Request::builder()
                     .method("GET")
-                    .uri(format!("/api/v1/tickets/{ticket}/artifacts/{artifact}"))
+                    .uri(format!(
+                        "/api/v1/tickets/{ticket}/artifacts/{artifact}{query}"
+                    ))
                     .header(
                         header::AUTHORIZATION,
                         "Bearer artifact-reader-test-token-12345",
@@ -49,12 +59,17 @@ mod tests {
         (status, body)
     }
 
+    async fn artifact_response(app: &Router, ticket: &str, artifact: &str) -> (StatusCode, Value) {
+        artifact_response_with_query(app, ticket, artifact, "").await
+    }
+
     #[tokio::test]
     async fn artifact_read_binds_scope_path_integrity_and_utf8() {
         const TOKEN: &str = "artifact-reader-test-token-12345";
         const ARTIFACT_ID: &str = "11111111-1111-4111-8111-111111111111";
         const BINARY_ID: &str = "22222222-2222-4222-8222-222222222222";
-        const GOOD: &[u8] = b"owned artifact text\nwith exact UTF-8 bytes\n";
+        const OVERSIZED_ID: &str = "44444444-4444-4444-8444-444444444444";
+        const GOOD: &[u8] = "owned artifact text\nwith exact UTF-8 bytes: ✓ 中文\n".as_bytes();
         let directory = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(directory.path()).unwrap();
         store
@@ -82,6 +97,29 @@ mod tests {
         };
         seed_artifact(ARTIFACT_ID, GOOD, "owned.txt");
         seed_artifact(BINARY_ID, &[0xff, 0xfe, 0x00], "binary-fixture.txt");
+        let oversized = vec![0xa5; MAX_INLINE_ARTIFACT_BYTES + 1];
+        seed_artifact(OVERSIZED_ID, &[0xa5], "oversized.bin");
+        std::fs::write(
+            store
+                .root
+                .join("artifacts")
+                .join(format!("{OVERSIZED_ID}.artifact")),
+            &oversized,
+        )
+        .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET size_bytes=?2,sha256=?3 WHERE id=?1",
+                params![
+                    OVERSIZED_ID,
+                    MAX_INLINE_ARTIFACT_BYTES as i64,
+                    sha256(&oversized)
+                ],
+            )
+            .unwrap();
+        // The physical file is one byte larger than its declared cap-sized
+        // record, with a matching digest for all actual bytes.
         let state = Arc::new(State {
             store: Arc::new(Mutex::new(store)),
             bootstrap_token: TOKEN.into(),
@@ -125,12 +163,42 @@ mod tests {
         assert_eq!(body["truncated"], false);
         assert_eq!(body["artifact"]["code_evidence"], Value::Null);
         assert!(body["artifact"].get("code_evidence_json").is_none());
+
+        for query in ["", "?encoding=utf8"] {
+            let (status, body) =
+                artifact_response_with_query(&app, "ticket", ARTIFACT_ID, query).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            assert_eq!(body["encoding"], "utf8");
+            assert_eq!(body["size_bytes"], GOOD.len());
+            assert_eq!(body["content"].as_str().unwrap().as_bytes(), GOOD);
+            let (status, base64) =
+                artifact_response_with_query(&app, "ticket", ARTIFACT_ID, "?encoding=base64").await;
+            assert_eq!(status, StatusCode::OK, "{base64}");
+            assert_eq!(base64["encoding"], "base64");
+            assert_eq!(base64["truncated"], false);
+            assert_eq!(base64["size_bytes"], GOOD.len());
+            assert_eq!(base64["artifact"]["sha256"], sha256(GOOD));
+            assert_eq!(base64["artifact"]["size_bytes"], GOOD.len());
+            assert_eq!(
+                STANDARD
+                    .decode(base64["content"].as_str().unwrap())
+                    .unwrap(),
+                GOOD
+            );
+        }
         let (status, missing) =
             artifact_response(&app, "ticket", "33333333-3333-4333-8333-333333333333").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
         assert_eq!(missing["error"]["code"], "not_found");
 
         let (status, body) = artifact_response(&app, "other-ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_scope");
+        assert!(body.get("content").is_none());
+        assert!(!body.to_string().contains("owned artifact text"));
+        let (status, body) =
+            artifact_response_with_query(&app, "other-ticket", ARTIFACT_ID, "?encoding=base64")
+                .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["error"]["code"], "artifact_scope");
         assert!(body.get("content").is_none());
@@ -168,6 +236,11 @@ mod tests {
         let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         location_error(&body);
+        let (status, body) =
+            artifact_response_with_query(&app, "ticket", ARTIFACT_ID, "?encoding=base64").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        location_error(&body);
+        assert!(body.get("content").is_none());
         for invalid_location in [
             "",
             ".",
@@ -196,6 +269,11 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "artifact_integrity");
         assert!(body.get("content").is_none());
+        let (status, body) =
+            artifact_response_with_query(&app, "ticket", ARTIFACT_ID, "?encoding=base64").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_integrity");
+        assert!(body.get("content").is_none());
         update_metadata("sha256", Value::from(7));
         let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -205,6 +283,28 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "artifact_integrity");
         update_metadata("sha256", Value::from(sha256(GOOD)));
+        for invalid_size in [-1, MAX_INLINE_ARTIFACT_BYTES as i64 + 1] {
+            update_metadata("size_bytes", Value::from(invalid_size));
+            for query in ["", "?encoding=base64"] {
+                let (status, body) =
+                    artifact_response_with_query(&app, "ticket", ARTIFACT_ID, query).await;
+                assert_eq!(
+                    status,
+                    StatusCode::CONFLICT,
+                    "{invalid_size} {query}: {body}"
+                );
+                assert_eq!(body["error"]["code"], "artifact_integrity");
+                assert!(body.get("content").is_none());
+                assert!(body["error"]["message"].as_str().unwrap().len() < 160);
+            }
+        }
+        update_metadata("size_bytes", Value::from(GOOD.len()));
+        update_metadata("size_bytes", Value::from(GOOD.len() - 1));
+        let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_integrity");
+        assert!(body.get("content").is_none());
+        update_metadata("size_bytes", Value::from(GOOD.len()));
         std::fs::write(&path, GOOD).unwrap();
         std::fs::remove_file(&path).unwrap();
         let (status, body) = artifact_response(&app, "ticket", ARTIFACT_ID).await;
@@ -224,6 +324,54 @@ mod tests {
             .contains("plain text"));
         assert!(body.get("content").is_none());
         assert!(!body.to_string().contains('�'));
+        let (status, body) =
+            artifact_response_with_query(&app, "ticket", BINARY_ID, "?encoding=utf8").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "artifact_encoding");
+        assert!(body.get("content").is_none());
+        let (status, body) =
+            artifact_response_with_query(&app, "ticket", BINARY_ID, "?encoding=base64").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["content"], "//4A");
+        assert_eq!(body["encoding"], "base64");
+        assert_eq!(body["truncated"], false);
+        assert_eq!(body["size_bytes"], 3);
+        assert_eq!(body["artifact"]["size_bytes"], 3);
+        assert_eq!(body["artifact"]["sha256"], sha256([0xff, 0xfe, 0x00]));
+        assert_eq!(
+            STANDARD.decode(body["content"].as_str().unwrap()).unwrap(),
+            [0xff, 0xfe, 0x00]
+        );
+
+        for query in [
+            "?encoding=latin1-sensitive",
+            "?encoding=",
+            "?encoding=UTF8",
+            "?encoding=base64&unknown=value",
+            "?unknown=value",
+            "?encoding=utf8&encoding=base64",
+            "?encoding=base64&encoding=base64",
+        ] {
+            let (status, body) =
+                artifact_response_with_query(&app, "ticket", BINARY_ID, query).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+            assert!(body.get("content").is_none());
+            assert!(body["error"]["message"].as_str().unwrap().len() < 160);
+            assert!(!body.to_string().contains("sensitive"));
+            assert_eq!(
+                state.lock().unwrap().detail("ticket").unwrap()["status"],
+                "pending"
+            );
+        }
+        for query in ["", "?encoding=base64"] {
+            let (status, body) =
+                artifact_response_with_query(&app, "ticket", OVERSIZED_ID, query).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{query}: {body}");
+            assert_eq!(body["error"]["code"], "artifact_too_large");
+            assert!(body.get("content").is_none());
+            assert!(body["error"]["message"].as_str().unwrap().len() < 160);
+        }
         assert_eq!(
             state.lock().unwrap().detail("ticket").unwrap()["status"],
             "pending"
@@ -247,7 +395,7 @@ mod tests {
                 .query("SELECT id FROM artifacts", [])
                 .unwrap()
                 .len(),
-            2
+            3
         );
     }
 
@@ -3004,7 +3152,7 @@ async fn artifact_upload(
     let data = STANDARD
         .decode(bytes_base64)
         .map_err(|_| ApiError::bad("Canonical base64 artifact required"))?;
-    if data.is_empty() || data.len() > 8 * 1024 * 1024 {
+    if data.is_empty() || data.len() > MAX_INLINE_ARTIFACT_BYTES {
         return Err(ApiError::bad(
             "Inline artifact must be 1 byte through 8 MiB",
         ));
@@ -3562,10 +3710,84 @@ fn artifact_storage_path(store_root: &Path, artifact: &Value) -> ApiResult<PathB
     Ok(path)
 }
 
+#[derive(Clone, Copy, Default)]
+enum ArtifactEncoding {
+    #[default]
+    Utf8,
+    Base64,
+}
+
+impl ArtifactEncoding {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf8",
+            Self::Base64 => "base64",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactReadQuery {
+    #[serde(default)]
+    encoding: Option<String>,
+}
+
+fn artifact_size(artifact: &Value) -> ApiResult<u64> {
+    artifact["size_bytes"].as_u64().ok_or_else(|| {
+        ApiError::conflict(
+            "artifact_integrity",
+            "Artifact size metadata is invalid; content was not returned",
+        )
+    })
+}
+
+fn artifact_sha256(artifact: &Value) -> ApiResult<&str> {
+    artifact["sha256"].as_str().ok_or_else(|| {
+        ApiError::conflict(
+            "artifact_integrity",
+            "Artifact digest metadata is invalid; content was not returned",
+        )
+    })
+}
+
+fn artifact_too_large() -> ApiError {
+    ApiError::conflict(
+        "artifact_too_large",
+        "Artifact exceeds the 8 MiB read limit; content was not returned",
+    )
+}
+
+fn artifact_file_io<T>(result: std::io::Result<T>) -> ApiResult<T> {
+    result.map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => ApiError::conflict(
+            "artifact_storage_unavailable",
+            "Artifact metadata exists but its stored bytes are unavailable",
+        ),
+        _ => ApiError::from(error),
+    })
+}
+
 async fn artifact(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Path((ticket, artifact)): axum::extract::Path<(String, String)>,
+    query: Result<
+        axum::extract::Query<ArtifactReadQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
 ) -> ApiResult<Json<Value>> {
+    let query = query.map_err(|_| {
+        ApiError::bad("Artifact query accepts one encoding parameter with value utf8 or base64")
+    })?;
+    let encoding = match query.encoding.as_deref() {
+        None | Some("utf8") => ArtifactEncoding::Utf8,
+        Some("base64") => ArtifactEncoding::Base64,
+        Some(_) => {
+            return Err(ApiError::bad(
+                "Artifact encoding must be exactly utf8 or base64",
+            ));
+        }
+    };
     let store = state.lock()?;
     let mut a = store
         .get("artifacts", &artifact)?
@@ -3582,39 +3804,44 @@ async fn artifact(
         storage_fields.remove("code_evidence_json");
     }
     a["code_evidence"] = public_evidence.unwrap_or(Value::Null);
-    let bytes = match std::fs::read(artifact_storage_path(&store.root, &a)?) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::conflict(
-                "artifact_storage_unavailable",
-                "Artifact metadata exists but its stored bytes are unavailable",
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let expected_sha256 = a["sha256"].as_str().ok_or_else(|| {
-        ApiError::conflict(
-            "artifact_integrity",
-            "Artifact digest metadata is invalid; content was not returned",
-        )
-    })?;
-    if sha256(&bytes) != expected_sha256 {
+    let path = artifact_storage_path(&store.root, &a)?;
+    let mut file = artifact_file_io(std::fs::File::open(&path))?;
+    let metadata = artifact_file_io(file.metadata())?;
+    if metadata.len() > MAX_INLINE_ARTIFACT_BYTES as u64 {
+        return Err(artifact_too_large());
+    }
+    let expected_size = artifact_size(&a)?;
+    let expected_sha256 = artifact_sha256(&a)?;
+    let mut bytes = Vec::with_capacity(MAX_INLINE_ARTIFACT_BYTES.min(64 * 1024));
+    artifact_file_io(
+        file.by_ref()
+            .take(MAX_INLINE_ARTIFACT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes),
+    )?;
+    if bytes.len() > MAX_INLINE_ARTIFACT_BYTES {
+        return Err(artifact_too_large());
+    }
+    if bytes.len() as u64 != expected_size || sha256(&bytes) != expected_sha256 {
         return Err(ApiError::conflict(
             "artifact_integrity",
-            "Artifact no longer matches its digest",
+            "Artifact no longer matches its recorded size or digest",
         ));
     }
-    let content = String::from_utf8(bytes).map_err(|_| {
-        ApiError::conflict(
-            "artifact_encoding",
-            "Artifact bytes are not UTF-8; this endpoint currently serves plain text, not binary transport",
-        )
-    })?;
+    let size_bytes = bytes.len();
+    let content = match encoding {
+        ArtifactEncoding::Utf8 => String::from_utf8(bytes).map_err(|_| {
+            ApiError::conflict(
+                "artifact_encoding",
+                "Artifact bytes are not UTF-8; this request expects plain text. Use an explicit base64 encoding for the bounded raw-byte read",
+            )
+        })?,
+        ArtifactEncoding::Base64 => STANDARD.encode(&bytes),
+    };
     Ok(Json(json!({
         "artifact":a,
         "content":content,
-        "size_bytes":content.len(),
-        "encoding":"utf8",
+        "size_bytes":size_bytes,
+        "encoding":encoding.as_str(),
         "truncated":false,
     })))
 }

@@ -307,7 +307,7 @@ async function run() {
       await verifyDisplayPreferences({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess })
     })
     await phase('artifact-read-owner-digest-path-and-encoding', async () => {
-      await verifyArtifactReadIntegrity({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess })
+      await verifyArtifactReadIntegrity({ page, admin, node, server, projectRoot, result, refreshTicket: reloadSuccess, evidenceDir: evidence })
     })
     await phase('real-cancel-intent-before-Node-acknowledgement', async () => {
       const cancelId = await createTask({ objective: 'Synthetic browser stop intent', kind: 'edit_file', path: 'must-not-write.txt', content: 'No effect allowed.' })
@@ -805,7 +805,7 @@ async function verifySenderFilter({ page, admin, node, ticketId, owner, sessionR
   assert.deepEqual(after.messages.map(message => message.id), afterLabel.messages.map(message => message.id))
   return { ticket_sender_filter_persisted_and_revalidated: true, reset_all_keeps_all_source_records: true, auxiliary_label_is_not_an_actor_permission: true }
 }
-async function verifyArtifactReadIntegrity({ page, admin, node, server, projectRoot, result, refreshTicket }) {
+async function verifyArtifactReadIntegrity({ page, admin, node, server, projectRoot, result, refreshTicket, evidenceDir }) {
   const ticketId = result.actual_write.ticket_id
   const before = await admin.get(`/api/v1/tickets/${ticketId}`)
   assert.equal(before.status, 'succeeded')
@@ -823,8 +823,9 @@ async function verifyArtifactReadIntegrity({ page, admin, node, server, projectR
   const storagePath = join(server.dataDir, 'artifacts', `${originalId}.artifact`)
   const originalBytes = await readFile(storagePath)
   assert.equal(sha256(originalBytes), original.sha256)
-  const readArtifact = async id => {
-    const response = await fetch(`${server.baseUrl}/api/v1/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(id)}`, {
+  const readArtifact = async (id, encoding) => {
+    const suffix = encoding ? `?encoding=${encoding}` : ''
+    const response = await fetch(`${server.baseUrl}/api/v1/tickets/${encodeURIComponent(ticketId)}/artifacts/${encodeURIComponent(id)}${suffix}`, {
       headers: { authorization: `Bearer ${server.clientToken}`, accept: 'application/json' },
     })
     let payload
@@ -915,6 +916,27 @@ async function verifyArtifactReadIntegrity({ page, admin, node, server, projectR
   assert.equal(invalidResult.status, 409)
   assert.equal(invalidResult.body.error.code, 'artifact_encoding')
   assert.equal(invalidResult.body.content, undefined)
+  const byteResult = await readArtifact(badId, 'base64')
+  assert.equal(byteResult.status, 200)
+  assert.equal(byteResult.body.encoding, 'base64')
+  assert.equal(byteResult.body.truncated, false)
+  assert.equal(byteResult.body.content, invalidBytes.toString('base64'))
+  assert.deepEqual(Buffer.from(byteResult.body.content, 'base64'), invalidBytes)
+  assert.equal(byteResult.body.sha256, undefined, 'The envelope has one digest on its authoritative immutable artifact')
+  assert.equal(byteResult.body.size_bytes, invalidBytes.length)
+  assert.equal(byteResult.body.artifact.sha256, sha)
+  assert.equal(byteResult.body.artifact.id, badId)
+  assert.equal(byteResult.body.artifact.ticket_id, ticketId)
+  assert.equal(byteResult.body.artifact.assignment_id, assignment.id)
+  assert.equal(byteResult.body.artifact.origin_node_id, node.nodeId)
+  const foreignBytes = await fetch(`${server.baseUrl}/api/v1/tickets/${encodeURIComponent(otherTicket.id)}/artifacts/${encodeURIComponent(badId)}?encoding=base64`, {
+    headers: { authorization: `Bearer ${server.clientToken}`, accept: 'application/json' },
+  })
+  assert.equal(foreignBytes.status, 403)
+  assert.equal((await foreignBytes.json()).error.code, 'artifact_scope')
+  const unknownEncoding = await readArtifact(originalId, 'base64,utf8')
+  assert.equal(unknownEncoding.status, 400)
+  assert.equal(unknownEncoding.body.content, undefined)
 
   await refreshTicket()
   const wrongCard = page.locator('.artifact-card').filter({ hasText: 'bounded-non-utf8.bin' })
@@ -925,6 +947,36 @@ async function verifyArtifactReadIntegrity({ page, admin, node, server, projectR
   await error.waitFor()
   assert.match(await error.innerText(), /UTF-8/)
   assert.equal(await page.locator('.artifact-viewer .artifact-content').count(), 0)
+  const binaryItem = page.locator('.artifact-item').filter({ hasText: 'bounded-non-utf8.bin' })
+  await binaryItem.getByRole('button', { name: '下载原始字节', exact: true }).waitFor()
+  const downloadDirectory = join(evidenceDir, 'owned-artifact-download')
+  await mkdir(downloadDirectory, { mode: 0o700 })
+  const savedPath = join(downloadDirectory, 'bounded-non-utf8.bin')
+  await rm(savedPath, { force: true })
+  const browserDownload = page.waitForEvent('download', { timeout: 10000 })
+  const byteRequest = page.waitForResponse(response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname === `/api/v1/tickets/${ticketId}/artifacts/${badId}`
+    && new URL(response.url()).search === '?encoding=base64')
+  await binaryItem.getByRole('button', { name: '下载原始字节', exact: true }).click()
+  const [download, downloadHttp] = await Promise.all([browserDownload, byteRequest])
+  assert.equal(downloadHttp.status(), 200)
+  assert.equal(download.suggestedFilename(), 'bounded-non-utf8.bin')
+  assert.equal((await downloadHttp.json()).content, invalidBytes.toString('base64'))
+  assert.equal(await download.failure(), null)
+  await download.saveAs(savedPath)
+  const savedByteFile = await readFile(savedPath)
+  assert.deepEqual(savedByteFile, invalidBytes, 'The real browser download must contain the original bytes, not the base64 envelope')
+  assert.equal(sha256(savedByteFile), sha)
+  assert.equal(await stat(savedPath).then(info => info.isFile() && info.mode & 0o111), 0, 'A byte download is ordinary file data, never an executable')
+  assert.match(await error.innerText(), /UTF-8/, 'Recovering raw bytes does not turn the original text-view failure into text success')
+  assert.equal(await page.locator('.artifact-viewer .artifact-content').count(), 0)
+  assert.equal(await binaryItem.locator('.artifact-download-error').count(), 0)
+  result.real_byte_download = {
+    exact_artifact_id: badId, saved_filename: download.suggestedFilename(), saved_size_bytes: savedByteFile.length,
+    saved_sha256: sha256(savedByteFile), identical_node_bytes: true,
+    saved_evidence_file: 'owned-artifact-download/bounded-non-utf8.bin',
+    text_error_preserved: true, no_text_coercion: true, browser_download_completed: true,
+  }
   await page.getByRole('button', { name: '关闭产物查看', exact: true }).click()
   const originalNameForCard = original.type ?? original.name
   assert.equal(typeof originalNameForCard, 'string')
