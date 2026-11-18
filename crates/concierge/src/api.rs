@@ -893,28 +893,143 @@ mod tests {
         let accepted = response.json::<Value>().await.unwrap();
         assert_eq!(status, StatusCode::OK, "{accepted}");
         assert_eq!(accepted["accepted"], true);
-        let store = state.lock().unwrap();
-        let assignment = store.get("assignments", "assignment").unwrap().unwrap();
-        let acknowledged_at = assignment["acknowledged_at"].as_str().unwrap();
-        assert_eq!(accepted["acknowledged_at"], acknowledged_at);
-        assert!(
-            parse_time(acknowledged_at).unwrap()
-                > chrono::Utc::now() - chrono::Duration::minutes(1)
+        let (first_assignment, first_timestamp, first_audits) = {
+            let store = state.lock().unwrap();
+            let assignment = store.get("assignments", "assignment").unwrap().unwrap();
+            let acknowledged_at = assignment["acknowledged_at"].as_str().unwrap().to_owned();
+            assert_eq!(accepted["acknowledged_at"], acknowledged_at);
+            assert!(
+                parse_time(&acknowledged_at).unwrap()
+                    > chrono::Utc::now() - chrono::Duration::minutes(1)
+            );
+            assert_ne!(acknowledged_at, "2026-01-01T00:00:00Z");
+            let audits = revocation_audits(&store, "assignment.acknowledged");
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0]["ticket_id"], "ticket");
+            assert_eq!(audits[0]["actor"], "node");
+            let evidence: Value =
+                serde_json::from_str(audits[0]["evidence"].as_str().unwrap()).unwrap();
+            assert_eq!(evidence["event_type"], "assignment.acknowledged");
+            assert_eq!(evidence["actor"], "node");
+            assert_eq!(evidence["evidence"]["assignment_id"], "assignment");
+            assert_eq!(evidence["evidence"]["delivered_is_not_read"], true);
+            assert!(!evidence.to_string().contains(NODE_TOKEN));
+            assert!(store.verify_audit().unwrap());
+            (assignment, acknowledged_at, audits)
+        };
+
+        // A fresh opaque request_id does not create another admission for the
+        // same still-valid Assignment. It must reread the exact original one.
+        let response = call().send().await.unwrap();
+        let duplicate = response.json::<Value>().await.unwrap();
+        assert_eq!(duplicate["accepted"], true);
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["acknowledged_at"], first_timestamp);
+        assert_eq!(duplicate["delivered_is_not_read"], true);
+        assert_eq!(duplicate["report_or_execution_completed"], false);
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                first_assignment,
+                "A repeated ordinary admission does not modify the durable assignment"
+            );
+            assert_eq!(
+                revocation_audits(&store, "assignment.acknowledged"),
+                first_audits
+            );
+            assert!(store.verify_audit().unwrap());
+            // A timestamp with no matching functional audit is not proof of a
+            // past admission and cannot be replayed as an accepted message.
+            store
+                .conn()
+                .execute(
+                    "DELETE FROM audits WHERE action='assignment.acknowledged'",
+                    [],
+                )
+                .unwrap();
+        }
+        let response = call().send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let inconsistent = response.json::<Value>().await.unwrap();
+        assert_eq!(
+            inconsistent["error"]["code"],
+            "acknowledgement_inconsistent"
         );
-        assert_ne!(acknowledged_at, "2026-01-01T00:00:00Z");
-        let audits = revocation_audits(&store, "assignment.acknowledged");
-        assert_eq!(audits.len(), 1);
-        assert_eq!(audits[0]["ticket_id"], "ticket");
-        assert_eq!(audits[0]["actor"], "node");
-        let evidence: Value =
-            serde_json::from_str(audits[0]["evidence"].as_str().unwrap()).unwrap();
-        assert_eq!(evidence["event_type"], "assignment.acknowledged");
-        assert_eq!(evidence["actor"], "node");
-        assert_eq!(evidence["evidence"]["assignment_id"], "assignment");
-        assert_eq!(evidence["evidence"]["delivered_is_not_read"], true);
-        assert!(!evidence.to_string().contains(NODE_TOKEN));
-        assert!(store.verify_audit().unwrap());
-        drop(store);
+        assert!(!inconsistent.to_string().contains(NODE_TOKEN));
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                first_assignment,
+                "Rejected ambiguous history must not mint a replacement timestamp or audit"
+            );
+            assert!(revocation_audits(&store, "assignment.acknowledged").is_empty());
+        }
+        // Non-null malformed values are not a missing first acknowledgement.
+        // Neither may be overwritten with a newly minted coherent-looking timestamp.
+        // The TEXT affinity stores the SQL numeric literal 17 as text "17";
+        // it is still not a valid RFC timestamp and must remain unchanged.
+        for (literal, expected) in [
+            ("'not-a-timestamp'", Value::String("not-a-timestamp".into())),
+            ("17", Value::String("17".into())),
+        ] {
+            let corrupt = {
+                let store = state.lock().unwrap();
+                store.conn().execute(
+                    &format!("UPDATE assignments SET acknowledged_at={literal} WHERE id='assignment'"),
+                    [],
+                ).unwrap();
+                store.get("assignments", "assignment").unwrap().unwrap()
+            };
+            let response = call().send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let error = response.json::<Value>().await.unwrap();
+            assert_eq!(error["error"]["code"], "acknowledgement_inconsistent");
+            let store = state.lock().unwrap();
+            assert_eq!(
+                store.get("assignments", "assignment").unwrap().unwrap(),
+                corrupt,
+                "Malformed stored time must be preserved, not repaired into a false first receipt"
+            );
+            assert_eq!(corrupt["acknowledged_at"], expected);
+            assert!(revocation_audits(&store, "assignment.acknowledged").is_empty());
+            assert!(!error.to_string().contains(NODE_TOKEN));
+        }
+        {
+            // A missing time alongside a lone audit is the other incomplete
+            // state, not authority to create a new timestamp on replay.
+            let store = state.lock().unwrap();
+            store
+                .conn()
+                .execute(
+                    "UPDATE assignments SET acknowledged_at=NULL WHERE id='assignment'",
+                    [],
+                )
+                .unwrap();
+            store
+                .audit(
+                    Some("ticket"),
+                    "node",
+                    "assignment.acknowledged",
+                    &json!({"assignment_id":"assignment","delivered_is_not_read":true}),
+                )
+                .unwrap();
+        }
+        let response = call().send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "acknowledgement_inconsistent"
+        );
+        let store = state.lock().unwrap();
+        assert!(
+            store.get("assignments", "assignment").unwrap().unwrap()["acknowledged_at"].is_null()
+        );
+        assert_eq!(
+            revocation_audits(&store, "assignment.acknowledged").len(),
+            1
+        );
         server.abort();
     }
 
@@ -4414,6 +4529,53 @@ pub(crate) async fn acknowledge(
         &node,
         body["cancel_requested"].as_bool().unwrap_or(false),
     )?;
+    // A valid ordinary retransmission may reread this Assignment's already
+    // committed admission. The current Node, Grant, attempt and lease are
+    // checked above *before* replay. An opaque request_id is not authorization.
+    if !body["cancel_requested"].as_bool().unwrap_or(false) {
+        let assignment_record = store
+            .get("assignments", &assignment)?
+            .ok_or_else(|| ApiError::missing("Assignment not found"))?;
+        let audited = store.audits(Some(&ticket))?.into_iter().filter(|entry| {
+            if entry["actor"] != "node" || entry["action"] != "assignment.acknowledged" {
+                return false;
+            }
+            let evidence = entry["evidence"].as_str().unwrap_or_default();
+            serde_json::from_str::<Value>(evidence).is_ok_and(|envelope| {
+                envelope["evidence"]["assignment_id"].as_str() == Some(assignment.as_str())
+                    && envelope["evidence"]["delivered_is_not_read"] == true
+            })
+        });
+        let exactly_one_matching_audit = audited.count() == 1;
+        let timestamp = assignment_record["acknowledged_at"]
+            .as_str()
+            .filter(|value| parse_time(value).is_ok());
+        match (
+            assignment_record["acknowledged_at"].is_null(),
+            timestamp,
+            exactly_one_matching_audit,
+        ) {
+            (true, None, false) => {
+                // The only ordinary first-admission state: neither timestamp
+                // nor a corresponding audit yet exists.
+            }
+            (false, Some(original), true) => {
+                return Ok(Json(json!({
+                    "accepted":true,
+                    "acknowledged_at":original,
+                    "duplicate":true,
+                    "delivered_is_not_read":true,
+                    "report_or_execution_completed":false
+                })));
+            }
+            _ => {
+                return Err(ApiError::conflict(
+                    "acknowledgement_inconsistent",
+                    "A first acknowledgement needs neither timestamp nor audit; a replay needs one valid original timestamp and exactly one matching audit",
+                ));
+            }
+        }
+    }
     let mut store = store;
     let acknowledged_at = now();
     let tx = store.conn_mut().transaction()?;

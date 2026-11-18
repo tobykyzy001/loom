@@ -50,6 +50,24 @@ node tests/runner/ack-audit-atomic.mjs
 
 验证分两部分互不混淆：router/同connection SQL TRIGGER fault验证原子回滚与后续合法ack；外层真实registered Node +真实HTTP契约由这一driver以同一临时数据库上的**持久 trigger**制造只在服务器写入connection可见的audit失败，要求`acknowledged_at`仍为NULL且匹配audit=0，禁止“审计拒绝結果テーブル却被 accept写入” 的结果。结束仅这个 fixture trigger被DROP，随后同一ack命中 `delivered_is_not_read=true`、正确assignment/timestamp和审计链路。前一脚本漏objective曾先被合法API拒绝；外部`TEMP TRIGGER`在不同SQLite connection中看不到server自己的连接，触发失败预期曾被issue归因为转录遗漏，未误作产品证明。没有grants/capability license/private身分架构扩展、其他DSH Provider/插件安装或第二物理机的执行证明，仅本节点的审批入口与审计可靠性。
 
+## 合法ACK原始回执与Node响应丢失恢复
+
+```sh
+node tests/runner/ack-replay.mjs
+```
+
+原server重复接收一个合法的普通ACK时会更新`acknowledged_at`并追加第二条audit；旧`client.acknowledge()`又完全绕过outbox。这两个问题不能只靠“首写入事务原子”解决。现在服务端仍然先认证Node、核验当前Assignment/epoch/Grant/Lease，再仅对原Assignment的**合法timestamp + 恰一个匹配Node admission audit**返回首次timestamp和`duplicate:true`，不改原值或追加审计。真正`NULL + 无匹配audit`才是首写；有效时间戳无audit、NULL有audit、非法非空字符串/类型或多个审计都返回409 `acknowledgement_inconsistent`，保留原历史而不补造一份准入。独立review发现的`as_str().filter(parse_time)`把坏值误归为空的首写漏洞，也由实际SQL负例和同一矩阵检查封闭。取消/unknown effect的其它协议和fence没有被这一普通ACK replay替换。
+
+LocalNode客户端把ACK先写入既有NodeState v1 outbox，再进行真实`nodes/acknowledge` HTTP。相同逻辑body的in-flight合并/待投nonce保留不是授权，request_id也不是Server identity。持久pending是打算投递，不是中心接受；在实际HTTP回执具有`accepted:true`、有效非空timestamp及正确布尔duplicate（若提供）之后才可清队列。损坏body/request_id、坏timestamp及布尔形状错误的缓存不能伪装接受，必须重新联网核实；本地`duplicate:true` view不会将持久原始回执中的`duplicate:false`改写。未知的transport/5xx保留pending，不再丢弃实际生成的Artifact/Report；这些出箱项只在同ticket/assignment/epoch有未决ACK时等待，独立合法工作仍可交付。NodeState已有deliveries字段缺失维持旧版读取，非数组坏账本拒绝，不要求额外数据库迁移。
+
+真实driver：使用当前Rust Concierge、真实注册Node、项目/Binding/Grant和实际`ControlledFileExecutor`输入文件。第一次实际ACK HTTP 200被读取以后，adapter有意抛出“响应丢失”，但本地executor仍只运行一次。此时中心有第一笔ACK，没有Report/Artifact/Effect；本地ACK/Artifact/Report仍持久待发。driver重开同Node身份与状态，尊重原有backoff（不是把时间戳强置为过去），再取回**第一次timestamp**，记录实际HTTP顺序 **`ACK → ACK → artifact → report`**，最后得到一份 succeeded Report、一份Artifact和一份Effect。回头poll不再执行。真实下载通过原始Ticket Detail的`artifact.id`取回，并重新校验`downloaded.artifact.sha256`与`downloaded.size_bytes`，不是预先假定`metadata.*`包装或`artifact_id`列名。原输入bytes在前后完全一致，生成Artifact的341 bytes独立SHA校验后为`94811ec47d3a7326cc3f693387a93d60379f1198322c364ebc6aa56a02c7492e`。
+
+另一个在本机真实注册的逻辑Node对该Assignment仍403，错误`lease_epoch +1`也拒绝。随后真正撤销授权，再按旧ACK body/digest重新入队，它保持deferred而非accepted，原timestamp和单审计不变，撤权后的`audit/verify`仍有效。这个第二Node只用于owner负例，不意味着物理第二台机器。central SQLite仍为schema15，整轮为deterministic LocalNode loopback，**不是**已安装DSH宿主的ACK恢复、无条件的取消幂等、全局exactly-once或真实provider服务。
+
+[实际最终结果](/tmp/loom-ack-replay-final-Yc6Qcx/result.json)和[manifest](/tmp/loom-ack-replay-final-Yc6Qcx/manifest.json)保存了原始timestamp、owned fixture root、复现源码的hash、实际341-byte Artifact、单执行/单审计，以及真实Report、Artifact与Effect彼此分离的事实。manifest的result SHA为`1baeee9f066125d52412aa9d11dbbe595933abbfa39d06d1b38c2d8963e6b0f0`。仍以LocalNode ACK回执、实际report与外部effect的分离为限。
+
+此前的`node tests/runner/ack-audit-atomic.mjs`仍是独立首笔事务回归：持久audit fault发生时，当下Node返回`acknowledgement_pending:true`和`response:null`且ACK真实留存，但SQL直接确认timestamp为NULL、匹配audit为0，且不会生成Report/Artifact/Effect；解除自有trigger后真正成功应答才清pending并留下恰一份audit。**不是把不明5xx臆断为已提交才通过，也不要求按旧接口必然抛出异常。** 内里如此处ACK均没有创造终止或effect proof；完整原策略、priority、首达预取消、direct revocation fence和generic event replay也分别重跑通过。
+
 ## Node事件回执一致性、跨语言digest与真实重放
 
 ```sh

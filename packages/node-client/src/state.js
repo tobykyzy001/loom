@@ -8,9 +8,12 @@ export class NodeState extends EventEmitter {
   static async open(stateDir) {
     const state = new NodeState(join(stateDir, 'node-state.json'))
     const data = await readJson(state.file, structuredClone(EMPTY))
-    if (data.version !== 1 || !Array.isArray(data.outbox) || typeof data.assignments !== 'object' || typeof data.completions !== 'object') {
+    if (data.version !== 1 || !Array.isArray(data.outbox)
+      || !data.assignments || typeof data.assignments !== 'object' || Array.isArray(data.assignments)
+      || !data.completions || typeof data.completions !== 'object' || Array.isArray(data.completions)) {
       throw new Error('Invalid persistent Loom node state')
     }
+    if (data.deliveries !== undefined && !Array.isArray(data.deliveries)) throw new Error('Invalid local delivery ledger')
     state.data = data
     if (data.rejections === undefined) data.rejections = {}
     else if (!data.rejections || typeof data.rejections !== 'object' || Array.isArray(data.rejections)) throw new Error('Invalid local rejection ledger')
@@ -43,17 +46,27 @@ export class NodeState extends EventEmitter {
   }
   get outbox() { return [...this.data.outbox.values()].sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at)) }
   async enqueue(kind, body, { digest = sha256(canonical(body)), now = Date.now() } = {}) {
-    if (!['event', 'report', 'artifact'].includes(kind)) throw new TypeError('Unsupported outbox message kind')
+    if (!['ack', 'event', 'report', 'artifact'].includes(kind)) throw new TypeError('Unsupported outbox message kind')
     return this.mutate((data) => {
       const existing = data.outbox.find((item) => item.kind === kind && item.digest === digest)
       if (existing) return existing
       const delivered = data.deliveries?.find((item) => item.kind === kind && item.digest === digest)
-      if (delivered) {
-        if (canonical(delivered.body) !== canonical(body)) throw new Error('Cannot replay a different body with the same logical digest')
-        const item = { kind, body: delivered.body, digest, attempts: 0, next_attempt_at: new Date(now).toISOString(), last_error: null }
+      if (delivered && (kind !== 'ack' || (typeof delivered.body?.request_id === 'string' && delivered.body.request_id.length > 0))) {
+        if (kind !== 'ack' && (typeof delivered.body?.request_id !== 'string' || !delivered.body.request_id)) {
+          throw new Error('Delivered message lacks a verifiable request identity')
+        }
+        const original = { ...body, request_id: delivered.body.request_id }
+        if (canonical(delivered.body) !== canonical(original)) {
+          throw new Error('Cannot replay a different body with the same logical digest')
+        }
+        const item = { kind, body: original, digest, attempts: 0, next_attempt_at: new Date(now).toISOString(), last_error: null }
         data.outbox.push(item)
         return item
       }
+      // A delivered ACK with a missing identity is never advertised as an
+      // accepted delivery. Schedule the new authenticated intent instead;
+      // its real server receipt can reconcile and replace corrupt metadata.
+      // Non-ACK delivered records still require an immutable existing request ID.
       const item = { kind, body, digest, attempts: 0, next_attempt_at: new Date(now).toISOString(), last_error: null }
       data.outbox.push(item); return item
     })

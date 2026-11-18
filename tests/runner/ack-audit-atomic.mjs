@@ -37,8 +37,12 @@ try {
     WHEN NEW.action='assignment.acknowledged' BEGIN SELECT RAISE(ABORT,'owned acknowledgement audit fault'); END;`)
   const before = await admin.get(`/api/v1/tickets/${ticket.id}`)
   assert.equal(before.assignments[0].acknowledged_at, null)
-  await assert.rejects(() => runner.client.acknowledge({ ticketId: ticket.id, assignmentId: assignment.id,
-    leaseEpoch: assignment.lease_epoch, accepted: true }))
+  const deferred = await runner.client.acknowledge({ ticketId: ticket.id, assignmentId: assignment.id,
+    leaseEpoch: assignment.lease_epoch, accepted: true })
+  assert.equal(deferred.response, null, 'A 500 or lost result is not a server-bearing acknowledgement receipt')
+  assert.equal(deferred.acknowledgement_pending, true, 'The new durable ACK survives an uncertain transport/server outcome')
+  assert.equal(runner.state.outbox.filter(item => item.kind === 'ack').length, 1,
+    'The retry intent is durable while the actual SQLite transaction rejection remains uncommitted')
   const deniedRow = db.prepare('SELECT acknowledged_at FROM assignments WHERE id=?').get(assignment.id)
   assert.equal(deniedRow.acknowledged_at, null, 'A failed audit must not leave a committed acknowledgement timestamp')
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audits WHERE action='assignment.acknowledged'").get().n, 0,
@@ -51,6 +55,8 @@ try {
   const accepted = await runner.client.acknowledge({ ticketId: ticket.id, assignmentId: assignment.id,
     leaseEpoch: assignment.lease_epoch, accepted: true })
   assert.equal(accepted.response.accepted, true)
+  assert.ok(accepted.response.acknowledged_at)
+  assert.equal(runner.state.outbox.filter(item => item.kind === 'ack').length, 0, 'Only the real successful response clears the deferred ACK')
   const detail = await admin.get(`/api/v1/tickets/${ticket.id}`)
   assert.equal(detail.assignments.length, 1)
   assert.ok(detail.assignments[0].acknowledged_at)
@@ -63,7 +69,8 @@ try {
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
   assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
   Object.assign(result, { overall: 'PASS', assignment_id: assignment.id, lease_id: assignment.lease_id,
-    audit_rejected_leaves_no_acknowledgement: true, later_valid_ack_hits_exact_assignment: true,
+    audit_rejected_leaves_no_acknowledgement: true, pending_ack_preserved_during_unknown_outcome: true,
+    later_valid_ack_hits_exact_assignment: true,
     denied_then_accepted_counts: { reports: 0, artifacts: 0, effects: 0 },
     cancellation_or_effect_created_by_ack: false, registered_local_node_http_sqlite: true })
   console.log(JSON.stringify(result, null, 2))

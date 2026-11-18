@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
-import { sha256 } from '../src/util.js'
+import { mkdtemp, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
+import { sha256, canonical } from '../src/util.js'
+import { LocalNodeRunner } from '../src/runner.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { verify, createPublicKey, randomUUID } from 'node:crypto'
@@ -14,7 +15,7 @@ function response(body, status = 200) { return new Response(JSON.stringify(body)
 function assignment(root, identity, grant = {}) {
   const g = { id: randomUUID(), project_id: '1234', project_root: root, version: 1, operations: ['read_summary', 'edit_file'], digest: 'opaque-grant-digest', ...grant }
   return { a: { id: randomUUID(), ticket_id: randomUUID(), node_id: identity.node_id, lease_id: randomUUID(), lease_epoch: 1,
-    grant_version: 1, grant_digest: g.digest, attempt: 1, kind: 'read_summary', relative_path: 'input.txt', lease_expires_at: new Date(Date.now() + 60000).toISOString() }, g }
+    grant_version: 1, grant_digest: g.digest, attempt: 1, kind: 'read_summary', project_id: g.project_id, relative_path: 'input.txt', lease_expires_at: new Date(Date.now() + 60000).toISOString() }, g }
 }
 
 test('identity creates persistent Ed25519 keypair, node ID and proof', async () => {
@@ -139,6 +140,285 @@ test('outbox dedupes same body, persists exact request ID and requeues after net
   assert.equal(loaded.outbox.length, 0)
   await assert.rejects(() => restored.report({ ...report, state: 'succeeded', artifacts: [{ name: 'id missing' }] }), /non-empty string IDs/)
   assert.equal(requests[0].request_id, requests[1].request_id)
+})
+
+async function ackFixture({ fetch = async () => response({ accepted: true, acknowledged_at: '2026-11-19T00:00:00.000Z' }) } = {}) {
+  const root = await fixture()
+  const identity = await NodeIdentity.open(root)
+  await identity.setToken({ token: 'fixture-ack-node-token' })
+  const state = await NodeState.open(root)
+  const http = new LoomHttpClient({ baseUrl: 'http://example.invalid', fetch })
+  return { root, identity, state, client: new LoomNodeClient({ http, identity, state }) }
+}
+
+test('ACK persists a nonce-independent logical body before immediate authenticated delivery', async () => {
+  const calls = []
+  let release
+  const blocked = new Promise(resolve => { release = resolve })
+  const context = await ackFixture({ fetch: async (url, options) => {
+    const body = JSON.parse(options.body)
+    calls.push({ url: String(url), headers: options.headers, body })
+    await blocked
+    return response({ accepted: true, acknowledged_at: '2026-11-19T00:00:00.000Z', request_id: body.request_id })
+  } })
+  const { client, state } = context
+  const args = { ticketId: 'tkt-ack-persist', assignmentId: 'asg-ack-persist', leaseEpoch: 1, accepted: false }
+  const call = client.acknowledge(args)
+  for (let rounds = 0; rounds < 10 && state.outbox.length === 0; rounds++) await new Promise(resolve => setImmediate(resolve))
+  await state.queue
+  assert.equal(state.outbox.length, 1)
+  assert.equal(state.outbox[0].kind, 'ack')
+  assert.deepEqual(Object.keys(state.outbox[0].body).sort(), ['accepted', 'assignment_id', 'cancel_requested', 'cancellation', 'installation_id', 'lease_epoch', 'node_id', 'protocol', 'reason', 'request_id', 'ticket_id'].sort())
+  assert.equal(state.outbox[0].body.accepted, false)
+  assert.equal(state.outbox[0].body.reason, '')
+  assert.equal(state.outbox[0].digest, sha256(canonical({ logical_fields: (({ request_id, ...fields }) => fields)(state.outbox[0].body) })))
+  const originalId = state.outbox[0].body.request_id
+  const stored = await NodeState.open(context.root)
+  assert.equal(stored.outbox[0].body.request_id, originalId)
+  release()
+  const receipt = await call
+  assert.equal(receipt.response.accepted, true)
+  assert.equal(client.state.data.deliveries[0].response.acknowledged_at, '2026-11-19T00:00:00.000Z')
+  assert.equal(state.outbox.length, 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, 'http://example.invalid/api/v1/nodes/acknowledge')
+  assert.equal(calls[0].headers.authorization, 'Bearer fixture-ack-node-token')
+  const duplicate = await client.acknowledge(args)
+  assert.equal(duplicate.request.request_id, originalId)
+  assert.equal(duplicate.response.acknowledged_at, '2026-11-19T00:00:00.000Z')
+  assert.equal(duplicate.response.duplicate, true)
+  assert.equal(client.state.data.deliveries[0].response.duplicate, undefined, 'Do not invent a local duplicate receipt field in durable evidence')
+  assert.equal(calls[0].body.request_id, duplicate.request.request_id)
+  const other = await client.acknowledge({ ...args, leaseEpoch: 2 })
+  assert.notEqual(other.request.request_id, originalId)
+  assert.notEqual(other.request.assignment_id, undefined)
+})
+
+
+test('ACK deliveries do not conceal corrupt cache evidence and missing identity is reconciled', async () => {
+  let calls = 0
+  const { root, client, state, identity } = await ackFixture({ fetch: async (_url, options) => {
+    calls++
+    return response({ accepted: true, acknowledged_at: '2026-11-19T00:00:01.000Z' })
+  } })
+  const args = { ticketId: 'tkt-cache', assignmentId: 'asg-cache', leaseEpoch: 3, accepted: true, reason: '', cancelRequested: false }
+  await client.acknowledge(args)
+  assert.equal(calls, 1)
+  const duplicate = await client.acknowledge(args)
+  assert.equal(duplicate.response.duplicate, true)
+  assert.equal(calls, 1)
+  await state.mutate(data => { delete data.deliveries[0].body.request_id })
+  const repairedState = await NodeState.open(root)
+  assert.equal(repairedState.data.deliveries[0].body.request_id, undefined, 'The corrupted identity must actually be persisted for this guard check')
+  const repairedClient = new LoomNodeClient({ http: client.http, identity, state: repairedState })
+  const repaired = await repairedClient.acknowledge(args)
+  assert.equal(calls, 2, 'A changed stored request ID must not claim cached acceptance')
+  assert.ok(repaired.request.request_id, 'A valid incoming request ID replaces the missing cached identity instead of being cloned from it')
+  assert.equal(repairedClient.state.outbox.length, 0)
+})
+
+test('a forged non-date cached ACK timestamp is reconciled over real HTTP, not returned as receipt', async () => {
+  let calls = 0
+  const { root, client, state, identity } = await ackFixture({ fetch: async () => {
+    calls++
+    return response({ accepted: true, acknowledged_at: '2026-11-19T00:00:02.000Z', duplicate: false })
+  } })
+  const args = { ticketId: 'tkt-time', assignmentId: 'asg-time', leaseEpoch: 2, accepted: true }
+  await client.acknowledge(args)
+  assert.equal(calls, 1)
+  await state.mutate(data => { data.deliveries[0].response.acknowledged_at = 'not-an-ack-timestamp' })
+  const reopened = await NodeState.open(root)
+  assert.equal(reopened.data.deliveries[0].response.acknowledged_at, 'not-an-ack-timestamp', 'The corrupt timestamp must actually reach the reopened ledger')
+  const restored = new LoomNodeClient({ http: client.http, identity, state: reopened })
+  const recovered = await restored.acknowledge(args)
+  assert.equal(calls, 2, 'Malformed time evidence cannot bypass the authenticated reconciliation request')
+  assert.equal(recovered.response.acknowledged_at, '2026-11-19T00:00:02.000Z')
+  assert.equal(restored.state.outbox.length, 0, 'The reconciled NodeState must remove the delivered pending ACK')
+  const reconciled = await NodeState.open(root)
+  assert.equal(reconciled.data.deliveries[0].response.acknowledged_at, '2026-11-19T00:00:02.000Z')
+  assert.equal(reconciled.data.deliveries[0].response.duplicate, false, 'The server-bearing receipt is retained, not mutated into fabricated replay history')
+})
+
+test('ACK pending survives lost responses and causal outbox order is preserved after reopen', async () => {
+  let online = false
+  const calls = []
+  const { root, client, state, identity } = await ackFixture({ fetch: async (url, options) => {
+    const body = JSON.parse(options.body); calls.push(new URL(url).pathname)
+    if (new URL(url).pathname.endsWith('/acknowledge') && !online) throw new Error('Response was lost; central outcome unknown')
+    return response(new URL(url).pathname.endsWith('/acknowledge')
+      ? { accepted: true, acknowledged_at: '2026-11-19T00:00:02.000Z' } : { accepted: true })
+  } })
+  const args = { ticketId: 'tkt-recover', assignmentId: 'asg-recover', leaseEpoch: 1, accepted: true }
+  await client.report({ ...args, ticketId: args.ticketId, assignmentId: args.assignmentId, leaseEpoch: args.leaseEpoch, state: 'unknown', summary: 'Effect requires reconciliation' })
+  const pending = await client.acknowledge(args)
+  assert.equal(pending.response, null)
+  assert.equal(pending.acknowledgement_pending, true)
+  assert.equal(state.outbox[0].kind, 'report')
+  const originalId = state.outbox.find(item => item.kind === 'ack').body.request_id
+  const reopened = await NodeState.open(root)
+  const restored = new LoomNodeClient({ http: client.http, identity, state: reopened })
+  online = true
+  const delivered = await restored.dispatchOutbox()
+  assert.deepEqual(calls, ['/api/v1/nodes/acknowledge', '/api/v1/nodes/acknowledge', '/api/v1/nodes/reports'])
+  assert.deepEqual(delivered.map(item => item.kind), ['ack', 'report'])
+  assert.equal(delivered[0].response.acknowledged_at, '2026-11-19T00:00:02.000Z')
+  assert.equal(reopened.outbox.length, 0)
+  assert.equal(reopened.data.deliveries.find(item => item.kind === 'ack').body.request_id, originalId)
+  const after = await restored.acknowledge(args)
+  assert.equal(after.request.request_id, originalId)
+  assert.equal(after.response.duplicate, true)
+})
+
+test('ACK HTTP 200 without a timestamp remains deferred and cannot release dependent reports', async () => {
+  const { client, state } = await ackFixture({ fetch: async () => response({ accepted: true }) })
+  const args = { ticketId: 'tkt-invalid-receipt', assignmentId: 'asg-invalid-receipt', leaseEpoch: 1, accepted: false }
+  const pending = await client.acknowledge(args)
+  assert.equal(pending.response, null)
+  await client.report({ ...args, state: 'failed', summary: 'Invalid local admission; no remote delivery proven' })
+  const results = await client.dispatchOutbox()
+  assert.equal(results.length, 1)
+  assert.equal(results[0].status, 'deferred')
+  assert.deepEqual(state.outbox.map(item => item.kind).sort(), ['ack', 'report'])
+  assert.equal(state.data.deliveries, undefined)
+})
+
+test('same immutable concurrent ACK uses one in-flight HTTP request while distinct epochs remain separate', async () => {
+  let calls = 0
+  let hold
+  const barrier = new Promise(resolve => { hold = resolve })
+  const { client } = await ackFixture({ fetch: async (_url, options) => {
+    calls++
+    await barrier
+    return response({ accepted: true, acknowledged_at: '2026-11-19T00:00:03.000Z' })
+  } })
+  const args = { ticketId: 'tkt-one-flight', assignmentId: 'asg-one-flight', leaseEpoch: 1, accepted: true }
+  const first = client.acknowledge(args); const second = client.acknowledge(args)
+  for (let rounds = 0; rounds < 25 && calls === 0; rounds++) await new Promise(resolve => setImmediate(resolve))
+  await client.state.queue
+  assert.equal(calls, 1)
+  hold()
+  const [one, two] = await Promise.all([first, second])
+  assert.equal(one.request.request_id, two.request.request_id)
+  assert.equal(calls, 1)
+  const epoch = client.acknowledge({ ...args, leaseEpoch: 2 })
+  for (let rounds = 0; rounds < 25 && calls < 2; rounds++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls, 2)
+  await epoch
+})
+
+test('immediate ACK and outbox dispatcher share a single in-flight transport attempt', async () => {
+  let calls = 0
+  let release
+  const barrier = new Promise(resolve => { release = resolve })
+  const { client, state } = await ackFixture({ fetch: async () => {
+    calls++
+    await barrier
+    return response({ accepted: true, acknowledged_at: '2026-11-19T00:00:05.000Z' })
+  } })
+  const args = { ticketId: 'tkt-shared', assignmentId: 'asg-shared', leaseEpoch: 1, accepted: true }
+  const immediate = client.acknowledge(args)
+  for (let i = 0; i < 20 && state.outbox.length === 0; i++) await new Promise(resolve => setImmediate(resolve))
+  await state.queue
+  const dispatched = client.dispatchOutbox()
+  release()
+  const [receipt, delivered] = await Promise.all([immediate, dispatched])
+  assert.equal(calls, 1)
+  assert.equal(receipt.request.request_id, delivered[0].requestId)
+  assert.equal(delivered.length, 1)
+  assert.equal(delivered[0].response.accepted, true)
+  assert.equal(state.outbox.length, 0)
+})
+
+test('runner preserves actual file artifacts/report when ACK transport fails and dispatches them later in causal order', async () => {
+  const root = await fixture()
+  const project = join(await realpath(root), 'project')
+  await mkdir(project, { recursive: true, mode: 0o700 })
+  await writeFile(join(project, 'input.txt'), 'A real controlled input whose effect survives ACK failure.')
+  const identity = await NodeIdentity.open(root)
+  await identity.setToken({ token: 'runner-node-token' })
+  const { a: seed, g } = assignment(project, identity)
+  const a = { ...seed, grant: g }
+  assert.equal(project, await realpath(project))
+  let online = false
+  const calls = []
+  const http = new LoomHttpClient({ baseUrl: 'http://example.invalid', fetch: async (url, options) => {
+    const route = new URL(url).pathname
+    calls.push(route)
+    if (route.endsWith('/poll')) return response({ assignment: a })
+    if (route.endsWith('/acknowledge') && !online) throw new Error('ACK response lost after the real file read')
+    if (route.endsWith('/acknowledge')) return response({ accepted: true, acknowledged_at: '2026-11-19T00:00:04.000Z' })
+    return response({ accepted: true })
+  } })
+  const state = await NodeState.open(root)
+  const runner = new LocalNodeRunner({ projectRoots: { '1234': project }, artifactDir: join(root, 'artifacts') })
+  runner.identity = identity
+  runner.state = state
+  runner.http = http
+  runner.client = new LoomNodeClient({ http, identity, state })
+  runner.executor = new ControlledFileExecutor({ artifactDir: join(root, 'artifacts'), projectRoots: { '1234': project } })
+  const result = await runner.pollAndRun()
+  assert.equal(result.status, 'succeeded', result.reason)
+  assert.equal(result.acknowledgement_pending, true)
+  assert.equal(result.acknowledgementPending, true)
+  assert.equal(result.kind, 'report')
+  assert.deepEqual(state.outbox.map(item => item.kind).sort(), ['ack', 'artifact', 'report'])
+  assert.equal(state.data.deliveries, undefined)
+  const saved = await NodeState.open(root)
+  const savedAck = saved.outbox.find(item => item.kind === 'ack')
+  assert.equal(savedAck.body.request_id, state.outbox.find(item => item.kind === 'ack').body.request_id)
+  assert.equal(savedAck.body.accepted, true)
+  const restart = new LocalNodeRunner({ projectRoots: { '1234': project } })
+  restart.identity = identity
+  restart.state = saved
+  restart.http = http
+  restart.client = new LoomNodeClient({ http, identity, state: saved })
+  restart.executor = runner.executor
+  online = true
+  const deliveries = await restart.client.dispatchOutbox()
+  assert.deepEqual(deliveries.map(item => item.kind), ['ack', 'artifact', 'report'])
+  assert.equal(calls.filter(route => route.endsWith('/reports')).length, 1)
+  assert.equal(saved.outbox.length, 0)
+  assert.equal(saved.data.deliveries.find(item => item.kind === 'ack').response.accepted, true)
+  assert.equal(result.response, undefined, 'The original result stayed pending; no HTTP receipt was invented')
+})
+
+test('strict ACK denial throws and records quarantined rejection while leaving the durable ACK', async () => {
+  const { client, state } = await ackFixture({ fetch: async () => response({ error: { code: 'lease_mismatch', message: 'Synthetic invalid lease' } }, 403) })
+  const args = { ticketId: 'tkt-denied', assignmentId: 'asg-denied', leaseEpoch: 4, accepted: false }
+  await assert.rejects(() => client.acknowledge(args), error => error.status === 403 && error.code === 'lease_mismatch')
+  const runner = new LocalNodeRunner({})
+  runner.client = client
+  runner.state = state
+  const rejected = await runner.rejectAssignment({ ...assignment(await fixture(), await NodeIdentity.open(await fixture())).a,
+    id: args.assignmentId, ticket_id: args.ticketId, lease_epoch: args.leaseEpoch, grant_digest: 'rejected-grant' }, 'Invalid test lease')
+  assert.equal(rejected.rejection.acknowledgement.outcome, 'quarantined')
+  assert.equal(rejected.rejection.acknowledgement.status, 403)
+  assert.equal(state.outbox.length, 2)
+  assert.equal(state.outbox.every(item => item.kind === 'ack'), true)
+  const deliveries = await client.dispatchOutbox()
+  assert.equal(deliveries.every(item => item.status === 'deferred' && item.kind === 'ack'), true)
+  assert.equal(state.outbox.length, 2)
+})
+
+test('one assignment missing ACK does not block unrelated autonomously admitted work', async () => {
+  const calls = []
+  const { client, state, root, identity } = await ackFixture({ fetch: async (url) => {
+    const route = new URL(url).pathname; calls.push(route)
+    if (route.endsWith('/acknowledge')) throw new Error('pending assignment A')
+    return response({ accepted: true })
+  } })
+  await client.acknowledge({ ticketId: 'tkt-a', assignmentId: 'asg-a', leaseEpoch: 1, accepted: false })
+  await client.report({ ticketId: 'tkt-a', assignmentId: 'asg-a', leaseEpoch: 1, state: 'failed', summary: 'Must wait on its own ACK' })
+  await client.event({ ticketId: 'tkt-b', assignmentId: 'asg-b', leaseEpoch: 1, summary: 'Independent task progress remains deliverable' })
+  await state.mutate(data => { for (const item of data.outbox) item.next_attempt_at = new Date(0).toISOString() })
+  const first = await client.dispatchOutbox()
+  assert.deepEqual(first.map(item => [item.kind, item.status].join(':')), ['ack:deferred', 'event:delivered'])
+  assert.equal(state.outbox.some(item => item.kind === 'report'), true)
+  const reopened = await NodeState.open(root)
+  assert.equal(reopened.data.version, 1)
+  await reopened.mutate(data => { data.deliveries = {} })
+  await assert.rejects(() => NodeState.open(root), /Invalid local delivery ledger/)
+  assert.equal(identity.token, 'fixture-ack-node-token')
 })
 
 test('assignment validation rejects stale lease, node mismatch, capability-only access and missing grant', async () => {
