@@ -2,6 +2,18 @@
 
 Updated: 2026-11-19.
 
+## Public candidate integrity and immutable releases
+
+The public Service Worker now stages downloads into `loom-shell-v2-pending` and treats the pending files and `loom-shell-v2` as different objects. Every candidate entry has an allowed same-origin URL, basic-200 response, expected MIME, complete bounded body (≤2MiB), and SHA-256. Responses are fully read in sequence; each candidate HTTP request has a 15-second abort deadline. That deadline is not a claim of SDK cancellation. URL/type matching is keyed by the expected URL, not by an array index, and root HTML's actual hashed JavaScript/CSS references are checked separately from the manifest/favicon files that are also required by the public set.
+
+Activation copies into an **empty** `loom-shell-v2`, followed by complete read-back. A nonempty same-version release is immutable: changed body paths or digests require a new cache version rather than partially overwriting it. A failed/malformed/missing/tampered/oversized candidate discards only its app-owned pending cache; it does not erase the currently valid release or unrelated user storage. Navigation retains the original basic canonical-root response and its source URL instead of manufacturing a URL-less HTML response. These guards are **not** an OS-atomic multi-cache transaction, guaranteed physical rollback, signed software-update authorization, or offline Task/Grant/Effect authorization.
+
+`node --test --test-timeout=20000 tests/browser/shell-cache.test.mjs` runs **10 passing deterministic contract cases** (including an actual abort signal after the bounded pending-request timeout). Existing Vue tests remain **155/155**, typecheck passes, Rust workspace tests total **205 passes** plus one explicitly opt-in ignored hardware probe, and format/strict Clippy pass. Shared Node tests (**39**) and independently vendored DSH tests (**109**) also pass without altering those implementations or real profiles.
+
+The actual current-byte Rust/Edge offline-flow proof is [N74xgk result](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-N74xgk/result.json), with [source-bound manifest](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-N74xgk/manifest.json) and [390px offline screenshot](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-N74xgk/offline-shell.png): five public entries have exact build bytes, protected API calls fail while offline and are not cached, and actual browser PID **13794 → 13839** reopens the same owned profile from offline with the same bytes before restoring real reads.
+
+**Not yet verified:** continuous v1→v2→later-bad-update browser migration with all candidates explicitly settled and their publication contents independently checked. An incomplete observation-series worker registration/controller state is not treated as a complete release or migration proof. Do not infer this remains signed/automatic update delivery, full rollback, mobile/native lifecycle, true multi-Host task recovery, another Harness, live model/provider support, or the deferred 1+3 Compose.
+
 ## Offline static shell also survives an actual browser-process close/reopen
 
 After the previously verified online/offline/online preparation-and-read circuit, the driver now performs **a complete `browser.close()` and waits for actual disconnected**, then launches another browser with the **same owned profile** but explicit `offline:true`. It verifies two distinct browser PIDs, not just a fresh context. This adds a real browser-process close followed by an offline load of the already installed public shell compared correctly with the current immutable build bytes.
