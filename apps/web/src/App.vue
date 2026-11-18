@@ -155,10 +155,15 @@ function reviewSourceWork(draft: SourceWorkDraft) {
     } finally { sourceSubmitting.value = false }
   })
 }
-async function openSourceTicket(ticket: Ticket) {
+async function openSourceTicketId(ticketId: string) {
   sourceFeedback.value = ''
+  // Historical Source links must expose the reopened Ticket, not leave it behind
+  // this same modal while the read succeeds in the background.
   sourcePanelOpen.value = false
-  await selectTicket(ticket.id)
+  await selectTicket(ticketId, 'conversation')
+}
+async function openSourceTicket(ticket: Ticket) {
+  await openSourceTicketId(ticket.id)
 }
 function ticketCancel() {
   const id = ticket.value?.id
@@ -282,7 +287,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
     <ProjectBindingDialog v-if="bindingProject" :project="bindingProject" :nodes="nodes" :busy="state.busy['binding-write']" :error="confirmation ? '' : state.errors['binding-write']" @close="bindingProject = null" @submit="bindProject" />
     <Teleport to="body"><div v-if="sourcePanelOpen" class="modal-backdrop">
       <section class="modal source-work-modal" role="dialog" aria-modal="true" aria-labelledby="source-work-heading" @keydown.esc="!sourceSubmitting && (sourcePanelOpen = false)">
-        <SourceWorkPanel :result="state.sourceTicketReceipt" :transport="sourceTransport" source-key="browser-source" thread-id="browser-thread" :projects="projects" :grants="state.grants" :nodes="nodes" :busy="sourceSubmitting || !!state.busy['source-write'] || !!state.busy['source-read']" :error="sourceError" @submit="reviewSourceWork" @open="ticket => void openSourceTicket(ticket)" @open-ticket="selectTask" @closed="sourcePanelOpen = false" />
+        <SourceWorkPanel :result="state.sourceTicketReceipt" :transport="sourceTransport" source-key="browser-source" thread-id="browser-thread" :projects="projects" :grants="state.grants" :nodes="nodes" :busy="sourceSubmitting || !!state.busy['source-write'] || !!state.busy['source-read']" :error="sourceError" @submit="reviewSourceWork" @open="ticket => void openSourceTicket(ticket)" @open-ticket="openSourceTicketId" @closed="sourcePanelOpen = false" />
       </section>
     </div></Teleport>
   </div>

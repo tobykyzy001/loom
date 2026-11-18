@@ -838,7 +838,11 @@ COMMIT只在字段校验、状态/权限、插入及audit均成功后发生，�
 - Worker 失联：Assignment 失联，与 Ticket 状态分别处理；
 - 重试：先处理 Unknown Outcome，防止重复副作用；
 - 通知可以广播预热，真正的副作用必须获得中心 Lease；
-- 多机暂不采用无中心争抢任务，避免双写和权限不明确。
+- **历史Source任务回访必须让用户真正回到可操作的Ticket。** 对 SourceWorkPanel 中已持久 `task_ticket_id` 的 `open-ticket`，Vue在数据链一致之外还必须先关闭该Source modal，再选择这张Ticket；单纯后台拿到这张Ticket并不叫用户看到了它。不能为了这个读取动作再创建Ticket、Grant或发送approval，也不能把没有持久关联的legacy intake `ticket_id` 当成同等关系。创建刚完成的自动跳转与历史事件返回共用同一 close-then-select helper，任意读取失败则由当前Ticket的标准错误呈现/重读入口处理，而不是藏在同一浮层下。
+
+该边界已经用真实Edge重现并核实修复：先创建**第三张仍为waiting_approval**的Source Work，显式关闭并重开同一历史thread，再点精确的“打开独立任务”。未修补时正确GET 200之后Source modal仍连续可见而超时；修复后当模态关闭，ID正确，**检查并决定按钮的真实 DOM hit-test 命中**才可继续用户自己的拒绝/批准与真实heartbeat、Artifact流程。导航本身既不创建Ticket也不发送approval。该行为只代表Source→可执行任务回访完整了，不是M0移动端生命周期、多人联合审核或完整M0/多宿主已完成的另一种声称。详证见[当前历史Source回归](/tmp/loom-source-navigation-final-JIhpMF/result.json)及[同源实现说明](tests/sources/README.md)。
+
+多机暂不采用无中心争抢任务，避免双写和权限不明确。
 
 ### 9.5 Host 与外部 Watchdog
 

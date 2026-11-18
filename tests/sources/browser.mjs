@@ -340,6 +340,7 @@ async function run() {
   await prepareSourceWork(page, { ...scope, contains: thirdSourceObjective })
   const thirdAccepted = await confirmSourceWork(page, { duplicate: false })
   const thirdTicketId = thirdAccepted.ticket.id
+  const rejectPath = `/api/v1/tickets/${thirdTicketId}/approval`
   assert.equal(thirdAccepted.ticket.status, 'waiting_approval')
   assert.equal(thirdAccepted.duplicate, false)
   const thirdEvent = (await events()).find(event => event.content === thirdSourceObjective)
@@ -380,6 +381,34 @@ async function run() {
   assert.equal(waitingTicket.relative_path, 'input.txt')
   assert.equal(waitingTicket.cancel_requested, false)
   for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual(waitingTicket[field], [])
+
+  // Open the exact persisted Source → Ticket relationship through its historical
+  // message, not the fast path which just created that same Ticket. The operator
+  // must be able to use its waiting-approval control without closing Source manually.
+  if (await page.getByRole('button', { name: '关闭 Source 面板', exact: true }).count()) {
+    await page.getByRole('button', { name: '关闭 Source 面板', exact: true }).click()
+  }
+  await openSourcePanel(page)
+  await page.locator('.source-work-panel').getByRole('button', { name: '打开单 Source / thread', exact: true }).click()
+  const historicalSource = page.locator('.source-event-card').filter({ hasText: thirdSourceObjective })
+  await historicalSource.waitFor()
+  const beforeOpenTicketPost = captures('/api/v1/tickets').length
+  const historicalOpen = page.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/tickets/${thirdTicketId}` && response.request().method() === 'GET')
+  await historicalSource.getByRole('button', { name: `打开独立任务：${thirdTicketId}`, exact: true }).click()
+  assert.equal((await historicalOpen).status(), 200)
+  await page.locator('.source-work-modal').waitFor({ state: 'hidden' })
+  await waitingDetail.locator('.ticket-id').getByText(thirdTicketId, { exact: false }).waitFor()
+  await waitingDetail.getByRole('button', { name: '检查并决定', exact: true }).waitFor({ state: 'visible' })
+  const visibleApprovalDecision = waitingDetail.getByRole('button', { name: '检查并决定', exact: true })
+  await visibleApprovalDecision.scrollIntoViewIfNeeded()
+  assert.equal(await visibleApprovalDecision.evaluate(button => {
+    const rect = button.getBoundingClientRect()
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+    return hit === button || button.contains(hit)
+  }), true, 'The reopened historical approval must be a real visible/hit-testable control, not hidden under Source')
+  assert.equal(captures('/api/v1/tickets').length, beforeOpenTicketPost, 'Opening a historical event is a read-only navigation, never a second Task creation')
+  assert.equal(captures(rejectPath).length, 0, 'Opening a historical task does not submit any approval on its own')
+  for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual((await admin.get(`/api/v1/tickets/${encodeURIComponent(thirdTicketId)}`))[field], [])
   const beforeRejectCounts = { tickets: 3, assignments: scalar('SELECT COUNT(*) FROM assignments'), reports: scalar('SELECT COUNT(*) FROM reports'), artifacts: scalar('SELECT COUNT(*) FROM artifacts'), effects: scalar('SELECT COUNT(*) FROM effects'), specs: scalar('SELECT COUNT(*) FROM source_work_specs') }
   assert.deepEqual(beforeRejectCounts, { tickets: 3, assignments: 3, reports: 3, artifacts: 2, effects: 2, specs: 3 })
   assert.equal((await admin.get('/api/v1/grants')).grants.length, 1)
@@ -389,7 +418,6 @@ async function run() {
   await waitingDetail.getByRole('button', { name: '拒绝本次操作', exact: true }).click()
   await page.getByText('拒绝这次工作区操作？', { exact: true }).waitFor()
   assert.equal(await page.locator('.confirm-modal').innerText().then(text => text.includes(rejectReason) && text.includes('input.txt')), true)
-  const rejectPath = `/api/v1/tickets/${thirdTicketId}/approval`
   const rejectResponse = page.waitForResponse(response => new URL(response.url()).pathname === rejectPath && response.request().method() === 'POST')
   rejectResponse.catch(error => console.error('SOURCE APPROVAL REJECT WAIT', error.message))
   await page.getByRole('button', { name: '确认拒绝', exact: true }).click()
@@ -662,6 +690,8 @@ async function run() {
     immutable_spec_and_legacy_history_separate: true, actual_download_sha_input_sha_status_report_effect: true,
     replay_does_not_new_assignment_artifact_report_effect: true, watcher_does_not_duplicate: true,
     retry_real_failure_then_failure_report_and_new_assignment_succeeded: true, two_distinct_source_executions_no_duplicate: true,
+    historical_source_open_ticket_closes_modal_and_exposes_waiting_approval: true,
+    historical_navigation_is_read_only_without_new_ticket_or_approval: true,
     actual_reject_then_approve_source_first_attempt: true,
     approval_reason_persisted_as_actual_audit: { reject: rejectReason, approve: approveReason },
     approval_distinct_opaque_ids: true,
