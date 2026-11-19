@@ -82,8 +82,9 @@ async fn main() -> Result<()> {
             bindings_file,
         } => {
             let initial = if bindings_file.is_some() {
-                let identity =
-                    loom_node::identity::Identity::open(&prepare_private_root(&state_dir)?)?;
+                let identity = loom_node::identity::Identity::open_existing(
+                    &prepare_private_root(&state_dir)?,
+                )?;
                 Bindings::load_as(
                     &project_roots,
                     bindings_file.as_deref(),

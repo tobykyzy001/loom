@@ -30,11 +30,22 @@ impl std::fmt::Debug for Identity {
 
 impl Identity {
     pub fn open(state_dir: &Path) -> Result<Self> {
+        Self::load(state_dir, true)
+    }
+
+    pub fn open_existing(state_dir: &Path) -> Result<Self> {
+        Self::load(state_dir, false)
+    }
+
+    fn load(state_dir: &Path, allow_generate: bool) -> Result<Self> {
         let file = state_dir.join("identity.json");
         let mut generated = false;
         let data = match read_json(&file)? {
             Some(value) => value,
             None => {
+                if !allow_generate {
+                    bail!("a signed binding file requires an existing Node identity; use bind to create the local identity and declaration");
+                }
                 let mut secret = [0u8; 32];
                 getrandom::getrandom(&mut secret).map_err(|_| {
                     anyhow::anyhow!("secure random source unavailable for node identity")

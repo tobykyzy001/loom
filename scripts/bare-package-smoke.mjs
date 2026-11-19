@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, constants as fsConstants, mkdir, mkdtemp, readdir, readFile, lstat, stat, writeFile, symlink, link, access } from 'node:fs/promises'
+import { chmod, copyFile, constants as fsConstants, mkdir, mkdtemp, readdir, readFile, realpath, lstat, stat, writeFile, symlink, link, access } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { once } from 'node:events'
 import { homedir, tmpdir } from 'node:os'
@@ -210,15 +210,47 @@ try {
   assert.notEqual(missingBind.code, 0, missingBind.output)
   logCheck('actual bind fails for missing approved root rather than silently choosing cwd', { exit_code: missingBind.code })
   const policy = await listenPolicyFixture()
+  const readonlyState = await privateDir(join(root, 'readonly-binding-state'), 0o700)
+  const absentSignedFile = join(root, 'no-such-binding-config.json')
+  const readonlyFailure = await processRun(binary, ['start', '--coordinator', policy.endpoint,
+    '--state-dir', readonlyState, '--artifact-dir', artifactsDir,
+    '--project-root', `fixture=${inputDir}`, '--bindings-file', absentSignedFile, '--once',
+    '--enrollment-code', 'invalid-not-an-enrollment'], { timeoutMs: 10000 })
+  assert.notEqual(readonlyFailure.code, 0, readonlyFailure.output)
+  assert.equal(policy.records.length, 0, 'invalid signed-input access must not reach any coordinator endpoint')
+  await assert.rejects(() => access(join(readonlyState, 'identity.json')), (error) => error.code === 'ENOENT', 'the unreadable binding input must not create an identity')
+  logCheck('a missing signed binding input cannot implicitly generate a Node identity', { identity_created: false, coherently_valid_binding: false, coordinator_registration_attempted: false })
+  const bindingState = await privateDir(join(root, 'signed-binding-state'), 0o700)
+  const distinctCliRoot = await privateDir(join(root, 'distinct-cli-project'), 0o700)
+  await writeFile(join(distinctCliRoot, 'input.txt'), 'An independent root for the explicit CLI mapping.\n', { mode: 0o600, flag: 'wx' })
+  const originalBind = await processRun(binary, ['bind', '--state-dir', bindingState, '--project-root', `fixture=${inputDir}`], { timeoutMs: 10000 })
+  assert.equal(originalBind.code, 0, originalBind.output)
+  const bindingFile = JSON.parse(originalBind.output.trim()).binding_file
+  assert.equal(await realpath(bindingFile), await realpath(join(bindingState, 'project-bindings.json')))
+  const beforeSignedRead = await readFile(join(bindingState, 'identity.json'))
+  const previousPolicyRequests = policy.records.length
+  const signedReadFailure = await processRun(binary, ['start', '--coordinator', policy.endpoint,
+    '--state-dir', bindingState, '--artifact-dir', artifactsDir,
+    '--project-root', `secondary=${distinctCliRoot}`, '--bindings-file', bindingFile, '--once',
+    '--enrollment-code', 'invalid-not-an-enrollment'], { timeoutMs: 10000 })
+  assert.notEqual(signedReadFailure.code, 0, signedReadFailure.output)
+  assert.equal(sha256(await readFile(join(bindingState, 'identity.json'))), sha256(beforeSignedRead))
+  const afterSignedRead = policy.records.slice(previousPolicyRequests)
+  assert.equal(afterSignedRead.filter((entry) => entry.path.endsWith('/challenge')).length, 1, signedReadFailure.output)
+  assert.equal(afterSignedRead.filter((entry) => entry.path.endsWith('/register')).length, 1)
+  assert.equal(afterSignedRead.filter((entry) => entry.path.endsWith('/heartbeat') || entry.path.endsWith('/assignments/poll')).length, 0)
+  logCheck('the existing identity is validated against its generated local signature before controlled invalid-enrollment HTTP', { unchanged_identity: true, rejected_registration: true, heartbeat_or_assignments: false })
   let deniedEnrollment
   try {
+    const beforeDeniedEnrollment = policy.records.length
     deniedEnrollment = await processRun(binary, ['start', '--coordinator', policy.endpoint,
       '--state-dir', stateDir, '--artifact-dir', artifactsDir,
       '--project-root', `fixture=${inputDir}`, '--once', '--enrollment-code', 'definitely-invalid-test-enrollment'], { timeoutMs: 20000 })
     assert.notEqual(deniedEnrollment.code, 0, deniedEnrollment.output)
-    assert.equal(policy.records.filter((entry) => entry.path.endsWith('/register')).length, 1)
-    assert.equal(policy.records.filter((entry) => entry.path.endsWith('/heartbeat') || entry.path.endsWith('/assignments/poll')).length, 0)
-    assert.equal(policy.records.every((entry) => entry.method === 'POST' && (entry.path.endsWith('/challenge') || entry.path.endsWith('/register'))), true)
+    const deniedRecords = policy.records.slice(beforeDeniedEnrollment)
+    assert.equal(deniedRecords.filter((entry) => entry.path.endsWith('/register')).length, 1)
+    assert.equal(deniedRecords.filter((entry) => entry.path.endsWith('/heartbeat') || entry.path.endsWith('/assignments/poll')).length, 0)
+    assert.equal(deniedRecords.every((entry) => entry.method === 'POST' && (entry.path.endsWith('/challenge') || entry.path.endsWith('/register'))), true)
   } finally { await policy.stop() }
   logCheck('invalid enrollment 401 returns error without accepting registration, heartbeat or Grant', {
     nonzero_exit: deniedEnrollment.code, policy: 'enrollment_denied is not accepted as valid registration', registered: false,
