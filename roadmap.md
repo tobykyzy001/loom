@@ -274,6 +274,12 @@ M1“本地图像能力问询”已有一个**条件化不移交图片执行权*
 
 详见[当前可信硬件条件报告](tests/model-inventory/README.md#current-trusted-local-hardware-condition-report)及 `/tmp/loom-image-capability-proof.json`。除此之外仍有第二物理设备、真正的图片Smoke、mobile真机、Windows/Linux/多Harness和全M1事项未验证。
 
+M1 Git项目目录已在生产Vue上超越“可注册但不可见”：`ProjectInventory` 白名单现在携带form/revision/dirty/source/probed_at及安全的canonical_remote、credential存储类别及查询标记。页面区分真实HEAD基线与working-tree修改、unknown与clean，拒绝把 `dirty:"true"`或不合法元数据当成洁净状态；dirty:null对Git和资料目录都表示未知而非false。无HEAD/普通资料目录不伪造revision。public URL仍为文本，不把raw remote/password当href、连网证据或新权限。显式`probeProject(id)`沿用既有保护probe，要求同ID/read_only_probe:true/完整inventory，401/epoch/失败保留旧观测，每次fresh读取由按钮触发而非隐式clone。
+
+真实 `tests/projects/browser.mjs` 已运行own Git+document+真实中心+production Edge全流程：初始敏感remote被控制器正确清洗，tracked file dirty时忙时只调用一次同Project probe，后续unsafe remote仍redacted，Git命令错误呈现dirty:null而非clean。停中心后在自有SQLite删除project得到真400；旧观测与错误说明还在，不把200 shape/inventory遗失当新事实。随后恢复fixture行及完整对象，以同一port/token/dataDir重启，精确对比所有inventory与root/mode/version/created_at，弄清无空DB或身份复制。原URI/root、mode与环境 bindings不会被 probe偷换；未验证外部远程可达或登录能力。Mutation和操作均自有测试目录；凭据flags不冒称发生秘密读取。390px查证如非Git卡片不伪造HEAD，日志避免secret/full server对象，默认安全清理owned临时目录。
+
+这意味着 M1 的 Git 与非Git**只读目录事实与显式重读**小场景已验证，而不是全 M1 的主机发现/任务编排完成。它不含跨机、隐式clone/fetch、通用CVE/依赖解析、生产桌面profile或任何模型质量。详见 [Projects 的本地事实与刷新](tests/projects/README.md#Production-project-facts-and-explicit-re-probe) 及 `/tmp/loom-project-facts-proof.json`。
+
 **进入 M2 的证据**
 
 能力矩阵由实际探测产生，并覆盖能力存在、缺失、离线、无权限和状态过期五类情况；至少一个不具备图像能力的测试环境也得到正确、可操作的回答。

@@ -414,6 +414,17 @@ report / reconciliation_state
 | MemoryCandidate | 等待用户确认的偏好或经验草案；接受后才成为对应作用域的 Memory |
 | SkillCandidate | 从重复会话提炼的工作流草案，含适用条件、输入、步骤、验证和产物，不自动取得执行权 |
 
+### Project local facts are readable prior observations, not forward grants
+
+Project registry的公开inventory不只有目录注册语义。`ProjectInventory` 白名单可以返回 `form/git_available/revision/dirty/canonical_remote{,_status}/redacted_remote/needs_review/source/probed_at` 以及类别化的credential location、availability与lookup标记。它们来自现有、固定、只读的本地Git检查，而HEAD只是基线，**不**证明当前工作树字节等于它。凭据类别不表示已读credential-value或可以访问远端。
+
+- 缺失revision/dirty必须保留未知；不能把`dirty:"true"`或不完整时间戳解释成clean。普通documents目录不需要伪造HEAD。working-tree也有dirty:null、尚无提交的HEAD等合法状态；另有命令或快照未获得时的未知字段。
+- 公共canonical_remote仍使用controller的净化结果，剔除userinfo、query、fragment以及不安全的login或path。UI仅用无href的文本展示它，不把raw `.git/config` 变成可达性或凭据授权证据。被剥离/不公开地址和“从未采集”必须分开。
+- 用户主动触发的 `POST /projects/{id}/probe` 是已有受保护的只读读取，不是隐式联网或项目hook执行。它复用当前认证时代与 `requireCurrentCredential`；`probeProject`以每Project busy处理重复调用。成功必须具备 `read_only_probe:true`、同ID和完整公开inventory，之后才替换同一Registry item，不改Grant/Project mode。
+- transport/401/epoch差错、错Project、缺inventory或异常metadata到来时，**保留旧快照与旧probed_at**，不能因返回HTTP 200但字段不完整而抹掉旧观察。probe没有伪称新任务audit或跨主机权限。默认GET不自动重新检查每个目录。
+
+`/projects`真实API与production Edge `tests/projects/browser.mjs` 实测 Git/document目录、HEAD基线与修改、忙时禁止重复probe、坏远端被隐藏、命令结果未知/缺失Project失败时旧观测及同data-dir重开保持。文件直接Modify用于自有fixture数据，不把其误写成远端批处理或对所有Credentials的证明。验证范围和仍缺少的设备/Profile覆盖见[tests/projects/README.md](tests/projects/README.md#Production-project-facts-and-explicit-re-probe)。
+
 ### 3.1 当前实现的资源与执行证据补充
 
 当前开发基线使用 `InstallationResourceBinding` 表示“哪个 ProjectId 在某个 Node + Installation + Worker 的真实本地位置上如何映射”。Host 先声明候选位置，单用户管理员显式确认绑定，Grant 再引用绑定及 digest；**生命周期为发现候选 → 绑定确认 → Grant → Assignment/Lease**，不是发现即授权。Ticket/Grant digest 与绑定版本需要一致，不能指向另一个 installation 或另一个 root，且当前实现没有 fallback 到任意备用目录。节点本地 Executor 也应把中心签发 binding 与 operator 私有 config 的 Canonical Root 再次核验。

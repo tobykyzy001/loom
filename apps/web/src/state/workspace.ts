@@ -1,6 +1,6 @@
 import { reactive, toRefs } from 'vue'
 import { ApiError, LoomClient } from '../api/client'
-import { acceptSourceTicketReceipt, auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, sourceEventFrom, sourceReceiptFrom, sourceRegistrationFrom, sourceThreadFrom, rejectSourceSpecMismatch, sourceWorkBodyFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
+import { probeProjectResultFrom, acceptSourceTicketReceipt, auditFrom, artifactFrom, defaultTicketId, grantsFrom, memoriesFrom, nodesFrom, preferencesFrom, projectFrom, projectsFrom, sourceEventFrom, sourceReceiptFrom, sourceRegistrationFrom, sourceThreadFrom, rejectSourceSpecMismatch, sourceWorkBodyFrom, ticketFrom, ticketResponseFrom, ticketsFrom } from '../api/parsing'
 import type { ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Grant, GrantOperation, InstallObservationRequest, InstallTarget, InstallPlan, InstallPlanData, InstallPlanPolicy, ModelInventoryData, LoomNode, Memory, NewTicket, Page, Preferences, Project, ProjectBindingInput, ProjectMode, SkillCandidate, SkillWorkspaceData, SourceEvent, SourceInstance, SourceInstanceInput, SourceThread, SourceTicketReceipt, SourceWorkDraft, Ticket } from '../api/types'
 import { PAGE_KEY, TICKET_KEY, TOKEN_KEY, cachedExpanded, localRead, localWrite } from '../lib/storage'
 import { safeRelativePath } from '../lib/format'
@@ -59,6 +59,7 @@ const installActions = new InstallPlanActions(client)
 let detailVersion = 0
 let runDetailVersion = 0
 let sourceIdentityEpoch = 0
+const projectProbeVersions = new Map<string, number>()
 const retainedSourceIds = new Map<string, string>()
 const rememberedSourceThreads = new Map<string, { source_id: string; client_thread_id: string }>()
 const recordRequests = new Map<string, string>()
@@ -79,6 +80,7 @@ function writeNeedsCredentials(key: string): boolean {
   // a candidate token is being checked. It only becomes a rejection after the
   // actual 401, rather than blocking that read as though it were a write.
   if (key.startsWith('preferences:') && key.endsWith(':read')) return false
+  if (key.startsWith('project-probe:')) return true
   return writesNeedingCredentials.has(key) || key === 'preferences:global' || key.startsWith('preferences:ticket:')
 }
 
@@ -1052,6 +1054,25 @@ export async function loadModelInventory(): Promise<boolean> {
     }
   })
   return result !== undefined
+}
+
+export async function probeProject(id: string): Promise<boolean> {
+  if (typeof id !== 'string' || !id.trim() || id.length > 160) return false
+  const key = `project-probe:${id}`
+  if (state.busy[key]) return false
+  const version = (projectProbeVersions.get(id) ?? 0) + 1
+  projectProbeVersions.set(id, version)
+  const result = await run(key, async () => {
+    const value = await client.post<unknown>(`/projects/${encodeURIComponent(id)}/probe`, {}, { requireCurrentCredential: true })
+    const project = probeProjectResultFrom(value, id)
+    if (!project) throw new Error('未能验证此观测属于同一Project且其公开结构完整；保留此前观测。')
+    return project
+  })
+  if (result === undefined) return false
+  if (projectProbeVersions.get(id) !== version) return false
+  if (!state.projects.some(project => project.id === id)) return false
+  state.projects = state.projects.map(project => project.id === id ? result : project)
+  return true
 }
 
 export async function evaluatePlacement(input: Record<string, unknown>): Promise<unknown> {

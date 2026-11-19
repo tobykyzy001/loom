@@ -156,7 +156,10 @@
 - Git URL 清洗要在持久与 audit 前完成，HTTPS userinfo 不得成为公开凭据泄漏；只读 probe 不能推导 clone/fetch/远端可达。硬件 probe 明确 opt-in、固定 executable/argv、限制输出，不把 GPU/Metal 当作已安装可用模型。
 
 - **Probe的来源不能由Node心跳签合同，物理本机归属也不能只凭Node ID猜。** 固定probe的真实完整DTO应存中心私有 `settings.hardware_probe:<node>:<installation>`，节点与Placement只投影这个精确Installation的中心记录，不能将heartbeat里的 `source:"controller_probed"` 或放大的硬件数据冒充controller实测。原始Node inventory不被CLI偷改；未测内存必须仍未知，审计失败不能落下无主事实。CLI在执行前另要求 `--this-controller-host` 明确操作者选定当前物理机，这只是本地operator声明、不是密码学设备证明，更不允许转成远程/第二Host验证。当前实测、伪造心跳、条件原因、busy、原port/token/dataDir重开的verification见 [model inventory](tests/model-inventory/README.md#current-trusted-local-hardware-condition-report) 与 `/tmp/loom-image-capability-proof.json`。基于这份报告的图像前提评估不是图片执行/质量或全M1完成。
-- **无外部副作用的POST并不想当然跳过当前认证代际。** 专用 `requireCurrentCredential` 仅对已标明读取用途的POST检查token/epoch，不能改造旧写入的已接回收据。条件评估走 `run` 的真实401/Required流程，不能用自捕获异常另造旁路。新artifact候选读取仍须用户明确选择相同Node/installation/worker/root的现有read Grant，保留canonical root合法映射但不自动倒选。硬件显示按真实 `fact.source`，长标识由实际390px换行验收，所有“存在模型/支持图片/运行时已实测”的额外结论都必须明确禁止。
+- **无外部副作用的POST并不想当然跳过当前认证代际。** 专用 `requireCurrentCredential` 仅对已标明读取用途的POST检查token/epoch，不能改造旧写入的已接回收据。条件评估走 `run` 的真实401/Required流程，不能用自捕获异常另造旁路。此类评估仍须用户明确选择相同Node/installation/worker/root的现有read Grant，保留canonical root合法映射但不自动倒选。硬件显示按真实 `fact.source`，长标识由实际390px换行验收，所有“存在模型/支持图片/运行时已实测”的额外结论都必须明确禁止。
+- **Project Git事实是上次受控观察，不是目录授权或实时证明。** ProjectInventory需以白名单展示HEAD基线、真实form/dirty、来源和probed_at；工作的dirty也可以null表示未知，不可写为false；非Git documents不需要伪造HEAD，缺/坏inventory时probe不能改写已有观测。公共canonical_remote不是href，redaction与凭据类别状态独立，不把private git config/凭据字段或操作转换为远端可达或Grant。`probeProject(id)`有per-Project busy，必须在同ID/read_only_probe:true/完整公开inventory时才替换Registry item，401/epoch/unknown都不能删除原本的旧观测。真root、token、dataDir重开按完整 inventory校验，不要误开空SQLite 或把整Project与 inventory子对象含糊比较。真实正反向证据见 [tests/projects/README.md](tests/projects/README.md) 与 `/tmp/loom-project-facts-proof.json`。缺北结果也可能只是更精确未知，并非HTTP failure。
+
+### 5.6 Web、断连和 PWA 静态壳
 
 ### 5.6 Web、断连和 PWA 静态壳
 

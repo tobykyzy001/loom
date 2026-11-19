@@ -13,12 +13,29 @@ export type ExtendedTicketStatus = TicketStatus | 'cancel_requested'
 
 export type TicketReadableStatus = TicketStatus | 'unknown'
 
+export interface ProjectInventory {
+  form: 'working_tree' | 'documents' | 'generated_workspace' | string
+  git_available?: boolean
+  revision?: string | null
+  dirty?: boolean | null
+  canonical_remote?: string | null
+  canonical_remote_status?: 'public' | 'unsupported_or_redacted' | string | null
+  redacted_remote?: boolean
+  needs_review?: boolean
+  source?: string
+  probed_at?: string
+  credential_lookup_performed?: boolean
+  credential_available?: string | null
+  credential_location?: 'host_credential_store' | 'node_credential_broker' | 'none' | string | null
+}
+
 export interface Project {
   id: string
   name: string
   mode: ProjectMode
   root?: string
   created_at?: string
+  inventory?: ProjectInventory
 }
 
 export type GrantOperation = 'read_summary' | 'edit_file' | 'read_write'

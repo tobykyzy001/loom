@@ -1,4 +1,4 @@
-import type { ApiErrorBody, ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Effect, Grant, LoomNode, Memory, Message, Preferences, Project, Report, SourceEvent, SourceRegistration, SourceThread, SourceTicketReceipt, SourceWorkDraft, SourceWorkSpec, Ticket } from './types'
+import type { ApiErrorBody, ArtifactContent, ArtifactRef, AuditEntry, Bootstrap, Effect, Grant, LoomNode, Memory, Message, Preferences, Project, ProjectInventory, Report, SourceEvent, SourceRegistration, SourceThread, SourceTicketReceipt, SourceWorkDraft, SourceWorkSpec, Ticket } from './types'
 
 export function listOf<T>(value: unknown, keys: string[]): T[] {
   if (Array.isArray(value)) return value as T[]
@@ -11,7 +11,58 @@ export function listOf<T>(value: unknown, keys: string[]): T[] {
   return []
 }
 
-export const projectsFrom = (value: unknown) => listOf<Project>(value, ['projects'])
+function inventoryString(value: unknown, max = 1000): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value) ? value : null
+}
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' || value === undefined ? value : undefined
+}
+function optionalText(value: unknown): string | null | undefined {
+  return value === null || value === undefined ? value : inventoryString(value)
+}
+/** A bounded public view of already-sanitised registry facts, never raw Git config. */
+export function projectInventoryFrom(value: unknown): ProjectInventory | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+  const form = inventoryString(source.form, 80)
+  const forms: ProjectInventory['form'][] = ['working_tree', 'documents', 'generated_workspace']
+  if (!form || !forms.includes(form)) return null
+  for (const key of ['redacted_remote', 'needs_review']) {
+    if (key in source && optionalBoolean(source[key]) === undefined) return null
+  }
+  for (const key of ['revision', 'canonical_remote', 'canonical_remote_status', 'source', 'credential_available', 'credential_location']) {
+    if (key in source && optionalText(source[key]) === undefined) return null
+  }
+  if (source.revision !== null && source.revision !== undefined && !/^[a-f0-9]{40}([a-f0-9]{24})?$/i.test(String(source.revision))) return null
+  if ('probed_at' in source && optionalText(source.probed_at) === undefined) return null
+  if (source.probed_at !== null && source.probed_at !== undefined && !Number.isFinite(Date.parse(String(source.probed_at)))) return null
+  if ('git_available' in source && optionalBoolean(source.git_available) === undefined) return null
+  if ('credential_lookup_performed' in source && optionalBoolean(source.credential_lookup_performed) === undefined) return null
+  if ('dirty' in source && source.dirty !== null && optionalBoolean(source.dirty) === undefined) return null
+  const allowedRemote = source.canonical_remote_status === 'public' && source.redacted_remote !== true && source.needs_review !== true
+    ? optionalText(source.canonical_remote) : null
+  if (allowedRemote === undefined) return null
+  return {
+    form: source.form as ProjectInventory['form'],
+    ...(optionalBoolean(source.git_available) !== undefined && { git_available: source.git_available as boolean }),
+    ...(source.revision !== undefined && { revision: source.revision as string }),
+    ...(optionalBoolean(source.dirty) !== undefined && { dirty: source.dirty as boolean }),
+    canonical_remote: allowedRemote,
+    ...(source.canonical_remote_status !== undefined && { canonical_remote_status: source.canonical_remote_status as string }),
+    ...(optionalBoolean(source.redacted_remote) !== undefined && { redacted_remote: source.redacted_remote as boolean }),
+    ...(optionalBoolean(source.needs_review) !== undefined && { needs_review: source.needs_review as boolean }),
+    ...(optionalText(source.source) !== undefined && { source: source.source as string }),
+    ...(source.probed_at !== undefined && { probed_at: optionalText(source.probed_at) as string }),
+    ...(optionalBoolean(source.credential_lookup_performed) !== undefined && { credential_lookup_performed: source.credential_lookup_performed as boolean }),
+    ...(optionalText(source.credential_available) !== undefined && { credential_available: source.credential_available as string }),
+    ...(optionalText(source.credential_location) !== undefined && { credential_location: source.credential_location as string }),
+  }
+}
+
+export const projectsFrom = (value: unknown) => listOf<Project>(value, ['projects']).map(project => {
+  if ('inventory' in project) project.inventory = projectInventoryFrom(project.inventory) ?? undefined
+  return project
+})
 export const grantsFrom = (value: unknown) => listOf<Grant>(value, ['grants'])
 export const memoriesFrom = (value: unknown) => listOf<Memory>(value, ['memories'])
 export const auditFrom = (value: unknown) => listOf<AuditEntry>(value, ['audit', 'entries'])
@@ -43,6 +94,19 @@ function validReportStatus(status?: string): Report['status'] {
 export function nodeFrom(node: LoomNode): LoomNode {
   return { ...node, status: node.revoked_at ? 'offline' : node.online === true ? 'online' : node.online === false ? 'offline' : node.status ?? 'offline' }
 }
+export function probeProjectResultFrom(value: unknown, expectedId: string): Project | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const receipt = value as Record<string, unknown>
+  if (receipt.read_only_probe !== true || !expectedId) return null
+  const project = projectFrom(value)
+  if (!project || project.id !== expectedId) return null
+  if (!Object.prototype.hasOwnProperty.call(project, 'inventory')) return null
+  const parsed = projectInventoryFrom(project.inventory)
+  if (!parsed) return null
+  project.inventory = parsed
+  return project
+}
+
 export function projectFrom(value: unknown): Project | null {
   if (!value || typeof value !== 'object') return null
   const root = value as { project?: Project } & Partial<Project>

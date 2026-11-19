@@ -361,6 +361,22 @@ details pre { background: #fbf8fc; padding: 14px; border-radius: 6px; max-height
 .project-scope > svg { flex-shrink: 0; margin-top: 3px; }
 .project-scope p { font-size: 11px; }
 .project-binding-action { margin-top: 17px; }
+.project-inventory { margin-top: 18px; padding-top: 14px; border-top: 1px solid #f0e5f4; }
+.evidence-heading { display: flex; align-items: center; gap: 7px; font-size: 10px; color: #8d758d; }
+.evidence-heading span { min-width: 0; overflow-wrap: anywhere; color: #b39bb5; }
+.evidence-time { margin-top: 7px; font-size: 9px; line-height: 1.6; color: #ad9fb4; }
+.inventory-facts { display: grid; gap: 8px; margin: 12px 0; }
+.inventory-facts > div { display: grid; grid-template-columns: minmax(75px, .38fr) minmax(0, 1fr); gap: 10px; font-size: 10px; line-height: 1.65; }
+.inventory-facts dt { color: #a992b0; }
+.inventory-facts dd { min-width: 0; overflow-wrap: anywhere; margin: 0; color: #7e668b; }
+.inventory-facts .mono { font-size: 9px; }
+.inventory-facts .wrap-value { overflow-wrap: anywhere; word-break: break-word; }
+.project-inventory .hint { line-height: 1.8; font-size: 9px; }
+.project-refresh { margin-top: 16px; }
+.project-refresh .button { width: 100%; font-size: 10px; }
+.project-refresh .hint { margin-top: 9px; line-height: 1.65; font-size: 9px; }
+.project-refresh .form-error { line-height: 1.7; overflow-wrap: anywhere; }
+.project-card .inline-note { margin-top: 17px; font-size: 10px; line-height: 1.7; overflow-wrap: anywhere; }
 .project-binding-action .hint { margin: 0 0 10px; }
 .project-binding-action .button { width: 100%; }
 .binding-dialog code { font-size: 10px; overflow-wrap: anywhere; }
