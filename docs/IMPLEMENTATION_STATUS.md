@@ -12,6 +12,18 @@ A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored 
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
 
+## Real multi-process native ownership and post-release reconciliation
+
+`node tests/runner/process-owner.mjs` now exercises the previously implemented per-state-directory advisory lock through actual independent `loom-node` OS processes, rather than only constructing two runners inside one Rust test. It uses the current Rust Concierge, real native bind/registration, a single read Grant/Binding and one real `read_summary` in owned temporary directories.
+
+The test loopback proxy does not manufacture credentials, assignments, Grants or receipts. It only holds the first real poll with `last_assignment_id:null` and `wait_seconds:10` **before forwarding it to Concierge**, so the first native process still owns `runner.lock` with no acknowledged Assignment or Artifact/Report. The second CLI with the same state/artifact/project must then exit nonzero with `another LocalNodeRunner already owns this node state directory` while the first is still alive. It does not register, heartbeat or create an effect.
+
+After releasing that original poll, the first process completes the real job. The controller contains exactly one Ticket, Assignment, Artifact, Report, Effect and `assignment.acknowledged` audit. A subsequent native process, even if it simply polls idled completed work, must not perform another execution or alter the original Ticket/Assignment/Grant/ack timestamp. The test compares source bytes and the single UUID `.bin` against the authorized base64 download and their SHAs, and checks SQLite integrity and the audit chain. Actual poll totals varied between runs (14/15) without altering these single-effect invariants.
+
+The driver itself was independently reviewed and corrected: no recursive/unbounded process or cleanup wait, five-second proxy/center shutdown deadlines, actual close status rather than hard-coded `center_stopped:true`, and an error in writing `result.json` makes the overall result FAIL. The real driver ran green four times (including three runs by the coordinating agent, the final one alongside all 209 web tests and the production build), and the final independent review has no P1/P2 findings. A truncated early diagnostic is not counted as a full PASS. Latest evidence: [result.json](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-native-process-owner-proof-Mo5IaC/result.json).
+
+Only one macOS arm64 physical host, one Installation, two concurrent native processes and a later sequential reopen were exercised. The deferred poll is not packet loss, SIGKILL, NFS, non-cooperating writers, another Host or global exactly-once. No production code, API or schema changed in this increment.
+
 ## Native state-lock paths reject aliased file objects
 
 A real pre-fix regression found a hole in the new ownership lock: if an existing `runner.lock` is a symlink, the ordinary `OpenOptions` call follows it and the later `chmod 0600` changes the target. A directory-name guard and a successful advisory lock alone do not make that an acceptable owner object.
