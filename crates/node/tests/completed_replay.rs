@@ -694,6 +694,64 @@ async fn two_runners_sharing_a_node_state_directory_must_not_execute_the_same_as
 }
 
 #[tokio::test]
+async fn a_corrupt_identity_releases_the_owner_lock_without_silently_creating_a_new_identity() {
+    let fixture = Fixture::new(false).await;
+    let identity_path = fixture.state.join("identity.json");
+    let original_bytes = std::fs::read(&identity_path).unwrap();
+    let mut identity: Value = serde_json::from_slice(&original_bytes).unwrap();
+    identity["public_key"] = json!("A".repeat(43));
+    atomic_json(&identity_path, &identity).unwrap();
+    let corrupt_bytes = std::fs::read(&identity_path).unwrap();
+    for _ in 0..2 {
+        let error = fixture
+            .try_runner()
+            .await
+            .err()
+            .expect("invalid identity must refuse to start")
+            .to_string();
+        assert!(
+            error.contains("private and public node keys do not match"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("already owns this node state directory"),
+            "{error}"
+        );
+        let actual = std::fs::read(&identity_path).unwrap();
+        assert_eq!(actual, corrupt_bytes);
+    }
+    atomic_json(
+        &identity_path,
+        &serde_json::from_slice::<Value>(&original_bytes).unwrap(),
+    )
+    .unwrap();
+    let mut recovered = fixture
+        .try_runner()
+        .await
+        .expect("identity repair must allow reacquiring after two failed starts");
+    assert!(matches!(
+        recovered.once().await.unwrap(),
+        TickStatus::Succeeded
+    ));
+    let artifacts = std::fs::read_dir(&fixture.artifacts)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "bin")
+        })
+        .count();
+    assert_eq!(
+        artifacts, 1,
+        "identity repair must allow only one genuine read and Artifact"
+    );
+    assert_eq!(std::fs::read(identity_path).unwrap(), original_bytes);
+}
+
+#[tokio::test]
 async fn native_completed_replay_checks_full_input_before_evidence_delivery() {
     let fixture = Fixture::new(false).await;
     assert!(matches!(
