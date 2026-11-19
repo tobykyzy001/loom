@@ -399,6 +399,21 @@ pub fn delegated_source_proof(store: &Store, body: &Value) -> Result<Value> {
     {
         bail!("Parent SessionRef must identify an actual supported DSH AgentSession");
     }
+    // Remote source reading does not itself let a child choose another parent
+    // Session identity. Missing legacy refs retain their old behavior, but any
+    // supplied Session/Ticket/sequence claim must match the stored producer.
+    if let Some(claim) = body.get("parent_session_ref") {
+        let identity_matches = claim["harness"] == session["harness"]
+            && claim["protocol"] == session["protocol"]
+            && claim["session_id"] == session["session_id"]
+            && (claim["ticket_id"].is_null() || claim["ticket_id"] == parent_ticket);
+        let host_matches = claim["host_api"].is_null() || claim["host_api"] == session["host_api"];
+        let sequence_matches = claim["observed_seq"].is_null()
+            || claim["observed_seq"].as_u64() >= session["observed_seq"].as_u64();
+        if !identity_matches || !host_matches || !sequence_matches {
+            bail!("parent_session_ref must match the actual producer's Session, Ticket and observed sequence");
+        }
+    }
     Ok(json!({
         "artifact_input": source,
         "parent_session_ref": {

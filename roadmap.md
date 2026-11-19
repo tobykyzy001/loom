@@ -223,6 +223,8 @@ M0“敏感过程”已本机跑通一个受限的真实例子：`tests/harness/
 
 M0“受限输入到可信执行”又已有真实本机例子：`tests/harness/source-intent.mjs`实际让用户在生产Web Source中先发 `读取 input.txt`，再连续发 `用 Grant <完整ID>`。两段真实SourceEvent只形成候选，不是 Grant或Task。纯词法只允许同Source/thread/连续sequence，原始Objective来自读取请求而非授权说明，多个历史pair不得跨时代选或重绑；没有默认值或自动第一个Grant。`publishedSourceRoot()`统一公开canonroot与候选，Node public inventory同时保留原 `project_roots` 与canonicalinspector字段，不能把目录名解读为权限。准备与确认之间当前Grant version/digest/Binding/installation重新比较且均不发往center，最终仍按原有八字段source授权规格。真实撤权后零新票；更换合法Grant+父confirm只有一个read_summary、一次真实ToolCall/ToolResult、匹配原始bytes SHA的Artifact。中心/Host同目录同port同token重开没有新toolcall/provider request/effect，前后Spec、SessionRef和原Source关系保留。详见[受限两句Source与真实范围](tests/sources/README.md#受限的两句-source-读取入口真实-sdk--edge-已验证)和 `/tmp/loom-source-intent-proof.json`。这仅固定中文读取动词/路径/精确Grant样例，尚不宣称任意自然语言、普通对话意图理解、Live provider或移动真机验收；schema仍16且无服务器新长期对话计划权威。
 
+父子委派的真实M0小场景已经贯通到生产协作视图：`tests/harness/real-delegation.mjs --browser`在**rc.5同一隔离Profile**中，默认child协作只显示阶段，展开后取得经中心确认的parent Ticket/Artifact、不同parent/child Session，并让父Ticket按钮走现有认证`selectTask`回读，父子往返但不创造Grant。显式 `parent_session_ref`现由中心继续核对与原始producer/session/ticket/host/序列相符，旧缺省沿用真实source-record，不允许调用者借自报Session覆盖source lineage。驱动临时移走原有真实父Artifact，实际400拒绝后完整恢复原件SHA unchanged；缺byte vs伪造session分别验证，不把Group Name/原始message tag或http 200伪装成证明。1280/390（仅desktop viewport）、父子真实bytes、原Report/Effect/Message与同port/data dir/token的中心重开已PASS，无新 ToolCall/ToolResult/provider request。详见[DELEGATION生产协作及缺字节围栏](tests/harness/DELEGATION.md#production-collaboration-view-and-source-claim-integrity-latest)。汇总不再误输出server/admin/token；Stage范围仍非物理多机、全DAG或实际手机，不推广为全Harness意图理解。
+
 **进入 M1 的证据**
 
 至少两类真实任务完成端到端运行，并分别覆盖成功、失败、取消和重启。先根据实测确认最小领域模型，再冻结 M1 的 Registry Schema。

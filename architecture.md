@@ -511,8 +511,9 @@ Schema14在现有 `artifacts` 增加可空 `code_evidence_json`，只为这一�
 
 当前已在同一个隔离用于验证 DSH Profile 中实际验证：父 Agent 完成一个正常授权阶段并产生原 Artifact 与自己真实的 Session 后，**另一个独立 Session** 的 child Agent 可在既有 Grant 范围内使用经过中心验证的来源生成实际输出。
 
-- `POST /api/v1/nodes/assignments/source` 只接受当前 child Assignment、正确 Node 身份和有效 Lease。中心按本 workflow 的原始父阶段选择不可变 Artifact，验证其对应 Ticket、Project、真实 bytes/hash及父阶段普通 `session_link`，返回确定的 source proof；不允许 Worker 任意查询其它 Ticket 或 Session，也不给 Agent 管理员 token。不能仅凭 UUID、session 名称或 `parentSession` 推导权限。
+- `POST /api/v1/nodes/assignments/source` 只接受当前 child Assignment、正确 Node 身份和有效 Lease。中心按本 workflow 的原始父阶段选择不可变 Artifact，验证其对应 Ticket、Project、真实 bytes/hash及父阶段普通 `session_link`，返回确定的 source proof；不允许 Worker 任意查询其它 Ticket 或 Session，也不给 Agent 管理员 token。不能仅凭 UUID、session 名称或 `parentSession` 推导权限。如果调用者显式提供 `parent_session_ref`，还必须与这条已被中心确认的 producer 的 Session/Ticket 和 sequence 一致；不得替造`harness`、自选择父`session_id`或过早观察序列。缺省旧的 server-selected ref 仍从原 producer event 推导，并不为别的 Artifact 扩权。
 - DSH 默认拒绝未验证的 `artifact_input`。显式的 `scoped_fixture` 只用于上述窄测例，通过公开 `ctx.agents.create` 的 `setup` 在 child 创建前登记 source-bound scoped Tool，并用 `meta.parentSession`建立实际父子关系。它不是任意文件写入、模型自报能力或另一套授权注册表，不自动称为跨机、跨 Host 或多 Harness 能力。
+- 展开的协作tab只展示经中心规范化的父 Ticket/Artifact及不同父子 Session：父Ticket按钮复用 `selectTask` 受保护和代际读取，而非任意Session URL、新Grant或泄漏管理凭据。默认折叠不显示关系徽章，缺证据不伪造。`--browser` driver 直接验证真实父Session替换/源字节缺失拒绝、父子Artifact回读与中心重开后原关系不重复产生工具/provider调用。详见[DELEGATION](tests/harness/DELEGATION.md)。
 - 子 Artifact 的产生仍需有真实 ToolCall/ToolResult、正确固定 ProjectBinding root及被独立重算的输出 hash/bytes。父子 Session、source ticket、origin/hash、immutable parent 和新 child file Effect 要相互一致，并由中心确认不可变谱系。这一消息通过普通 `/nodes/events` 的下级 `session_link` 与 `delegated_from` 附在真实 child Ticket 下；`GET /messages?ticket_id=...`支持受限的精确 ticket 过滤，而不是返回全部或错误地只返回全局对话。
 - 如工具已声明可能产生文件效果但证据不完整，不得忘为“失败/无副作用”或直接成功，应保持 Unknown 待对账。恢复也不能擅自执行第二次文件工具；验收比较真实原 ToolCall/Result、持久化 Session、报告与未改写的 bytes，而不是重演历史事件。
 

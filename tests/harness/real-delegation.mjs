@@ -183,6 +183,14 @@ try {
     simple_tool_calls: executions.length, immutable_lineage: true,
   })
   facts.real_sdk_pair = 'PASS'; facts.effect_and_immutable_lineage = 'PASS'
+  if (process.argv.includes('--browser')) {
+    const { validateDelegationProduction } = await import('./delegation-ui.mjs')
+    const result = await validateDelegationProduction({ root, server, admin, host, parent, child, parentSessionId, childSessionId, node, secrets, initialClientToken: server.clientToken })
+    server = result.server; admin = result.admin
+    facts.production_browser = 'PASS'
+    facts.source_withholding_and_forgery_fencing = 'PASS'
+    await log('production Edge reveals genuine parent/child links with source-byte and forged-Session rejection', { checks: result.checks, browser: result.browser })
+  }
   stopped = true
   console.log(JSON.stringify({ overall: 'PASS', facts, checks, root, limits: 'One DSH Profile on one computer, bounded synthetic Tool/Stub. Not a live model, arbitrary Graph, second physical host or general Harness certification.' }, null, 2))
 } catch (error) {

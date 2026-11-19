@@ -140,7 +140,7 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 6. 插件内部状态、事件与外部副作用分别处理；安装 / 启用插件不等于已经安全执行任务。注册、配置变更、重启、断线重连和 Profile 作用域都要有测试。
 7. DSH 插件用其要求的方式安装与验证，不能声称 Rust / Vue 的测试覆盖了插件宿主行为。
 8. 不为了形式统一用 Rust 重写 DSH 内部插件；跨语言边界使用协议。
-9. 受限真实父/子委派当前有 `tests/harness/real-delegation.mjs` 证据，读 `tests/harness/DELEGATION.md`。源proof由当前Assignment/Lease受限读取，不把管理token给Worker。默认`delegation_tools=unsupported`，不得扩展到未验证代理/Harness或任意路径；潜在文件效果但source/session或字节证据未完整时必须保持unknown。
+9. 受限真实父/子委派当前有 `tests/harness/real-delegation.mjs [--browser]` 证据，读 `tests/harness/DELEGATION.md`。源proof由当前Assignment/Lease受限读取，不把管理token给Worker。允许的显式`parent_session_ref`还必须与本pipeline真实producer/session/ticket及 sequence 对上；缺bytes/父Session替换不可接受。默认`delegation_tools=unsupported`，不得扩展到未验证代理/Harness或任意路径；潜在文件效果但source/session或字节证据未完整时必须保持unknown。仅已核验关系才显示父Ticket按钮、走原`selectTask`guard，可回看而不能创造Grant；不复制server/admin/凭据到汇总。并有真实协作tab展开、父回跳转、390px viewport及中心重开，仍非真手机、多Host、全DAG或任意会话授权。
 
 ## 6. Rust / Vue 实现原则
 

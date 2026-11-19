@@ -9,7 +9,7 @@ This is focused evidence for two **real, separately created DSH Agents** in one 
 - The parent uses the zero-network `DeterministicAdapter` with an ordinary public inspect tool to read the synthetic `ORBITAL-731` fact. Its ordinary `assistant/message` Artifact, actual SDK session and ordinary `session_link` are persisted.
 - The next stage can be requested only by the real current Grant/ProjectBinding and only when the parent Task has a valid completed source Artifact. The old `read_summary -> bounded text transform -> edit_file` phase relationship remains the only supported graph; this fixture maps its bounded child operation to an actual scoped HTML example.
 - **No administrative client token is given to the Node or Agent.** The separate current-Assignment source endpoint `POST /api/v1/nodes/assignments/source` authenticates the Node and requires a current matching `valid_lease`. The center selects the exact existing immutable parent in this pipeline and confirms its bytes/hash, source Task status, kind, project and actual parent `session_link`. A submitted mismatched source is refused; the endpoint does not let a task query arbitrary other tickets, Sessions, project directories or grants.
-- Child Agent creation uses DSH **0.2.2-rc.3** `ctx.agents.create({sessionId, meta:{cwd,parentSession,origin:'subagent'}, setup: async (...) => {...}, agentOptions})`. The setup registers only the fixture's explicitly scoped, no-path-parameter `loom_fixture_delegate_write`. It uses the constructor's verified `source_ref`, bytes and root; not a free-form model claim.
+- Child Agent creation uses the installed public DSH (`0.2.2-rc.3` in the original proof and **0.2.2-rc.5** in the latest) `ctx.agents.create({sessionId, meta:{cwd,parentSession,origin:'subagent'}, setup: async (...) => {...}, agentOptions})`. The setup registers only the fixture's explicitly scoped, no-path-parameter `loom_fixture_delegate_write`. It uses the constructor's verified `source_ref`, bytes and root; not a free-form model claim.
 - `tool/call` and `tool/result` are actual public SDK events. The adapter preserves the specific parent UUID, source Ticket, origin/hash and exact parent Session. It then independently rechecks the real fixed `docs/delegated.html` within the ProjectBinding and actual output hash/size before sending its new Artifact and Effect. Parent source metadata does not itself become the child's authentication.
 - The child's metadata has verified `artifact_ref` and `parents`, which the center turns into a single immutable lineage with the source ticket and the child `component_sha256`. The ordinary Node `/nodes/events` link also stores the real child SessionRef and `delegated_from` details in `messages.session_ref` under the actual child Ticket.
 - If a tool says an effect may have occurred but evidence does not validate, the adapter preserves **unknown** evidence for reconciliation; it does not claim success or imply a rollback/no-effect.
@@ -50,6 +50,33 @@ This is presentation of center-verified immutable lineage, not authorization by 
 - Tool results lost the custom source/session fields when normalized as legacy writes. Scoped delegation retains only their bounded source fields and independently requires all source/session references to match.
 - Source-proof bytes and JSON text had to be decoded separately in the test. Thin protocol/storage artifacts must not be confused with their transport base64 or their derived HTML bytes.
 - Test-host restarts do not necessarily re-emit the earlier `tool/call` events. Acceptance therefore compares the first live event capture, retained session mapping, report/artifact records and unchanged output instead of demanding a second historical tool event or fabricating any new effect.
+
+## Production collaboration view and source-claim integrity (latest)
+
+Run the real SDK and production Vue path (a current `apps/web` production build is required):
+
+```sh
+pnpm --dir apps/web build
+DSH_NODE_EXECUTABLE='/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' \
+DSH_INSTALL_DIR='/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh' \
+node tests/harness/real-delegation.mjs --browser
+```
+
+`tests/harness/delegation-ui.mjs` uses the same isolated fixture (no real `desktop` profile data, external model request, or mock business API). It first proves that a matching source request is accepted, then **rejects a changed `parent_session_ref.session_id`** while preserving the exact other source identity. `delegated_source_proof` now verifies any supplied parent Session against the producer's stored Session/Ticket and sequence. Missing legacy claims retain the old server-selected behavior; `session_ref` is not silently treated as this field on the input-source endpoint.
+
+It also temporarily moves the **owned** parent artifact aside without modifying its database row, proving that missing physical bytes fail the same Node/current lease gate, with no fabricated Session message and no child SDK input/effect. Finally it restores the original bytes and verifies their unchanged hash. This is a truthful byte-loss defense, distinct from a revoked Grant or an explicit not-found by a mocked response.
+
+On the actual production Vue:
+- the child collaboration starts collapsed, with no displayed delegation relationship;
+- expanding it reveals exactly the real parent Ticket, parent Artifact, distinct parent Session and child Session from the server-normalized receipt;
+- clicking `打开已核验的父任务 …` uses the existing protected `selectTask` path, **not** an arbitrary Session URI, search or Grant;
+- parent and child Artifacts can be opened separately, compared byte-for-byte with the owned actual files, and revisited without losing the child→parent relationship;
+- desktop 1280px and a narrow 390px desktop viewport have no horizontal overflow, not a physical mobile lifecycle test;
+- a same-client-token, same-loopback-port, same-SQLite-directory controller restart preserves all Report/Artifact/Effect/Message lineage and child bytes, with **zero new ToolCall/ToolResult and zero provider requests**. UI reload keeps the relation; no extra Host was emulated.
+
+The retained stdout only reports checks and viewport names, **not** the `server`/`admin` objects, client tokens, root-enrollment credentials, or private tool arguments. Synthetic IDs and original source SHA remain public test evidence, not credentials. Browser screenshots are owned temporary artifacts, never fixtures committed to the repository.
+
+This verifies one small but complete **delegated execution → source assurance → collapsible collaboration** example. It does not claim arbitrary parent DAG scheduling, broad conversation aggregation, permissions discovery, or General Harness acceptance.
 
 ## Still NOT RUN
 

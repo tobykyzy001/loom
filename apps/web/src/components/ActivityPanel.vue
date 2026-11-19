@@ -8,7 +8,7 @@ import AppIcon from './AppIcon.vue'
 import EmptyState from './EmptyState.vue'
 
 const props = defineProps<{ ticket: Ticket | null; audit: AuditEntry[]; expanded: boolean; preferences: Preferences; preferencesBusy?: boolean; auditError?: string }>()
-const emit = defineEmits<{ save: [expanded: boolean, sender: string] }>()
+const emit = defineEmits<{ save: [expanded: boolean, sender: string]; 'open-ticket': [ticketId: string] }>()
 const tab = ref<'activity' | 'collaboration' | 'audit'>('activity')
 const localExpanded = ref(props.expanded)
 const sender = ref(props.preferences.sender_filter ?? '')
@@ -58,7 +58,7 @@ const senders = computed(() => [...new Set(collaborations.value.map(item => item
           <section v-if="delegation" class="delegation-source" data-testid="delegation-source">
             <h4>已核验的委派来源</h4>
             <dl>
-              <div><dt>父任务</dt><dd class="mono">{{ delegation.ticket_id }}</dd></div>
+              <div><dt>父任务</dt><dd class="mono"><button class="text-link delegation-parent-ticket" type="button" :aria-label="`打开已核验的父任务 ${delegation.ticket_id}`" @click="emit('open-ticket', delegation.ticket_id)">{{ delegation.ticket_id }}</button></dd></div>
               <div><dt>父 Artifact</dt><dd class="mono">{{ delegation.artifact_id }}</dd></div>
               <div><dt>父 Session</dt><dd class="mono">{{ delegation.parent_session_id }}</dd></div>
               <div><dt>子 Session</dt><dd class="mono">{{ delegation.child_session_id || '仅有参考信息' }}</dd></div>

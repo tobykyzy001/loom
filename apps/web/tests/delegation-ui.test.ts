@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { createSSRApp } from 'vue'
+import { renderToString } from '@vue/server-renderer'
+import ActivityPanel from '../src/components/ActivityPanel.vue'
 import { delegationFor } from '../src/lib/delegation'
 import { ticketFrom } from '../src/api/parsing'
 import type { DelegationEvidence, Message } from '../src/api/types'
@@ -37,5 +40,16 @@ describe('controller-verified delegation references', () => {
       { id: 'long-reference', content: 'Overlong reference', session_ref: `${' '.repeat(8200)}` },
     ]
     for (const message of cases) expect(delegationFor(message)).toBeNull()
+  })
+
+  it('keeps parent navigation hidden by default even for a validated relation; real Edge opens it through collaboration', async () => {
+    // SSR starts on the default activity tab: this is the collapsed interface
+    // contract, not a substitute for the separate real-browser navigation proof.
+    const ticket = ticketFrom({ id: 'tkt_child', status: 'succeeded', messages: [valid] })
+    const html = await renderToString(createSSRApp(ActivityPanel, { ticket, audit: [], expanded: true, preferences: { expanded: true, sender_filter: null } }))
+    expect(delegationFor(valid)).not.toBeNull()
+    expect(html).toContain('aria-selected="true">Activity</button>')
+    expect(html).not.toContain('delegation-parent-ticket')
+    expect(html).not.toContain('href=')
   })
 })
