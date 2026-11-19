@@ -195,7 +195,9 @@ class DeterministicAdapter extends LlmAdapter {
         const bytes = await readFixtureSource(this.config.project_root, options.signal)
         chunks = textResponse(`Synthetic private assistant echo: ${bytes.bytes.toString('utf8')}`)
       } else if (inspected?.schema === 'loom.fixture-read.v1' && inspected.read === true) {
-        chunks = textResponse('Observed the fixed input.txt source read and its public digest; original source bytes remain private.')
+        chunks = textResponse(inspected.path === 'docs/input.txt'
+          ? `Observed actual controlled parent projection: ${JSON.stringify(result.content)}`
+          : 'Observed the fixed input.txt source read and its public digest; original source bytes remain private.')
       } else if (inspected?.schema === 'loom.fixture-probe-write.v1' && inspected.probe_write === true) {
         // Preserve the old observable probe marker without disclosing caller text.
         chunks = textResponse('Observed actual controlled tool result for the fixed artifact.txt write probe.')
@@ -234,11 +236,14 @@ function semanticHtml(title) {
 }
 
 /** One fixed real source; its bytes are never included in a ToolResult/log. */
-async function readFixtureSource(configuredRoot, signal) {
+async function readFixtureSource(configuredRoot, signal, relativePath = 'input.txt') {
+  if (!['input.txt', 'docs/input.txt'].includes(relativePath)) throw new Error('Only two explicitly owned fixture source paths are supported')
   const root = await realpath(configuredRoot)
   let source
   try {
-    const file = join(root, 'input.txt')
+    const scope = relativePath === 'docs/input.txt' ? 'docs' : ''
+    if (scope && await realpath(join(root, scope)) !== join(root, scope)) throw new Error('Delegated fixture docs must be a real non-symlink directory')
+    const file = join(root, scope, 'input.txt')
     // This direct child check also rejects a replaced symlink before hashing.
     if (await realpath(file) !== file) throw new Error('Loom fixture source must not be a symlink')
     source = await open(file, 'r')
@@ -254,6 +259,7 @@ async function readFixtureSource(configuredRoot, signal) {
 }
 
 export function apply(ctx, config) {
+  const delegatedDocs = process.env.LOOM_FIXTURE_DELEGATION_TOOLS === 'scoped_fixture'
   const controlPath = resolve(config.control_path || '')
   if (!isAbsolute(config.control_path || '') || !controlPath.startsWith(sep) || controlPath === sep || !controlPath.includes('loom-dsh-')) {
     throw new Error('The disposable Stub requires a control_path inside a test-owned /tmp/loom-dsh-* root')
@@ -283,6 +289,7 @@ export function apply(ctx, config) {
           schema: { type: 'string', enum: ['loom.fixture-read.v1', 'loom.fixture-probe-write.v1'] },
           path: { type: 'string' }, sha256: { type: 'string' }, size_bytes: { type: 'integer' },
           read: { type: 'boolean' }, probe_write: { type: 'boolean' },
+          project_code: { type: 'string', enum: ['ORBITAL-731'] }, synthetic_only: { type: 'boolean', enum: [true] },
         },
         additionalProperties: false,
       },
@@ -319,8 +326,12 @@ export function apply(ctx, config) {
       throwIfAborted(exec.signal)
       const configured = resolve(config.project_root || '')
       if (!isAbsolute(config.project_root || '') || !configured.includes('loom-dsh-')) throw new Error('Fixture project root must be an authorized isolated directory')
-      const { bytes } = await readFixtureSource(configured, exec.signal)
-      const result = { schema: 'loom.fixture-read.v1', path, sha256: createHash('sha256').update(bytes).digest('hex'), size_bytes: bytes.length, read: true }
+      const { bytes } = await readFixtureSource(configured, exec.signal, delegatedDocs ? 'docs/input.txt' : 'input.txt')
+      if (delegatedDocs && !bytes.toString('utf8').includes('ORBITAL-731')) throw new Error('The legacy delegation fixture requires its declared synthetic fact')
+      const result = delegatedDocs
+        ? { schema: 'loom.fixture-read.v1', path: 'docs/input.txt', sha256: createHash('sha256').update(bytes).digest('hex'), size_bytes: bytes.length, read: true,
+          project_code: 'ORBITAL-731', synthetic_only: true }
+        : { schema: 'loom.fixture-read.v1', path, sha256: createHash('sha256').update(bytes).digest('hex'), size_bytes: bytes.length, read: true }
       await appendFile(controlPath, JSON.stringify({ type: 'tool-execute', name: 'loom_fixture_inspect', ...result }) + '\n', { mode: 0o600 })
       return result
     },
