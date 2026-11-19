@@ -96,6 +96,21 @@ describe('strict downloaded code evidence relation', () => {
     expect(passedHtml).toContain('class="artifact-content"')
   })
 
+  it('follows the selected reviewed DSH version through every evidence relation without accepting unknown hosts', () => {
+    const f = fixture(false)
+    const upgrade = (value: unknown, host_api: string): unknown => {
+      if (Array.isArray(value)) return value.map(item => upgrade(item, host_api))
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'host_api' ? host_api : upgrade(item, host_api)]))
+      return value
+    }
+    const upgraded = upgrade(f, '0.2.2-rc.5') as ReturnType<typeof fixture>
+    expect(codeArtifactPresentation(upgraded.ticket, upgraded.verification, [upgraded.diff])).toMatchObject({ kind: 'verification', exitCode: 1, passed: false })
+    for (const version of ['0.2.2-rc.4', '0.2.3', 'https://private.invalid']) {
+      const invalid = upgrade(f, version) as ReturnType<typeof fixture>
+      incomplete(invalid.ticket, invalid.verification, [invalid.diff])
+    }
+  })
+
   it('rejects missing source, cross-Assignment, source SHA and result reference mismatches', () => {
     const f = fixture()
     incomplete({ ...f.ticket, artifacts: [f.verification.metadata] }, f.verification, [f.verification])

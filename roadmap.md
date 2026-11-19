@@ -72,7 +72,7 @@
 - 分发目前有真实但有限的两条证据：`node tests/harness/bundle-preflight.mjs` 对当前 DSH bundle 源做 31 项**不安装**的预检；`node tests/harness/real-bundle-lifecycle.mjs` 在唯一临时 Profile 中用公开 CLI 安装、替换 metadata 版本并重启，worker 默认关闭，已撤销 Grant 在同 worker 角色下仍不能被升级复活。它们是本地 `file:` 流程，不是 GUI/remote registry、生产 profile、资格授予或任意代码更新认证。
 - 裸 Host 的 `node scripts/bare-package-smoke.mjs` 已在**当前 macOS arm64**实际离线构建并执行 binary，检查真实副本 SHA、权限、信息调用无注册，以及错误 root/enrollment、截断/symlink/hardlink/空 payload 拒绝；`scripts/bare-integration.mjs` 的真实读写、取消和重启继续通过。见 [docs/BARE_PACKAGE.md](docs/BARE_PACKAGE.md)。这不等于通用平台包、签名服务安装、远程部署或第二物理节点验收。
 - 安装编排现有**仅限合成 Inventory** 的可持久计划和 Vue 审阅：固定 Bare 描述符、已选/未选/不兼容目标、明确plan_digest审批、操作关联的 fixture 观察及带回滚父 operation 的持久历史；已有v7 DB增量迁移到schema8。`tests/install/plan.mjs`已实测HTTP、同op回执、Unknown不可盲重试、健康失败→批准回滚→回滚观察、真 server restart与禁用501；`tests/install/browser.mjs`也实测了真正确认、父子operation的关系、390 viewport与不变Ticket/Grant/Node数。见[tests/install/README.md](tests/install/README.md)。**这不是**真实主机安装器、遥测、SSH/幂等执行、root/Grant或Manifest生成的生产部署许可；未知需要后续具体证据对账而不悄悄自动分类。
-- Rust/Tokio、SQLite、Vue 在当前 macOS 验证；尚无 Tauri 或真实移动设备验证。DSH 0.2.2-rc.3 在专用临时 Profile 已跑过真实安装、任务、取消和原 Session 重开（见 `e1da1f0`）；这不是当前用户 Profile、系统 Credential Store 或真实 Live LLM 的验收。
+- Rust/Tokio、SQLite、Vue 在当前 macOS 验证；尚无 Tauri 或真实移动设备验证。DSH **0.2.2-rc.5** 在专用临时 `loom-local-fixture` Profile 已复验真实安装、任务、取消和原 Session 重开，互通证据的 rc.3 历史仍可读取；版本只取选中宿主的 manifest，rc.3/rc.5 的源码证据严格匹配，没有以兼容性豁免覆盖未验证版本。这不是当前用户 Profile、系统 Credential Store 或真实 Live LLM 的验收。
 
 ### 已有Source入口的真实用户确认链（M0局部）
 
@@ -216,6 +216,8 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 | 记忆隔离 | 项目级偏好不在另一个项目自动生效；旧偏好不覆盖本次明确指令 |
 
 M0/M1边界的**项目绑定选择已实际落到Vue**：同一Node ID下多个未撤销Installation不再被Node ID第一行或目录巧合代选。真实production Vue与Rust/Edge现在完成一组合成Node/Installation的绑定确认；多候选才附送精确`installation_id`，单active原四字段契约保持。root与Worker仍由原项目及用户填写并由中心复核；Missing/duplicate identity与撤销/丢失候选不自动换位。确认框的pointer遮罩及underlying modal焦点也已修正，390px真实DOM点击与桌面hit-test均有证据。第二份安装的不同worker/root保存为匹配Binding/audit，并另由授权的**admin API**取得该指定Binding的read Grant；没有以Access页面Grant、真实Agent任务、第二物理机或移动真机代替缺失验收。可见选择、持久化一致性与旧path保留是这一新增量，节点撤销期间的刷新恢复仍分开继续验证。详见 [installation/confirm browser driver](tests/browser/installation-ui.mjs)及其[最终结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-kJL3dd/result.json)。
+
+M0的源码示例又补上了**编辑后真实工具错误**的证据缺口：固定agent在原子写真实文件之后产生SDK `isError:true`，随后真实adapter结束为`kind=error`。实际Source变为目标bytes，但中心仅保存一条未知Report及唯一 `dsh-turn-<assignment>` unknown Effect，没有code/verification Artifact或claimed confirmation；不会伪装成failed test、取消或rollback。原write Grant/digest/version、Node/Installation/Worker与Project Binding保持，公共`retry`仍遭**400 `invalid_request`**拒绝，真实DSH/Center重开也没有新工具或Provider请求。SDK的`source.kind='loom'` distinction避免把runtime-context snapshot误作原始Objective。Unknown报告保留了实际tool/adapter失败原因与SessionRef，不再误述为“缺assistant消息”，也没有引入`reason`新字段。这里验证的仍是一个受限固定fixture；rc.5的白名单兼容既不能覆盖其它Harness、版本或通用代码编辑器。见 [CODE_TASK 实际工具错误](tests/harness/CODE_TASK.md#real-toolresult-failure-after-a-completed-edit-remains-unknown-through-reopen)与[**rc.5完整独立运行结果**](/tmp/loom-real-code-tool-error-rc5-final.json)。
 
 **进入 M1 的证据**
 

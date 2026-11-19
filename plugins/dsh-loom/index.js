@@ -82,9 +82,12 @@ export async function apply(ctx, config) {
         if (typeof module.registerScopedCodeTools !== 'function') throw new Error('Declared fixture has no scoped source-tool installer')
         fixtureCodeTools = module.registerScopedCodeTools
       }
+      // Record the selected Host's exact declared version; never reuse the
+      // old fixture version in a new installation's public Session evidence.
+      const hostInfo = await import('@deepseek-ai/dsh/package.json', { with: { type: 'json' } })
       const adapter = new DshAdapter(ctx, { allowCreation: config.allow_dsh_agent_creation,
         agentSessionId: config.agent_session_id, snapshotDir: config.artifact_dir,
-        sessionMapPath: `${config.state_dir}/dsh-session-map.json`,
+        sessionMapPath: `${config.state_dir}/dsh-session-map.json`, hostVersion: hostInfo.default.version,
         allowBoundedFixtureEffects: config.bounded_fixture_effects,
         delegationAgentSetup, fixtureCodeTools })
       const startWorker = async (credentials) => {

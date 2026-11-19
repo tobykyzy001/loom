@@ -4,6 +4,9 @@ const SHA = /^[a-f0-9]{64}$/
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const PATH = 'src/calc.js'
+// Exact versions accepted by the center for this fixed fixture only. Keep in
+// sync with Rust `REVIEWED_FIXTURE_HOSTS`; no generic DSH compatibility claim.
+const REVIEWED_HOST_VERSIONS = new Set(['0.2.2-rc.3', '0.2.2-rc.5'])
 const DIFF = [
   'index 2a10c8c..f582157 100644', '--- a/src/calc.js', '+++ b/src/calc.js',
   '@@ -1,3 +1,3 @@', ' export function add(a, b) {',
@@ -36,7 +39,7 @@ function integer(value: unknown, positive = false): value is number {
 type SessionEvidence = Rec & { session_id: string; observed_seq: number }
 function session(value: unknown): SessionEvidence | null {
   const data = exact(value, ['harness', 'session_id', 'host_api', 'protocol', 'observed_seq'])
-  return data && data.harness === 'dsh' && data.host_api === '0.2.2-rc.3' && data.protocol === 'dsh-session-log' && uuid(data.session_id) && integer(data.observed_seq) ? data as SessionEvidence : null
+  return data && data.harness === 'dsh' && typeof data.host_api === 'string' && REVIEWED_HOST_VERSIONS.has(data.host_api) && data.protocol === 'dsh-session-log' && uuid(data.session_id) && integer(data.observed_seq) ? data as SessionEvidence : null
 }
 const CHANGE_FIELDS = ['schema', 'type', 'name', 'call_id', 'call_seq', 'result_id', 'result_seq', 'session', 'path', 'previous_sha256', 'sha256', 'size_bytes'] as const
 function orderedEvents(value: unknown): value is Rec & { call_seq: number; result_seq: number; session: { observed_seq: number } } {

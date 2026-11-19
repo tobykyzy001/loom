@@ -109,7 +109,7 @@ export async function runRealBundleLifecycle({ output = '/tmp/loom-bundle-lifecy
   const root = await fixtureRoot(requestedRoot)
   const secretSet = []
   let server
-  const report = { schema: 'loom.real_bundle_lifecycle.v1', overall: 'NOT RUN', installation_app: '@deepseek-ai/dsh@0.2.2-rc.3', profile: PROFILE,
+  const report = { schema: 'loom.real_bundle_lifecycle.v1', overall: 'NOT RUN', installation_app: '@deepseek-ai/dsh@0.2.2-rc.5', profile: PROFILE,
     profile_root: { kind: 'owned_mkdtemp', no_desktop_profile: true, directory: root }, steps: [], no_live_llm: true }
   const step = (name, evidence = {}) => {
     report.steps.push({ name, status: 'PASS', evidence })

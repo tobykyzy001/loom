@@ -197,6 +197,17 @@ try {
       await assert.rejects(() => registerScopedCodeTools({ tools: { register() { throw new Error('must not register') } } }, { project_root: root, assignment }))
     })
   }
+  await pass('conflicting after-edit error and verifier-pause directives are refused before any fixture side effect', async () => {
+    const repo = await makeRepository()
+    const before = await readFile(join(repo.root, 'src', 'calc.js'))
+    await assert.rejects(() => registerScopedCodeTools({ tools: { register() { throw new Error('must not register') } } }, {
+      assignment: { relative_path: 'src/calc.js', content: expected,
+        objective: 'LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY' },
+      project_root: repo.root,
+    }), /mutually exclusive/)
+    assert.equal((await readFile(join(repo.root, 'src', 'calc.js'))).equals(before), true)
+    assert.equal(repo.git('status', '--porcelain'), '', 'No test, Git mutation or registered SDK operation may run for a conflicting fixture directive')
+  })
   assert.equal(processes.size, 0)
   const report = {
     schema: 'loom.fixture-code-tools.unit.v1', overall: 'PASS', checks_count: checks.length, checks,

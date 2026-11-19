@@ -17,7 +17,7 @@ export function installation() {
     throw new Error('NOT RUN: verified DSH_NODE_EXECUTABLE and DSH_INSTALL_DIR are required; Desktop Profile is never inferred')
   }
   if (process.env.DSH_PROFILE !== 'desktop') throw new Error('The harness runner requires explicit Desktop runtime facts, not an unrelated source installation')
-  return { executable, cli: join(install, 'lib/bin.js') }
+  return { executable, cli: join(install, 'lib/bin.js'), install }
 }
 
 export function redact(value, secrets = []) {

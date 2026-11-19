@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
-import { installation, isolatedEnv, fixtureRoot, installBundles, redact, sleep } from './environment.mjs'
+import { installation, isolatedEnv, fixtureRoot, installBundles, command, redact, sleep } from './environment.mjs'
 import { pathToFileURL } from 'node:url'
 import { FixtureHost } from './runtime.mjs'
 import { startRustConcierge } from '../../scripts/fixtures/rust-server.mjs'
@@ -21,19 +21,21 @@ import { sha256 } from '../../packages/node-client/src/util.js'
 import { chromium } from '../browser/node_modules/playwright-core/index.mjs'
 
 const output = process.env.LOOM_TEST_OUTPUT
+let hostVersion = 'NOT READ'
 const execute = promisify(execFile)
 const expected = CODE_FIXTURE_SOURCE.replace('return a - b;', 'return a + b;')
 const initialSha = sha256(Buffer.from(CODE_FIXTURE_SOURCE))
-let server, host, context, preview
+let server, host, admin, context, preview
 let settled = false
 const browserReports = []
-let root
+let root, diagnosticAssignmentId
 const checks = []
 const pass = (name, evidence = {}) => { checks.push({ name, status: 'PASS', evidence }); console.log(`PASS ${name}`) }
 const report = (overall, diagnostics = '') => ({
   schema: 'loom.real-code-task.v1', overall, checks,
   target: 'one owned clean Git source + isolated real DSH Agent + bounded public source/test tools + actual node:test',
   restricted_protocol: 'existing edit_file; current exact write Grant; no new Ticket type or Permission',
+  host_api: hostVersion,
   real_dsh: 'session/logs/providers/ctx.tools.register observed; zero-network loom-stub only',
   browser: browserReports,
   framework_scope: 'Only the explicit local fixture code listener is available; no stock model editor or arbitrary command execution is enabled.',
@@ -44,10 +46,18 @@ const report = (overall, diagnostics = '') => ({
 })
 
 try {
-  root = await realpath(await fixtureRoot())
+  root = await realpath(await fixtureRoot(process.env.LOOM_TEST_ROOT))
   await mkdir(join(root, 'project', 'src')); await mkdir(join(root, 'project', 'test'))
   const projectRoot = await realpath(join(root, 'project'))
   const envGit = { PATH: '/usr/bin:/bin', HOME: projectRoot, TMPDIR: projectRoot, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' }
+  const selectedInstallation = installation()
+  const runtimeReport = await command(selectedInstallation.executable, [
+    '-e', "console.log(JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).version)",
+    join(selectedInstallation.install, 'package.json')], { env: isolatedEnv(root) })
+  // Ordinary Node does not read inside an ASAR; Electron's read-only runtime
+  // inspection belongs to the exact selected installation, not the Profile.
+  hostVersion = runtimeReport.stdout.trim()
+  assert.equal(hostVersion, '0.2.2-rc.5', 'This run must prove the selected current fixture, not accidentally relabel its older host')
   const git = async (...args) => {
     try { return await execute('/usr/bin/git', ['--no-pager', '-c', 'diff.external=', ...args], { cwd: projectRoot, env: envGit, shell: false, timeout: 10_000 }) }
     catch (error) { throw new Error(`Bounded fixture Git step ${args.join(' ')} failed: ${String(error.stdout || '')}\n${String(error.stderr || '')}\n${String(error.message)}`) }
@@ -75,7 +85,7 @@ try {
   pass('actual owned example Git repo is clean and the unmodified source test genuinely fails', { initial_sha256: initialSha, command: ['node', '--test', 'test/calc.test.js'] })
   await writeFile(join(root, 'private', 'fixture-control.jsonl'), '', { mode: 0o600 })
   server = await startRustConcierge({ root: join(root, 'rust'), env: { PATH: process.env.PATH } })
-  let admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
+  admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
   const project = await admin.post('/api/v1/projects', { name: 'Bounded source code example, not a real user repo', root: projectRoot, mode: 'read_write' })
   const projectId = project.project.id
   const enrollment = await admin.post('/api/v1/enrollment-codes', {})
@@ -458,23 +468,21 @@ try {
     assert.equal(freshCalls.length, 0, 'Replaying persisted SDK history cannot become another source edit/test execution')
   }
   pass('real controller and local DSH reopen preserve source, effect lineage, Session mapping and no second execution')
-  const db = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'), { readOnly: true })
-  try {
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tickets').get().n, 3)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 4)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM reports').get().n, 4)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get().n, 7)
-    assert.deepEqual(second.artifacts.map(entry => entry.id).sort(), restored.artifacts.map(entry => entry.id).sort())
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM effects').get().n, 4)
-    assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
-  } finally { db.close() }
-  const audit = await new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken }).get('/api/v1/audit/verify')
-  assert.equal(audit.valid, true)
-  assert.equal(audit.algorithm, 'sha256_chain_v1')
+  const ordinaryCounts = await scopedDurableCounts()
+  assert.deepEqual(ordinaryCounts, { tickets: 3, assignments: 4, reports: 4, artifacts: 7, effects: 4 })
+  assert.deepEqual(second.artifacts.map(entry => entry.id).sort(), restored.artifacts.map(entry => entry.id).sort())
   pass('actual durable counts, SQLite integrity and validated audit chain', {
-    tickets: 3, assignments: 4, reports: 4, artifacts: 7, effects: 4, stage: 'before_grant_revocation_fixture',
+    ...ordinaryCounts, stage: 'before_real_tool_error_after_edit',
   })
-  await scoped_revocation_boundary({ admin, root, projectRoot, grant, env, git, runTests, historicalTickets: [second.id, pending.id, fresh.id], resetProject: async () => {
+  const toolError = await real_tool_error_after_edit({ root, projectRoot, grant, env, git, task, terminal, resetProject: async () => {
+    await rm(join(projectRoot, 'src'), { recursive: true, force: true })
+    await rm(join(projectRoot, 'test'), { recursive: true, force: true })
+    await rm(join(projectRoot, '.git'), { recursive: true, force: true })
+    await rm(join(projectRoot, 'package.json'), { force: true })
+    await newProject()
+  }, countsBefore: ordinaryCounts })
+  await scoped_revocation_boundary({ admin, root, projectRoot, grant, env, git, runTests, historicalTickets: [second.id, pending.id, fresh.id, toolError.ticket_id],
+    noArtifactHistory: [toolError.ticket_id], resetProject: async () => {
     await rm(join(projectRoot, 'src'), { recursive: true, force: true })
     await rm(join(projectRoot, 'test'), { recursive: true, force: true })
     await rm(join(projectRoot, '.git'), { recursive: true, force: true })
@@ -512,20 +520,299 @@ try {
   if (root) {
     assert.ok(root.split('/').at(-1).startsWith('loom-dsh-'))
     assert.equal(await realpath(root), root)
-    await rm(root, { recursive: true, force: true })
+    const preserved = process.env.LOOM_TEST_ROOT && !settled && diagnosticAssignmentId
+      && readFileSync(join(root, 'node-state', 'node-state.json'), 'utf8').includes(diagnosticAssignmentId)
+    if (preserved && process.env.LOOM_TEST_ROOT) console.error(`Failure fixture root preserved for bounded diagnosis: ${root}`)
+    else await rm(root, { recursive: true, force: true })
   }
 }
-async function scoped_revocation_boundary({ admin, root, projectRoot, grant, env, git, runTests, historicalTickets, resetProject }) {
+async function real_tool_error_after_edit({ root, projectRoot, grant, env, git, task, terminal, resetProject, countsBefore }) {
+  const record = (name, evidence) => checks.push({ scope: 'real_tool_error_after_edit', name, status: 'PASS', evidence })
+  const identity = JSON.parse(await readFile(join(root, 'node-state', 'identity.json'), 'utf8'))
+  const identityBefore = { node_id: identity.node_id, installation_id: identity.installation_id,
+    public_key: identity.public_key, private_key_pkcs8: identity.private_key_pkcs8 }
+  const grantBefore = (await admin.get('/api/v1/grants')).grants.find(row => row.id === grant.grant.id)
+  assert.ok(grantBefore && grantBefore.revoked_at === null)
+  assert.equal(grantBefore.version, grant.grant.version)
+  const projectBefore = (await admin.get('/api/v1/projects')).projects.find(row => row.id === grant.grant.project_id)
+  const readProjectBinding = () => {
+    const db = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'), { readonly: true })
+    try {
+      return db.prepare('SELECT id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at,revoked_at FROM project_bindings WHERE id=?').get(grantBefore.project_binding_id)
+    } finally { db.close() }
+  }
+  const bindingBefore = readProjectBinding()
+  assert.ok(bindingBefore)
+  assert.equal(bindingBefore.id, grantBefore.project_binding_id)
+  assert.equal(bindingBefore.project_id, grantBefore.project_id)
+  assert.equal(bindingBefore.node_id, grantBefore.node_id)
+  assert.equal(bindingBefore.installation_id, grantBefore.installation_id)
+  assert.equal(bindingBefore.worker_id, grantBefore.worker_id)
+  assert.equal(bindingBefore.root_scope, projectRoot)
+  assert.equal(bindingBefore.revoked_at, null)
+  const nodeBefore = (await admin.get('/api/v1/nodes')).nodes.find(row => row.id === grantBefore.node_id
+    && row.installation_id === grantBefore.installation_id && row.revoked_at === null)
+  assert.equal(nodeBefore?.workers.some(row => row.worker_id === 'default' || row === 'default'), true)
+  const revocationBefore = (await admin.get('/api/v1/audit')).audit.filter(row => row.action === 'grant.revoked').length
+  const existingAssignmentIds = new Set(Object.keys(JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8')).completions))
+  await resetProject()
+  const ticket = await task('error ToolResult after completed replacement then adapter error LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT')
+  const assignment = ticket.assignments[0]
+  assert.equal(ticket.assignments.length, 1)
+  const done = await terminal(ticket)
+  const assignmentId = assignment.id
+  assert.equal(existingAssignmentIds.has(assignmentId), false)
+  diagnosticAssignmentId = assignmentId
+  const mapping = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8'))
+  const sessionId = mapping.assignments.find(row => row.assignment_id === assignmentId)?.session_id
+  assert.ok(sessionId)
+  record('actual installed DSH return/result/turn evidence is available before center assertions', { ticket_id: ticket.id,
+    assignment_id: assignmentId, session_id: sessionId,
+    center_detail: { status: done.status, cancel_requested: done.cancel_requested, grant_id: done.grant_id,
+      grant_digest: done.grant_digest, assignments: done.assignments, reports: done.reports, effects: done.effects, artifacts: done.artifacts },
+    tool_calls: host.sessionEvents(sessionId, ['tool/call']).map(row => ({ seq: row.event.seq, name: row.event.data.name, call_id: row.event.data.callId, data: row.event.data })),
+    tool_results: host.sessionEvents(sessionId, ['tool/result']).map(row => ({ seq: row.event.seq, id: row.event.data.message?.id,
+      tool_call_id: row.event.data.message?.toolCallId, is_error: row.event.data.message?.isError,
+      message: row.event.data.message })),
+    request_diagnostics: stubRequests(root, 'request-diagnostic').filter(row => row.session_id === sessionId),
+    turn_end_reasons: host.sessionEvents(sessionId, ['turn/end']).map(row => ({ seq: row.event.seq, reason: row.event.data.reason })),
+  })
+  const calls = host.sessionEvents(sessionId, ['tool/call'])
+  const editCalls = calls.filter(row => row.event.data.name === 'loom_fixture_code_edit')
+  const verifierCalls = calls.filter(row => row.event.data.name === 'loom_fixture_verify')
+  assert.equal(editCalls.length, 1)
+  assert.equal(verifierCalls.length, 0)
+  assert.equal(calls.length, 1, 'This failed-source case must have no other tool invocation')
+  const editCall = editCalls[0]
+  const editCallId = editCall.event.data.callId
+  assert.ok(editCallId)
+  const results = host.sessionEvents(sessionId, ['tool/result'])
+  const editResults = results.filter(row => (row.event.data.message?.toolCallId || row.event.data.message?.source?.callId) === editCallId)
+  assert.equal(editResults.length, 1)
+  const message = editResults[0].event.data.message
+  assert.equal(message.role, 'tool')
+  assert.equal(message.isError, true)
+  assert.equal(message.source.kind, 'tool')
+  assert.equal(message.source.callId, editCallId)
+  const errorText = message.content.filter(block => block?.type === 'text').map(block => block.text).join('\n')
+  assert.match(errorText, /LOOM fixture edit outcome unavailable after file replacement/)
+  assert.notEqual(message.value?.created, true)
+  assert.ok(message.id)
+  assert.equal(results.some(row => row.event.data.message?.toolCallId !== editCallId), false)
+  assert.equal(editResults[0].event.seq > editCall.event.seq, true)
+  assert.ok(calls.every(row => row.event.data.callId))
+  const requestDiagnostics = stubRequests(root, 'request-diagnostic').filter(row => row.session_id === sessionId)
+  assert.equal(requestDiagnostics.length, 2)
+  assert.equal(requestDiagnostics[0].latest_user_marker, true)
+  assert.equal(requestDiagnostics[1].latest_user_marker, true)
+  assert.equal(requestDiagnostics[1].post_edit_turn_error, true)
+  assert.equal(requestDiagnostics[1].latest_user_role, 'user')
+  assert.deepEqual(requestDiagnostics[1].tool_calls, ['loom_fixture_code_edit'])
+  assert.equal(requestDiagnostics[1].edit_result_tool_call_id, editCallId)
+  assert.equal(requestDiagnostics[1].edit_result_source_call_id, editCallId)
+  assert.equal(requestDiagnostics[1].edit_result_has_fixed_error_text, true)
+  const originalRequests = stubRequests(root).filter(row => row.session_id === sessionId)
+  assert.equal(originalRequests.length, 2, 'Exactly the edit followup and real ToolResult followup are needed before the adapter failure')
+  assert.deepEqual(originalRequests.map(row => row.tool_calls), [[], ['loom_fixture_code_edit']])
+  const turn = host.sessionEvents(sessionId, ['turn/end']).at(-1)
+  assert.equal(turn.event.data.reason.kind, 'error')
+  assert.notEqual(turn.event.data.reason.kind, 'aborted')
+  assert.match(turn.event.data.reason.error?.message || JSON.stringify(turn.event.data.reason.error || {}),
+    /LOOM fixture terminal error after the uncertain source-edit ToolResult/)
+  assert.match(done.reports[0].summary, /source edit.*tool\/adapter failure/)
+  assert.match(done.reports[0].summary, /No verified source\/test Artifact/)
+  assert.doesNotMatch(done.reports[0].summary, /completed without an assistant message/)
+  // Turn evidence in Report is the SessionRef, not an invented `reason` field.
+  record('one matched isError editor result precedes a genuine adapter terminal error; no verifier exists', {
+    ticket_id: ticket.id, assignment_id: assignmentId, session_id: sessionId,
+    call_id: editCallId, call_message_id: editCall.event.data.messageId || null,
+    result_message_id: message.id, result_source_kind: message.source.kind, result_source_call_id: message.source.callId,
+    result_id: message.id, result_is_error: message.isError, result_text: errorText,
+    turn_kind: turn.event.data.reason.kind, turn_error: structuredClone(turn.event.data.reason.error),
+    verifier_calls: 0, model_requests: originalRequests.map(row => ({ id: row.id, tool_calls: row.tool_calls })),
+    request_diagnostics: requestDiagnostics,
+  })
+  assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
+  assert.equal((await git('status', '--porcelain=v1', '--untracked-files=all')).stdout, ' M src/calc.js\n')
+  record('driver-only source bytes and Git status are not an Agent verification or Artifact', {
+    ticket_id: ticket.id, source_sha256: sha256(Buffer.from(expected)), tracked_status: ' M src/calc.js',
+    scope: 'driver_observed_bytes_only', driver_test: 'NOT RUN; only earlier genuine tool verification Artifacts prove tests',
+  })
+  assert.equal(done.status, 'reconciling')
+  assert.equal(done.cancel_requested, false)
+  assert.equal(done.assignments.length, 1)
+  assert.equal(done.assignments[0].id, assignmentId)
+  assert.equal(done.assignments[0].node_id, grantBefore.node_id)
+  assert.equal(identityBefore.installation_id, grantBefore.installation_id)
+  assert.equal(done.assignments[0].lease_epoch, assignment.lease_epoch)
+  assert.equal(done.assignments[0].worker_id, 'default')
+  assert.notEqual(done.reports[0]?.cancel_acknowledged, true)
+  assert.notEqual(done.reports[0]?.cancel_acknowledged, 1)
+  assert.equal(done.reports.length, 1)
+  assert.equal(done.reports[0].state, 'unknown')
+  assert.equal(done.reports[0].ticket_id, ticket.id)
+  assert.equal(done.reports[0].assignment_id, assignmentId)
+  assert.equal(done.reports[0].node_id, grantBefore.node_id)
+  assert.deepEqual(done.artifacts, [])
+  assert.equal(done.effects.length, 1)
+  assert.equal(done.effects[0].id, `dsh-turn-${assignmentId}`)
+  assert.equal(done.effects[0].status, 'unknown')
+  assert.equal(done.effects[0].ticket_id, ticket.id)
+  assert.equal(done.effects[0].assignment_id, assignmentId)
+  assert.equal(done.effects[0].node_id, grantBefore.node_id)
+  assert.deepEqual(done.effects[0].artifacts, [])
+  const assertGrantAndBinding = async () => {
+    const current = (await admin.get('/api/v1/grants')).grants.find(row => row.id === grantBefore.id)
+    assert.ok(current)
+    for (const field of ['digest', 'version', 'project_binding_id', 'node_id', 'installation_id', 'worker_id']) {
+      assert.equal(current[field], grantBefore[field], `Grant ${field} was changed without revocation`)
+    }
+    assert.equal(current.revoked_at, null)
+    const currentProject = (await admin.get('/api/v1/projects')).projects.find(row => row.id === grantBefore.project_id)
+    const currentBinding = readProjectBinding()
+    assert.ok(currentBinding)
+    for (const field of ['id', 'project_id', 'node_id', 'installation_id', 'worker_id', 'root_scope', 'binding_digest', 'approved_at']) {
+      assert.equal(currentBinding[field], bindingBefore[field])
+    }
+    assert.equal(currentBinding.revoked_at, null)
+    assert.equal(currentProject.root, projectBefore.root)
+    assert.equal((await admin.get('/api/v1/audit')).audit.filter(row => row.action === 'grant.revoked').length, revocationBefore)
+    return current
+  }
+  await assertGrantAndBinding()
+  record('durable unknown/reconciling identity; original write Grant and Project Binding unchanged by read-only recheck', {
+    ticket_id: ticket.id, assignment_id: assignmentId, node_id: done.effects[0].node_id,
+    report_id: done.reports[0].id, report_state: done.reports[0].state, ticket_status: done.status,
+    cancel_requested: done.cancel_requested, report_cancel_acknowledged: done.reports[0].cancel_acknowledged,
+    effect_id: done.effects[0].id, effect_status: done.effects[0].status, effect_artifacts: done.effects[0].artifacts,
+    artifact_count: 0, grant_id: grantBefore.id, grant_version: grantBefore.version, grant_digest: grantBefore.digest,
+    project_binding_id: bindingBefore.id, root_scope: bindingBefore.root_scope, installation_id: grantBefore.installation_id,
+    worker_id: 'default', prior_grant_revocations: revocationBefore,
+  })
+  const refusedRetry = await fetch(`${server.baseUrl}/api/v1/tickets/${ticket.id}/retry`, { method: 'POST',
+    headers: { Authorization: `Bearer ${server.clientToken}`, 'Content-Type': 'application/json' }, body: '{}' })
+  const retryBody = await refusedRetry.json()
+  assert.equal(refusedRetry.status, 400)
+  assert.equal(retryBody.error.code, 'invalid_request')
+  const afterRetry = await admin.get(`/api/v1/tickets/${ticket.id}`)
+  assert.equal(afterRetry.assignments.length, 1)
+  assert.equal(afterRetry.assignments[0].id, assignmentId)
+  assert.equal(afterRetry.status, 'reconciling')
+  record('actual public retry denial creates no new Assignment or Grant change', {
+    ticket_id: ticket.id, http_status: refusedRetry.status, error_code: retryBody.error.code,
+    assignment_ids: afterRetry.assignments.map(row => row.id), grant_version: grantBefore.version,
+  })
+  await host.waitFor(() => {
+    const state = JSON.parse(readFileSync(join(root, 'node-state', 'node-state.json'), 'utf8'))
+    return state.completions[assignmentId]?.state === 'unknown'
+      && state.completions[assignmentId]?.session_ref?.session_id === sessionId
+      && state.deliveries?.some(row => row.body.assignment_id === assignmentId && row.kind === 'report')
+      && !state.outbox.some(row => row.body.assignment_id === assignmentId)
+  }, 12_000, 'persisted unknown completion and original unknown Report delivery')
+  const localState = JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8'))
+  const completion = localState.completions[assignmentId]
+  assert.equal(completion.assignment_id, assignmentId)
+  assert.equal(completion.state, 'unknown')
+  assert.equal(completion.session_ref?.session_id, sessionId)
+  assert.deepEqual(completion.effects || [], [])
+  assert.deepEqual(completion.artifacts || [], [])
+  assert.ok(!completion.artifact && !completion.content && !completion.metadata && !completion.artifact_id)
+  assert.equal(localState.outbox.filter(row => row.body.assignment_id === assignmentId && ['artifact', 'report'].includes(row.kind)).length, 0)
+  assert.equal(localState.deliveries.filter(row => row.body.assignment_id === assignmentId && row.kind === 'artifact').length, 0)
+  assert.equal(localState.deliveries.filter(row => row.body.assignment_id === assignmentId && row.body.metadata?.media_type === 'application/json').length, 0)
+  const localReport = localState.deliveries.find(row => row.kind === 'report' && row.body.assignment_id === assignmentId)
+  assert.ok(localReport)
+  assert.equal(localReport.body.requested_state, 'unknown')
+  assert.equal(localReport.body.cancel_acknowledged, undefined, 'No cancellation acknowledgement is manufactured by this ordinary error')
+  assert.equal(localReport.body.bytes_base64, undefined)
+  assert.deepEqual(localReport.body.artifact_ids, [])
+  assert.equal(localReport.body.effects[0]?.effect_id, `dsh-turn-${assignmentId}`)
+  assert.equal(localReport.body.effects[0]?.input_digest, done.effects[0].input_digest)
+  assert.ok(localReport.body.effects[0].input_digest)
+  assert.deepEqual(localReport.body.effects, [{ effect_id: `dsh-turn-${assignmentId}`, status: 'unknown',
+    input_digest: done.effects[0].input_digest, evidence: { description: 'Actual DSH turn outcome or its delivery needs reconciliation; no external file effect is claimed.',
+      session_ref: { session_id: sessionId, harness: 'dsh', host_api: hostVersion, protocol: 'dsh-session-log', observed_seq: turn.event.seq } }, artifacts: [] }])
+  assert.ok(Array.isArray(localState.deliveries) && localState.deliveries.length > 0)
+  record('local completion preserves unknown bytes-outcome with only a delivered unknown Report', {
+    ticket_id: ticket.id, assignment_id: assignmentId, completion_state: completion.state,
+    completion_summary: completion.summary, local_artifact: false, outbox_entries: 0,
+  })
+  const previousStubRequests = stubRequests(root)
+  const beforeRestart = await admin.get(`/api/v1/tickets/${ticket.id}`)
+  const localBeforeRestart = JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8'))
+  const stoppedHost = await host.stop(); host = null
+  assert.equal(stoppedHost.code, 0)
+  await server.stop()
+  server = await startRustConcierge({ root: join(root, 'rust'), env: { PATH: process.env.PATH } })
+  // Keep the outer mutable center credential live for the later revocation function.
+  admin = new LoomHttpClient({ baseUrl: server.baseUrl, clientToken: server.clientToken, timeoutMs: 20_000 })
+  env.LOOM_FIXTURE_ENROLLMENT_CODE = ''
+  env.LOOM_FIXTURE_COORDINATOR_URL = server.baseUrl
+  host = await new FixtureHost(root, env, [server.clientToken]).start()
+  await assertGrantAndBinding()
+  const afterRestart = await admin.get(`/api/v1/tickets/${ticket.id}`)
+  for (const field of ['status', 'cancel_requested']) assert.equal(afterRestart[field], beforeRestart[field])
+  for (const field of ['assignments', 'reports', 'effects', 'artifacts']) {
+    assert.deepEqual(afterRestart[field].map(row => row.id ?? row.effect_id), beforeRestart[field].map(row => row.id ?? row.effect_id))
+  }
+  assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
+  assert.equal((await git('status', '--porcelain=v1', '--untracked-files=all')).stdout, ' M src/calc.js\n')
+  const identityAfter = JSON.parse(await readFile(join(root, 'node-state', 'identity.json'), 'utf8'))
+  for (const field of ['node_id', 'installation_id', 'public_key', 'private_key_pkcs8']) assert.equal(identityAfter[field], identityBefore[field])
+  const assertLocalPreserved = actual => {
+    assert.deepEqual(actual.completions[assignmentId], localBeforeRestart.completions[assignmentId])
+    assert.deepEqual(actual.outbox.filter(row => row.body.assignment_id === assignmentId),
+      localBeforeRestart.outbox.filter(row => row.body.assignment_id === assignmentId))
+    assert.deepEqual(actual.deliveries.filter(row => row.body.assignment_id === assignmentId),
+      localBeforeRestart.deliveries.filter(row => row.body.assignment_id === assignmentId))
+  }
+  assertLocalPreserved(JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8')))
+  const afterRestartCalls = host.sessionEvents(sessionId, ['tool/call'])
+  const afterRestartResults = host.sessionEvents(sessionId, ['tool/result'])
+  const afterRestartEnds = host.sessionEvents(sessionId, ['turn/end'])
+  assert.deepEqual(afterRestartCalls, [])
+  assert.deepEqual(afterRestartResults, [])
+  assert.deepEqual(afterRestartEnds, [])
+  assert.deepEqual(stubRequests(root), previousStubRequests)
+  assert.deepEqual(stubRequests(root).filter(row => row.session_id === sessionId), originalRequests)
+  // Repeated terminal detail reads are ordinary reopen observations, not cancellation or a new Agent request.
+  for (let index = 0; index < 5; index++) {
+    const repeated = await admin.get(`/api/v1/tickets/${ticket.id}`)
+    assert.equal(repeated.status, 'reconciling')
+    assert.equal(repeated.assignments.length, 1)
+    assertLocalPreserved(JSON.parse(await readFile(join(root, 'node-state', 'node-state.json'), 'utf8')))
+    assert.deepEqual(stubRequests(root).filter(row => row.session_id === sessionId), originalRequests)
+    await assertGrantAndBinding()
+  }
+  const durableCounts = await scopedDurableCounts()
+  assert.deepEqual(durableCounts, { tickets: countsBefore.tickets + 1, assignments: countsBefore.assignments + 1,
+    reports: countsBefore.reports + 1, artifacts: countsBefore.artifacts, effects: countsBefore.effects + 1 })
+  record('same persistent Host/center identity and unknown evidence survive restart with zero new requests or Artifacts', {
+    ticket_id: ticket.id, assignment_id: assignmentId, session_id: sessionId,
+    host_exit_code: stoppedHost.code, same_database_path: join(server.dataDir, 'loom.sqlite3'),
+    new_source_or_verifier_calls: 0, additional_model_requests: 0, fresh_host_tool_calls: 0,
+    sdk_abort_claimed_from_restart: false, fresh_host_turn_end_events: afterRestartEnds,
+    assignment_state_and_deliveries_unchanged: true, historical_counts: countsBefore, durable_counts: durableCounts,
+    sqlite_integrity: 'ok', audit_valid: true,
+  })
+  return { ticket_id: ticket.id, assignment_id: assignmentId, session_id: sessionId, counts: durableCounts }
+}
+async function scoped_revocation_boundary({ admin, root, projectRoot, grant, env, git, runTests, historicalTickets, noArtifactHistory = [], resetProject }) {
   const record = (name, evidence) => checks.push({ scope: 'grant_revocation_before_subprocess', name, pass: true, evidence })
   const previousSessions = JSON.parse(await readFile(join(root, 'node-state', 'dsh-session-map.json'), 'utf8')).assignments
   const previousSeq = new Map(previousSessions.map(row => [row.session_id,
     Math.max(0, ...host.sessionEvents(row.session_id).map(entry => entry.event.seq || 0))]))
   const countsBefore = await scopedDurableCounts()
-  assert.deepEqual(countsBefore, { tickets: 3, assignments: 4, reports: 4, artifacts: 7, effects: 4 })
+  assert.deepEqual(countsBefore, { tickets: 4, assignments: 5, reports: 5, artifacts: 7, effects: 5 })
+  assert.equal(noArtifactHistory.length, 1)
+  assert.ok(historicalTickets.includes(noArtifactHistory[0]))
   const historyBefore = new Map()
   for (const id of historicalTickets) {
     const history = await admin.get(`/api/v1/tickets/${id}`)
     historyBefore.set(id, {
+      grant_id: history.grant_id, status: history.status, cancel_requested: history.cancel_requested,
+      assignments: history.assignments.map(row => ({ id: row.id, ticket_id: row.ticket_id, node_id: row.node_id,
+        installation_id: row.installation_id, worker_id: row.worker_id, attempt: row.attempt, lease_epoch: row.lease_epoch })),
       reports: history.reports.map(row => row.id).sort(),
       artifacts: history.artifacts.map(row => row.id).sort(),
       effects: history.effects.map(row => row.id ?? row.effect_id).sort(),
@@ -534,7 +821,7 @@ async function scoped_revocation_boundary({ admin, root, projectRoot, grant, env
   const quarantinedAt = new Date(864e13).toISOString()
   assert.equal(Date.parse(quarantinedAt) >= Date.parse('3000-01-01T00:00:00.000Z'), true)
   await resetProject()
-  record('fourth revocation fixture is an explicitly driver-owned clean failing Git baseline', { initial_sha256: initialSha })
+  record('fifth revocation fixture is an explicitly driver-owned clean failing Git baseline', { initial_sha256: initialSha })
 
   const revoked = await admin.post('/api/v1/tickets', { project_id: grant.grant.project_id, node_id: grant.grant.node_id,
     worker_id: 'default', grant_id: grant.grant.id, kind: 'edit_file', relative_path: 'src/calc.js', content: expected,
@@ -573,6 +860,10 @@ async function scoped_revocation_boundary({ admin, root, projectRoot, grant, env
   const originalCalls = calls.filter(row => ['loom_fixture_code_edit', 'loom_fixture_verify'].includes(row.event.data.name))
   assert.equal(originalCalls.length, 2)
   assert.equal(originalRequests.length, 2, 'Exactly the editor and verifier model requests precede the held test boundary')
+  const fourthSourceToolCall = host.sessionEvents(sessionId, ['tool/call']).filter(row => row.event.data.name === 'loom_fixture_code_edit').length
+  const fourthVerifierToolCall = host.sessionEvents(sessionId, ['tool/call']).filter(row => row.event.data.name === 'loom_fixture_verify').length
+  assert.equal(fourthSourceToolCall, 1)
+  assert.equal(fourthVerifierToolCall, 1)
   const response = await admin.post('/api/v1/grants/' + grant.grant.id + '/revoke', {})
   assert.equal(response.revoked, true)
   const currentGrant = (await admin.get('/api/v1/grants')).grants.find(row => row.id === grant.grant.id)
@@ -698,12 +989,21 @@ async function scoped_revocation_boundary({ admin, root, projectRoot, grant, env
   assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
   assert.equal((await admin.get(`/api/v1/tickets/${revoked.id}`)).assignments.length, 1)
   const listings = await admin.get('/api/v1/tickets')
-  assert.equal(listings.tickets.length, 4)
+  assert.equal(listings.tickets.length, 5)
   assert.deepEqual(listings.tickets.map(row => row.id).sort(), [...historicalTickets, revoked.id].sort())
   for (const id of historicalTickets) {
     const history = await admin.get(`/api/v1/tickets/${id}`)
     assert.equal(history.grant_id, currentGrant.id)
-    assert.equal(history.reports.length > 0 && history.artifacts.length > 0 && history.effects.length > 0, true)
+    assert.equal(history.reports.length > 0 && history.effects.length > 0, true)
+    if (noArtifactHistory.includes(id)) {
+      assert.equal(history.status, 'reconciling')
+      assert.equal(history.cancel_requested, false)
+      assert.deepEqual(history.artifacts, [])
+      assert.deepEqual(history.reports.map(row => row.state), ['unknown'])
+      assert.deepEqual(history.effects.map(row => row.status), ['unknown'])
+      assert.equal(history.effects[0].id, `dsh-turn-${history.assignments[0].id}`)
+      assert.deepEqual(history.effects[0].artifacts, [])
+    } else assert.equal(history.artifacts.length > 0, true, 'Successful/source-proof history retains its real Artifacts after revocation')
   }
   const globalAudit = (await admin.get('/api/v1/audit')).audit
   const revocations = globalAudit.filter(row => row.action === 'grant.revoked')
@@ -735,7 +1035,11 @@ async function scoped_revocation_boundary({ admin, root, projectRoot, grant, env
   assert.deepEqual(await readFile(join(projectRoot, 'src', 'calc.js')), Buffer.from(expected))
   for (const [id, before] of historyBefore) {
     const history = await admin.get(`/api/v1/tickets/${id}`)
-    assert.deepEqual({ reports: history.reports.map(row => row.id).sort(),
+    assert.deepEqual({
+      grant_id: history.grant_id, status: history.status, cancel_requested: history.cancel_requested,
+      assignments: history.assignments.map(row => ({ id: row.id, ticket_id: row.ticket_id, node_id: row.node_id,
+        installation_id: row.installation_id, worker_id: row.worker_id, attempt: row.attempt, lease_epoch: row.lease_epoch })),
+      reports: history.reports.map(row => row.id).sort(),
       artifacts: history.artifacts.map(row => row.id).sort(),
       effects: history.effects.map(row => row.id ?? row.effect_id).sort() }, before)
   }
@@ -760,9 +1064,9 @@ async function scopedDurableCounts() {
   assert.equal(audit.algorithm, 'sha256_chain_v1')
   return counts
 }
-function stubRequests(root) {
+function stubRequests(root, type = 'request') {
   return readFileSync(join(root, 'private', 'fixture-control.jsonl'), 'utf8').split('\n').filter(Boolean)
-    .map(line => JSON.parse(line)).filter(row => row.type === 'request')
+    .map(line => JSON.parse(line)).filter(row => row.type === type)
 }
 async function showArtifactsInVue({ server, admin, root, ticket, beforeInspect }) {
   process.env.LOOM_TEST_CONCIERGE_URL = server.baseUrl

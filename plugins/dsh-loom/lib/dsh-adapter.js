@@ -6,15 +6,25 @@ import { stableArtifactId } from './ids.js'
 import { modelRef } from './model-policy.js'
 import { fixtureCodeTask, captureCodeCall, captureCodeResult, hasCodeRecord, codeEvidence } from './code-evidence.js'
 
+// Only versions whose relevant public Agent/Session APIs were actually inspected.
+// The optional default preserves old already-signed evidence and unit fixtures; the
+// production `apply` always supplies the version read from the selected Host.
+const VERIFIED_HOST_VERSIONS = new Set(['0.2.2-rc.3', '0.2.2-rc.5'])
+export function supportedDshHostVersion(value = '0.2.2-rc.3') {
+  if (!VERIFIED_HOST_VERSIONS.has(value)) throw new Error('This fixed source-evidence fixture does not accept an unverified DSH host version')
+  return value
+}
+
 /**
- * DSH 0.2.2-rc.3 public adapter. Sources verified in the installed ASAR:
- * dsh-agent/src/index.ts + runtime-types.ts and dsh-session/src/index.ts.
- * No private event types, Session.appendPluginRecord, synthetic transcript, or hidden protocol.
+ * Public DSH Agent/Session adapter; host_version follows the selected installation.
+ * Sources are the installed dsh-agent and dsh-session public APIs, never private
+ * event types, Session.appendPluginRecord, synthetic transcript, or hidden protocol.
  */
 export class DshAdapter {
-  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false, delegationAgentSetup, fixtureCodeTools } = {}) {
+  constructor(ctx, { allowCreation = false, agentSessionId = '', snapshotDir, sessionMapPath = '', allowBoundedFixtureEffects = false, delegationAgentSetup, fixtureCodeTools, hostVersion } = {}) {
     if (!ctx || typeof ctx.on !== 'function') throw new Error('A real Host Context is required')
     this.ctx = ctx; this.allowCreation = allowCreation; this.agentSessionId = agentSessionId; this.snapshotDir = snapshotDir
+    this.hostVersion = supportedDshHostVersion(hostVersion)
     this.allowBoundedFixtureEffects = allowBoundedFixtureEffects
     this.delegationAgentSetup = delegationAgentSetup
     this.fixtureCodeTools = fixtureCodeTools
@@ -56,7 +66,7 @@ export class DshAdapter {
       if (!tracked) this.sequence.set(assignmentId, { agent: replacement, owned: false, dispose: async () => {}, refReported: true, last_seq: session.seq })
       this.sequence.get(assignmentId).last_seq = event.seq
       this.sequence.get(assignmentId).session_ref = {
-        session_id: session.id, harness: 'dsh', host_api: '0.2.2-rc.3', protocol: 'dsh-session-log', observed_seq: event.seq,
+        session_id: session.id, harness: 'dsh', host_api: this.hostVersion, protocol: 'dsh-session-log', observed_seq: event.seq,
       }
       if (this.allowBoundedFixtureEffects && event.type === 'tool/call' && ['loom_fixture_write', 'loom_fixture_delegate_write'].includes(event.data?.name)) {
         this.sequence.get(assignmentId).calls ||= new Map()
@@ -235,7 +245,7 @@ export class DshAdapter {
   }
   sessionRef(session) {
     // A reference to Session's real ordinary log, not a second transcript or private event source.
-    return { harness: 'dsh', session_id: session.id, protocol: 'dsh-session-log', host_api: '0.2.2-rc.3', observed_seq: session.seq }
+    return { harness: 'dsh', session_id: session.id, protocol: 'dsh-session-log', host_api: this.hostVersion, observed_seq: session.seq }
   }
   async loadSessionMap() {
     if (this.sessionMap) return this.sessionMap
@@ -385,13 +395,22 @@ export class DshAdapter {
       if (tracked) tracked.request_started = true
       await settled
       const snapshot = this.latest.get(assignment.id)
-      if (!snapshot || !snapshot.full_text) throw new Error('DSH completed without an assistant message; no success can be inferred')
+      const terminal = this.sequence.get(assignment.id)?.code_outcome_requires_review
+      if ((!snapshot || !snapshot.full_text) && terminal?.kind !== 'error') throw new Error('DSH completed without an assistant message; no success can be inferred')
       const fileEvidence = await this.boundedFileEffects(assignment, config, this.sequence.get(assignment.id))
+      if (fileEvidence.state === 'unknown') {
+        // Keep all original cancellation/uncertainty evidence. Only the fixed
+        // post-edit fixture has an independently observed terminal error whose
+        // reason may refine its otherwise generic missing-message fallback.
+        const current = this.sequence.get(assignment.id)
+        const reason = current?.code_outcome_requires_review
+        return { ...fileEvidence, artifacts: [], session_ref: current?.session_ref,
+          ...(reason?.kind === 'error' ? { summary: 'A source edit was followed by a real tool/adapter failure. No verified source/test Artifact can certify the outcome; no completed verification or cancellation is inferred.' } : {}) }
+      }
       if (assignment.kind === 'edit_file' && !fileEvidence.effects?.length && fileEvidence.state !== 'failed') {
         // Unresolved tool/size facts never authorize a successful file report.
         throw new Error('A file-write assignment completed without a verified actual file Effect')
       }
-      if (fileEvidence.state === 'unknown') return { ...fileEvidence, artifacts: [] }
       if (this.sequence.get(assignment.id)?.code_outcome_requires_review && hasCodeRecord(this.sequence.get(assignment.id))
         && fileEvidence.state === 'succeeded') {
         return { ...fileEvidence, state: 'unknown', summary: 'The Agent terminated abnormally after verified source/test output; task completion stays unknown and does not become a success from test output alone.' }

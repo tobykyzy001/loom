@@ -47,8 +47,9 @@ class DeterministicAdapter extends LlmAdapter {
     const toolCalls = []
     for (const message of options.messages) {
       for (const block of message.content || []) {
-        if (block.type === 'text') history.push({ role: message.role, text: block.text })
-        if (message.role === 'tool') history.push({ role: message.role, toolCallId: message.toolCallId || message.source?.callId, content: message.content })
+        if (block.type === 'text') history.push({ role: message.role, text: block.text, source: message.source })
+        if (message.role === 'tool') history.push({ role: message.role, toolCallId: message.toolCallId || message.source?.callId,
+          source: message.source, content: message.content })
         if (block.type === 'tool-call') toolCalls.push(block.name)
       }
     }
@@ -56,7 +57,10 @@ class DeterministicAdapter extends LlmAdapter {
     // Declared scoped names, never user controls outside the approved fixture.
     if (this.serial > 40) throw new Error('Fixture model-call budget exceeded; refusing an unproductive repeated-tool loop')
     const text = history.map((entry) => entry.text || '').join('\n')
-    const latestUser = history.filter((entry) => entry.role === 'user').at(-1)?.text || ''
+    // The SDK appends a runtime-context user snapshot on its tool followup. For
+    // this adapter, "latestUser" is the latest actual Loom caller's text rather
+    // than replacing a scoped trigger with that internal snapshot.
+    const latestUser = history.filter((entry) => entry.role === 'user' && entry.source?.kind === 'loom').at(-1)?.text || ''
     const block = () => ({ type: 'block-start', index: 0, blockType: 'text' })
     const finish = () => ({ type: 'finish', reason: { kind: 'stop' } })
     const textResponse = (value, note = 'ordinary assistant text from the real DSH loop; no live LLM') => [
@@ -73,8 +77,28 @@ class DeterministicAdapter extends LlmAdapter {
       { type: 'tool-declaration-check', declared: (options.tools || []).some((tool) => tool.name === name), name },
       { type: 'finish', reason: { kind: 'tool-calls' } },
     ]
+    const postEditTurnError = latestUser.includes('LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT')
+      && toolCalls.includes('loom_fixture_code_edit')
+    const editResultForDiagnostic = history.findLast(entry => entry.role === 'tool' && entry.toolCallId?.startsWith('loom_fixture_code_edit-'))
+    await this.record({
+      type: 'request-diagnostic', id, session_id: options.sessionId || '',
+      latest_user_marker: latestUser.includes('LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT'),
+      history_marker: text.includes('LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT'),
+      post_edit_turn_error: postEditTurnError,
+      latest_user_role: history.filter(entry => entry.role === 'user').at(-1)?.role ?? null,
+      tool_calls: toolCalls,
+      edit_result_tool_call_id: editResultForDiagnostic?.toolCallId || null,
+      edit_result_source_call_id: editResultForDiagnostic?.source?.callId || null,
+      edit_result_has_fixed_error_text: JSON.stringify(editResultForDiagnostic || null).includes('LOOM fixture edit outcome unavailable after file replacement'),
+    })
     let chunks
-    if (options.purpose) {
+    if (postEditTurnError) {
+      const result = history.findLast(entry => entry.role === 'tool' && entry.toolCallId?.startsWith('loom_fixture_code_edit-'))
+      if (!result || !JSON.stringify(result).includes('LOOM fixture edit outcome unavailable after file replacement')) {
+        throw new Error('The scoped failure requires an actual SDK error result from the already-completed source edit')
+      }
+      chunks = textResponse('The source edit callback failed after replacement; no completed verification can be inferred.')
+    } else if (options.purpose) {
       chunks = textResponse('Loom isolated fixture')
     } else if (/LOOM_FIXTURE_CANCEL/i.test(text)) {
       await this.record({ type: 'hold', id })
@@ -186,6 +210,7 @@ class DeterministicAdapter extends LlmAdapter {
       yield chunk
       if (chunk.type === 'finish') await this.record({ type: 'finish', id, session_id: options.sessionId || '', reason: chunk.reason })
     }
+    if (postEditTurnError) throw new Error('LOOM fixture terminal error after the uncertain source-edit ToolResult')
   }
 }
 

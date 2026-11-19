@@ -8,7 +8,7 @@ import { ControlledFileExecutor } from '../src/executor.js'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { LoomHttpClient } from '../src/http.js'
-import { DshAdapter } from '../lib/dsh-adapter.js'
+import { DshAdapter, supportedDshHostVersion } from '../lib/dsh-adapter.js'
 import { DshDispatcher } from '../lib/dsh-dispatcher.js'
 import { CoordinatorLoop } from '../lib/coordinator.js'
 import { LoomNodeClient } from '../src/client.js'
@@ -58,6 +58,17 @@ test('real Coordinator config exposes typed capabilities and isolated root decla
     { ticket_kind: 'edit_file', permission: 'write' },
   ])
   // No network/Host registration in this unit. An exact spawn is replaced at the verified public boundary.
+})
+
+test('selected reviewed DSH host version follows Session evidence; legacy fallback and unknown versions stay bounded', () => {
+  const session = { id: 'actual-selected-session', seq: 10 }
+  const ctx = { on: () => {} }
+  assert.equal(new DshAdapter(ctx, { hostVersion: '0.2.2-rc.5' }).sessionRef(session).host_api, '0.2.2-rc.5')
+  assert.equal(new DshAdapter(ctx).sessionRef(session).host_api, '0.2.2-rc.3')
+  assert.equal(supportedDshHostVersion('0.2.2-rc.5'), '0.2.2-rc.5')
+  for (const candidate of ['0.2.2-rc.4', '0.2.3', 'https://private.invalid', '', null, {}]) {
+    assert.throws(() => new DshAdapter(ctx, { hostVersion: candidate }), /unverified DSH host version/)
+  }
 })
 
 test('dsh adapter uses persisted Session mapping, not fabricated Session events', async () => {

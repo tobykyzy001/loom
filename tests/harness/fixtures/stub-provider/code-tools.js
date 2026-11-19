@@ -149,6 +149,13 @@ export async function registerScopedCodeTools(ctx, scope) {
   // Public boundary: (real scoped Cordis context, {assignment, project_root}).
   if (!ctx || typeof ctx.tools?.register !== 'function') throw new Error('The scoped Agent tools registry is required')
   const { assignment, project_root: projectRoot } = scope
+  // Test-only directive combination is ambiguous about whether the verifier ever
+  // starts. Reject it before Git, filesystem or SDK tool work; it is not a
+  // general-purpose prompt permission parser.
+  if (typeof assignment?.objective === 'string' && assignment.objective.includes('LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT')
+    && assignment.objective.includes('LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')) {
+    throw new Error('Fixture after-edit ToolResult error and pre-verification pause are mutually exclusive')
+  }
   if (!assignment || (assignment.relative_path ?? CODE_SOURCE_PATH) !== CODE_SOURCE_PATH || typeof assignment.content !== 'string') {
     throw new Error('Code fixture requires the exact src/calc.js Ticket with persisted replacement content')
   }
@@ -203,6 +210,9 @@ export async function registerScopedCodeTools(ctx, scope) {
       const result = { schema: 'loom.fixture-code-edit.v1', path: CODE_SOURCE_PATH, previous_sha256: baselineSha, sha256: sha256(current), size_bytes: current.length,
         created: true, next_tool: 'loom_fixture_verify', baseline_test_exit_code: baseline.status, baseline_git_clean: true }
       state.edit = { result, bytes: current }
+      if (typeof assignment.objective === 'string' && assignment.objective.includes('LOOM_FIXTURE_CODE_TOOL_ERROR_AFTER_EDIT')) {
+        throw new Error('LOOM fixture edit outcome unavailable after file replacement')
+      }
       return result
     },
   })
@@ -222,7 +232,7 @@ export async function registerScopedCodeTools(ctx, scope) {
       checkVerifyArguments(args, CODE_SOURCE_PATH)
       if (!state.edit) throw new Error('Verification requires the successful preceding edit and its captured failing baseline')
       if (state.verification) throw new Error('Verification is single-use for the authoritative tool result')
-      if (assignment.objective.includes('LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')) {
+      if (typeof assignment.objective === 'string' && assignment.objective.includes('LOOM_FIXTURE_CODE_PAUSE_BEFORE_VERIFY')) {
         if (typeof scope.before_verify_pause !== 'function') throw new Error('The scoped cancel fixture requires an owner-specific bounded pause resolver')
         await scope.before_verify_pause(invocation.signal)
         if (invocation.signal?.aborted) {

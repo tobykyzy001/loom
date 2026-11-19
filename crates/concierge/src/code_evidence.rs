@@ -331,11 +331,14 @@ fn validate_common(
 }
 
 fn validate_session(session: &SessionEvidence) -> Result<()> {
+    // Exact allowlist for this deliberately bounded fixture, not arbitrary
+    // semver/provider support or a new public SDK compatibility declaration.
+    const REVIEWED_FIXTURE_HOSTS: [&str; 2] = ["0.2.2-rc.3", "0.2.2-rc.5"];
     if session.harness != "dsh"
-        || session.host_api != "0.2.2-rc.3"
+        || !REVIEWED_FIXTURE_HOSTS.contains(&session.host_api.as_str())
         || session.protocol != "dsh-session-log"
     {
-        bail!("session requires the fixed harness, host_api and protocol");
+        bail!("session requires the fixed reviewed harness, host_api and protocol");
     }
     uuid_text(&session.session_id, "session.session_id")
 }
@@ -1294,6 +1297,29 @@ mod tests {
         .unwrap();
         (directory, store)
     }
+    #[test]
+    fn session_host_api_is_bounded_to_independently_reviewed_fixture_versions() {
+        for version in ["0.2.2-rc.3", "0.2.2-rc.5"] {
+            let mut input = session(12);
+            input["host_api"] = json!(version);
+            let parsed: SessionEvidence = decode(input, "reviewed host version").unwrap();
+            validate_session(&parsed).unwrap();
+        }
+        for version in ["0.2.2-rc.4", "0.2.3", "", "https://private.invalid"] {
+            assert!(
+                validate_session(&SessionEvidence {
+                    harness: "dsh".into(),
+                    session_id: SESSION.into(),
+                    host_api: version.into(),
+                    protocol: "dsh-session-log".into(),
+                    observed_seq: 12,
+                })
+                .is_err(),
+                "{version} must not inherit a fixed fixture review"
+            );
+        }
+    }
+
     fn insert_artifact(
         store: &Store,
         id: &str,
@@ -1466,7 +1492,7 @@ mod tests {
             }),
             ("wrong host api", {
                 let mut v = change();
-                v["session"]["host_api"] = json!("0.2.1");
+                v["session"]["host_api"] = json!("0.2.2-rc.4");
                 v
             }),
             ("unknown session key", {

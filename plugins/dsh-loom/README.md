@@ -10,14 +10,14 @@ Installation alone is not registration, a Grant, a tested unit, or activation of
 
 ## Verified Host source facts used
 
-Verified read-only with `dsh-doc` from the running Desktop **0.2.2-rc.3** inside `app.asar`, using its `$DSH_NODE_EXECUTABLE` with `ELECTRON_RUN_AS_NODE=1`. Do not substitute another version's source:
+Verified read-only with `dsh-doc` from the running Desktop **0.2.2-rc.5** inside `app.asar`, using its `$DSH_NODE_EXECUTABLE` to inspect the exact selected runtime. The earlier rc.3 evidence remains historical. The rc.3→rc.5 upgrade index has no item changing the Agent/Tool/Session APIs used by this fixture; this is not blanket semver compatibility.
 
 - `@deepseek-ai/dsh-agent/src/index.ts`: `ctx.agents.create({sessionId, meta, agentOptions})`, `resume({resumeSessionId})`, `get(id)`, `list()`. Create/resume return an owned handle with `agent` and optional disposal; lookup returns a bare Agent.
 - `@deepseek-ai/dsh-agent/src/runtime-types.ts`: `agent.followup({role:"user", content:[{type:"text", text}], source:{kind:"loom"}})`, `cancel({kind:"user"})`, `session`, `status`, `ctx`. `whenIdle()` does not necessarily identify just one task; this implementation waits for `turn/end` instead.
 - `@deepseek-ai/dsh-session/src/index.ts`: ordinary `session/event` listener arguments are `(session, event)`. It is never appended to by this bundle. There is no custom Session event type or private plugin persistence marker.
 - `@deepseek-ai/dsh-session/src/types.ts`: successful turn completion is `event.data.reason.kind === "completed"`; an absent/unfinished/failure/abort is not interpreted as success. `assistant/message` content supplies actual output evidence; `Session.id` and `Session.seq` are ordinary persistent references.
 - `@deepseek-ai/dsh-time-context/src/index.ts` and `@deepseek-ai/dsh-agent-instructions/src/config.ts`: `export function apply(ctx, config)`, `export const Config`, `ctx.on`/`ctx.effect` and Schemastery are the actual installed Host exports/style.
-- `$DSH_INSTALL_DIR/package.json` names `@deepseek-ai/dsh`, version `0.2.2-rc.3`, Node engines `>=24.9.0`; the reported desktop Electron is `44.7.0`.
+- `$DSH_INSTALL_DIR/package.json` names `@deepseek-ai/dsh`, version `0.2.2-rc.5`; Node must be `>=24.9.0`, also declared by `engines.node` and `engines.dsh`. Older `0.2.2-rc.3` Session evidence remains readable by the current bounded fixture. Production supplies the actual selected manifest version into `DshAdapter.hostVersion`; the Rust and Vue fixed-code-evidence parsers accept only rc.3 or rc.5, never arbitrary new releases.
 
 **Verified in a separate temporary fixture Profile:** outbound registration, actual public Agent/session flow, scoped tool-created file effects, a parent/child pair with a real parent Session reference, an exact zero-network text adapter invocation, cancellation acknowledgement, and ordinary session resume evidence. These used the public DSH APIs with the deterministic zero-network stub, not a paid live LLM or arbitrary production harness.
 
