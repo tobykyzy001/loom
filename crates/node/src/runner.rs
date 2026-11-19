@@ -379,6 +379,14 @@ impl LocalNodeRunner {
     }
 
     pub async fn dispatch_outbox(&mut self) -> Result<TickStatus> {
+        if self.state.data.outbox.iter().any(|item| {
+            item.next_attempt_at != crate::state::HOLD_SCHEDULE
+                && chrono::DateTime::parse_from_rfc3339(&item.next_attempt_at).is_err()
+        }) {
+            bail!(
+                "invalid durable outbox schedule: retain undelivered evidence for reconciliation"
+            );
+        }
         let mut pending = false;
         let mut permanently_rejected = false;
         loop {
@@ -414,9 +422,13 @@ impl LocalNodeRunner {
                 }
             }
         }
-        if permanently_rejected && !pending {
+        if pending {
+            Ok(TickStatus::Deferred)
+        } else if permanently_rejected {
             Ok(TickStatus::Rejected)
-        } else if pending {
+        } else if !self.state.data.outbox.is_empty() {
+            // A future or intentionally quarantined item is still undelivered,
+            // even when no local attempt is currently due.
             Ok(TickStatus::Deferred)
         } else {
             Ok(TickStatus::Delivered)

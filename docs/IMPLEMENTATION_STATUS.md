@@ -2,7 +2,19 @@
 
 Updated: 2026-11-19.
 
-## Bare completion replay must preserve the original validated input
+## Invalid outbox schedules cannot advertise undelivered evidence as delivered
+
+At parent `70a24de`, native `dispatch_outbox()` selected records only when `DateTime::parse_from_rfc3339(...)` succeeded and the time was due. An invalid—but accepted string from the persisted Node State—was silently skipped. With two real Artifact/Report entries still retained, their intentionally invalid schedule led to `TickStatus::Delivered` even though neither pending item was sent. This was a status/reliability defect, not execution of a replacement operation or evidence that a central Grant had been recreated.
+
+The dispatch now checks every queue entry **before any send**. A non-sentinel, unparseable string produces `invalid durable outbox schedule`, retaining the entire selected Assignment/completion/outbox/cursor and its original error/clocks, and sending neither the Artifact nor the Report. This deliberately surfaces a malformed queue to operator reconciliation, rather than treating its time as immediately due or discarding its evidence; therefore a malformed queued item blocks other sends in that dispatch as well.
+
+The existing permanent-hold literal `+999999999-12-31T23:59:59Z` is **not Chrono-readable**, but is intentional. `StateStore` now shares its existing string value between permanent HTTP-failure storage and cancellation-race quarantine, without changing serialized bytes. Only this exact known hold is exempt from new-style timestamp errors; if that dispatch produces a real retryable error, `Deferred` remains first, an actual permanent rejection remains `Rejected`, and an outstanding valid-future/quarantined queue is otherwise `Deferred` rather than falsely `Delivered`. The literal is compatibility for a local scheduling marker, not a newly introduced signed rejection-state or authority field.
+
+The additional [pending-schedule regression](../crates/node/tests/completed_replay.rs) uses genuine native execution to produce two persistent pending entries, modifies only their deadline strings in a freshly reopened owned StateStore, and uses the real native runner/reqwest loopback path. The malformed pre-fix case returned `Delivered`, with no extra delivery, whereas the correction returns the documented explicit error without dropping or altering the queue/history. A valid future timestamp stays `Deferred`; exact holds produced by the real `mark_delivery_error(false)` routine retain their literal schedules, original bodies and error evidence, and perform no extra HTTP. Existing both exact execution/cancellation replays continue to pass. **3/3 native tests** now pass.
+
+Evidence: [pre-fix failed probe](/tmp/loom-invalid-schedule-red.log), [current Cargo output](/tmp/loom-outbox-schedule-rust.log) (**187 passed / 0 failed / 1 opt-in hardware probe ignored**, summed from actual test-target results), physical Node source/schema-preserving diff and the real native Bare integration. Shared Node **39/39**, Vue **155/155 + `vue-tsc`**, strict format/Clippy, and actual signing/read/atomic-write/cancel/reopen also pass. This still does not regard missing/non-string timestamps as safe: existing legacy decode defaults them to now, and that compatibility branch is not changed or proven by this increment. Arbitrary corrupt stores, universal exactly-once delivery, external deadline consensus, a new Harness, and the deferred 1+3 topology remain outside this verified scope.
+
+
 
 At parent `1d834eb`, the Rust `LocalNodeRunner.once()` shortcut treated any packet with an existing completion ID as a replay before full Assignment decoding. It could then dispatch the cardinally retained Artifact/Report and advance the local cursor while ignoring different content, epoch, grant, binding, or lease details. This cannot replay the executor or alter an outbox body; the defect is the unverified local evidence-replay decision, not execution of attacker content or a claim about a normally functioning real Concierge emitting a bad packet.
 

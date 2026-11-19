@@ -64,6 +64,14 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 
 正向源码编程样例进一步通过真实Vue点击failed retry后由真实DSH完成下一Attempt，旧失败的diff/test在前后下载保持bytes/hash不变；reconciling在普通Edge的按钮已不可提交，force-click零retry POST，直接后端仍拒绝。整体证据见[真实代码 worker](../../../tmp/loom-failed-retry-evidence-Z3FLpO/result.json)与[普通浏览器证明](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-browser-evidence-z9Mzwf/result.json)，而不是把mock状态/禁止按钮当作后端权限保证。
 
+## Bare Rust：损坏调度时间与hold不可再误报已交付
+
+仍用 `cargo test --locked -p loom-node --test completed_replay -- --test-threads=1`，当前**3/3**。由真正本机读取实际生成Artifact/Report，在确认其持久pending后将两条`next_attempt_at`改成同一不可解析字符串。原代码只跳过无法parse的字符串，最终`TickStatus::Delivered`：见[pre-fix RED](/tmp/loom-invalid-schedule-red.log)。修复在**整个queue的任何投递尝试前**拒绝非哨兵的非法字符串，报告`invalid durable outbox schedule`；item/body/attempt/error及Assignment/completion/cursor均保持，没有新的Artifact/Report HTTP或file effect。坏项会让你明确核对并停止本次dispatch，而不是把它直接当作立即允许上传。
+
+StateStore两个既有写入路径统一使用同一个未变serialized permanent-hold哨兵；它并非新权限位。真实`mark_delivery_error(false)`形成的hold保留原正文、错误和cursor，不向上传端点再次发送。60秒合法future也为Deferred。原有优先级保留：可重试失败→Deferred；本轮真正的不可重试拒绝→Rejected；仅剩future/hold而非空的queue →Deferred，只有空队列才Delivered。一个非法调度字符串可能阻止该轮其余投递，不宣称后续无阻塞自动修复。
+
+本变更只针对**字符串形式的非法调度值**；legacy decode中缺失或非字符串时间默认now的行为未改写，也未被宣称已完整验证。真实loopback执行/存储不冒充中央签发，真实Rust bare集成另行保留。当前[Cargo记录](/tmp/loom-outbox-schedule-rust.log)逐target汇总为**187通过/0失败/1 opt-in probe忽略**；Node39/Vue155 + `vue-tsc`均通过。private Node root与listener均为fixture并回收，无production Dsh Profile改动。
+
 ## 用户 UI 撤权 + 两次未领取空poll的补充证据
 
 在普通生产浏览器驱动 `tests/browser/run.mjs --keep-evidence` 内，用户通过权限页精确Grant的确认按钮撤回授权，做的是现有Concierge的真实 `POST /grants/{id}/revoke`，而不是 Node 直接访问管理路由。此 Ticket 已签发 Assignment，却从未被 Node acknowledged；撤权后不调用executor，连续两次原LocalNodeRunner的正常poll通过同一注册身份拿到真实 `assignment:null`。对待原响应只做只读记录、保留认证上下文和返回形状，不把缺轮询或短路包装为空poll当作通过。

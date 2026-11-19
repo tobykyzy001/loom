@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub(crate) const HOLD_SCHEDULE: &str = "+999999999-12-31T23:59:59Z";
+
 #[derive(Clone, Debug)]
 pub struct Persisted {
     pub version: u64,
@@ -158,7 +160,7 @@ impl StateStore {
                 + chrono::Duration::seconds(2_i64.pow(item.attempts.min(5) as u32).min(60)))
             .to_rfc3339()
         } else {
-            "+999999999-12-31T23:59:59Z".to_owned()
+            HOLD_SCHEDULE.to_owned()
         };
         self.flush()
     }
@@ -248,7 +250,7 @@ impl StateStore {
             for item in &mut self.data.outbox {
                 if item.kind == "artifact" && item.body["assignment_id"] == assignment_id {
                     item.last_error = Some("Normal artifact transport was quarantined because cancellation raced the local effect; bytes and metadata are retained locally for reconciliation.".to_owned());
-                    item.next_attempt_at = "+999999999-12-31T23:59:59Z".to_owned();
+                    item.next_attempt_at = HOLD_SCHEDULE.to_owned();
                     changed = true;
                 }
             }

@@ -407,6 +407,108 @@ async fn native_completed_replay_checks_full_input_before_evidence_delivery() {
 }
 
 #[tokio::test]
+async fn invalid_durable_outbox_schedule_is_not_delivered() {
+    let fixture = Fixture::new(false).await;
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Succeeded
+    ));
+    let mut state = StateStore::open(&fixture.state).unwrap();
+    assert_eq!(state.data.outbox.len(), 2);
+    for item in &mut state.data.outbox {
+        // Reuse actual persisted pending evidence, not a fabricated completion.
+        // A corrupt persisted clock must not cause an immediate unsafe send.
+        item.next_attempt_at = "not-an-rfc3339-persisted-deadline".to_owned();
+    }
+    state.flush().unwrap();
+    let before = fixture.history();
+    let artifact_attempts = fixture.server.calls("/artifacts").len();
+    let report_attempts = fixture.server.calls("/reports").len();
+    let before_effects = std::fs::read_dir(&fixture.artifacts)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".effect.json")
+        })
+        .count();
+    let error = fixture.tick(Value::Null).await.expect_err(
+        "a retained queue with an unparseable deadline cannot report that it was delivered",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("invalid durable outbox schedule"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fixture.history(),
+        before,
+        "retain the complete original queue and history, including its error evidence"
+    );
+    assert_eq!(fixture.server.calls("/artifacts").len(), artifact_attempts);
+    assert_eq!(fixture.server.calls("/reports").len(), report_attempts);
+    assert_eq!(
+        std::fs::read_dir(&fixture.artifacts)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".effect.json"))
+            .count(),
+        before_effects
+    );
+    let mut reopened = StateStore::open(&fixture.state).unwrap();
+    for item in &mut reopened.data.outbox {
+        item.next_attempt_at = (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
+    }
+    reopened.flush().unwrap();
+    let future = fixture.history();
+    assert!(matches!(
+        fixture.tick(Value::Null).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    assert_eq!(
+        fixture.history(),
+        future,
+        "a valid not-yet-due queue stays pending unchanged"
+    );
+    assert_eq!(fixture.server.calls("/artifacts").len(), artifact_attempts);
+    assert_eq!(fixture.server.calls("/reports").len(), report_attempts);
+    let mut held = StateStore::open(&fixture.state).unwrap();
+    for index in 0..held.data.outbox.len() {
+        held.mark_delivery_error(index, "owned fixture permanent rejection", false)
+            .unwrap();
+    }
+    held.flush().unwrap();
+    assert!(held
+        .data
+        .outbox
+        .iter()
+        .all(|item| item.next_attempt_at == "+999999999-12-31T23:59:59Z"));
+    let preserved_hold = fixture.history();
+    assert!(
+        matches!(
+            fixture.tick(Value::Null).await.unwrap(),
+            TickStatus::Deferred
+        ),
+        "an intentional permanent local hold must not be classified as corrupt or delivered"
+    );
+    assert_eq!(
+        fixture.history(),
+        preserved_hold,
+        "the exact quarantine and its error evidence are untouched"
+    );
+    assert_eq!(fixture.server.calls("/artifacts").len(), artifact_attempts);
+    assert_eq!(fixture.server.calls("/reports").len(), report_attempts);
+}
+
+#[tokio::test]
 async fn native_cancel_completion_does_not_generate_a_second_cancel_report() {
     let fixture = Fixture::new(true).await;
     assert!(matches!(
