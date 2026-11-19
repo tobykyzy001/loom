@@ -598,7 +598,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 15);
+        assert_eq!(schema, 16);
         assert_eq!(
             store
                 .query("SELECT * FROM skill_replays", [])
@@ -648,7 +648,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 15);
+        assert_eq!(schema, 16);
         assert_eq!(
             store.get("grants", "legacy-grant").unwrap().unwrap()["digest"],
             "original-digest"

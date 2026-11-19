@@ -192,7 +192,7 @@ try {
   assert.equal(body.activity, body.content)
 
   openDatabase()
-  assert.equal(one('PRAGMA user_version').user_version, 15)
+  assert.equal(one('PRAGMA user_version').user_version, 16)
   const originalReceipt = receiptRow(runner.nodeId, firstRequestId)
   const originalMessage = matchingMessage(firstRequestId)
   // Record the direct logical-body digest as diagnostic contrast; the contract

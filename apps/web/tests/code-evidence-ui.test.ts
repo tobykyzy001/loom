@@ -188,6 +188,29 @@ describe('strict downloaded code evidence relation', () => {
     incomplete(f.ticket, { ...f.verification, content: '{' }, [f.diff])
   })
 
+  it('publishes the bounded read evidence relationship without inventing raw content or accepting mismatched proof', async () => {
+    const sessionMeta = { session_id: sessionId, protocol: 'dsh-session-log' }
+    const source = { schema: 'loom.read-source.v1', path: 'input.txt', bytes: newSha, size_bytes: 47 }
+    const proof = { schema: 'loom.read-proof.v1', name: 'loom_fixture_inspect', call_id: 'read-call', call_seq: 1, result_id: 'read-result', result_seq: 2, session: sessionMeta }
+    const publicProof = { schema: 'loom.read-provenance.v1', call_id: proof.call_id, call_seq: 1, result_id: proof.result_id, result_seq: 2, session: session(), path: 'input.txt', sha256: newSha, size_bytes: 47, read_observed: true, raw_artifact_published: false }
+    const artifact: ArtifactContent = {
+      metadata: { artifact_id: ids.verification, ticket_id: ticketId, origin_node_id: nodeId, assignment_id: 'assignment-failed', name: 'read-evidence.json', read_evidence: publicProof } as ArtifactRef & { read_evidence: Evidence },
+      content: JSON.stringify({ schema: 'loom.read-evidence.v1', source, read_observed: true, raw_artifact_published: false, proof }), encoding: 'utf8', truncated: false,
+    }
+    const ticket: Ticket = { id: ticketId, project_id: 'project', objective: 'Sensitive process is not published twice.', status: 'succeeded', attempt: 1, kind: 'read_summary', relative_path: 'input.txt', created_at: '', updated_at: '',
+      assignments: [{ id: 'assignment-failed', ticket_id: ticketId, node_id: nodeId, worker_id: 'default', attempt: 1 }],
+      reports: [{ assignment_id: 'assignment-failed', status: 'succeeded', summary: 'bounded valid source proof' }], effects: [] }
+    expect(codeArtifactPresentation(ticket, artifact)).toMatchObject({ kind: 'read', sha256: newSha, sessionId })
+    const rendered = await html(ticket, artifact, [artifact])
+    expect(rendered).toContain('不公开源文件原文、工具参数或助手转录')
+    expect(rendered).toContain(newSha)
+    for (const publicProof of [{ ...(artifact.metadata as Meta & { read_evidence: Record<string, unknown> }).read_evidence, session: 'legacy-without-version', result_seq: 3 }]) {
+      incomplete(ticket, { ...artifact, metadata: { ...artifact.metadata, read_evidence: publicProof } } as ArtifactContent, [artifact])
+    }
+    const corrupted = { ...artifact, content: JSON.stringify({ ...JSON.parse(artifact.content), source: { ...source, bytes: oldSha } }) }
+    incomplete(ticket, corrupted, [artifact])
+  })
+
   it('escapes sensitive stdout as text and preserves an ordinary artifact verbatim', async () => {
     const f = fixture()
     const output = await html(f.ticket, f.verification, [f.diff])

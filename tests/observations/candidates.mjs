@@ -405,7 +405,7 @@ try {
   assert.equal((await get('/memories')).memories.length, 0)
   assert.equal((await get('/candidates')).candidates.filter(row => row.id.startsWith('candidate_')).length, 3 + Number(process.argv.includes('--browser')))
   assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'SELECT COUNT(*) FROM candidate_memory_links'), 0)
-  assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 15)
+  assert.equal(await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'), 16)
   assert.equal((await get('/audit/verify')).valid, true)
 
   const durableMemoryAudits = (await auditRecords()).filter(entry => ['memory.explicit_updated', 'memory.explicit_deleted'].includes(entry.action))

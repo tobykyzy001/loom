@@ -13,10 +13,21 @@ const view = computed(() => codeArtifactPresentation(props.ticket, props.artifac
       <div><span class="label">已下载内容</span><code class="artifact-name">{{ view.name ?? '未命名 Artifact' }}</code></div>
       <span v-if="view.kind === 'change'" class="label">源码 Diff · 固定 fixture</span>
       <span v-else-if="view.kind === 'verification'" class="label">固定 node:test 验证</span>
+      <span v-else-if="view.kind === 'read'" class="label">固定受限读取证据</span>
       <span v-else class="label">原始文本</span>
     </header>
     <p v-if="view.kind === 'unsupported' && view.reason === 'incomplete_relation'" class="incomplete" role="note">证据关联不完整；仅提供当前原始内容，未确认到对应Attempt或验证状态。</p>
     <p class="boundary">{{ view.kind === 'unsupported' ? '未识别为关联代码证据；仅展示当前内容。' : '仅结构化关联已下载的授权内容；权威校验中心仍为最终依据，此处不独立验证 Artifact 字节摘要。' }}</p>
+
+    <template v-if="view.kind === 'read'">
+      <dl class="facts" aria-label="Bounded source read evidence">
+        <div><dt>来源文件</dt><dd><code>{{ view.path }}</code></dd></div>
+        <div><dt>来源 SHA-256</dt><dd><code>{{ view.sha256 }}</code></dd></div>
+        <div><dt>DSH Session</dt><dd><code>{{ view.sessionId }}</code></dd></div>
+        <div><dt>公开范围</dt><dd>读取已核验；不公开源文件原文、工具参数或助手转录。</dd></div>
+      </dl>
+      <p class="boundary">该证据来自认证 Node 与实际来源字节的关系，不是通用转录脱敏器，也不证明未授权内容可见。完整宿主原文不属于此交付。</p>
+    </template>
 
     <template v-if="view.kind === 'change'">
       <dl class="facts" aria-label="Source change and association">
@@ -52,8 +63,9 @@ const view = computed(() => codeArtifactPresentation(props.ticket, props.artifac
         <h3>stderr <span class="label">bounded plain text</span></h3><pre>{{ view.stderr }}</pre>
       </section>
     </template>
-    <details v-if="view.kind !== 'unsupported'" class="original-bytes"><summary>当前 Artifact 原文（未修改）</summary><pre class="artifact-content" aria-label="Original downloaded artifact bytes">{{ artifact.content }}</pre></details>
-    <pre v-else class="artifact-content" aria-label="Original artifact text" aria-live="polite">{{ view.content }}</pre>
+    <details v-if="view.kind !== 'unsupported' && view.kind !== 'read'" class="original-bytes"><summary>当前 Artifact 原文（未修改）</summary><pre class="artifact-content" aria-label="Original downloaded artifact bytes">{{ artifact.content }}</pre></details>
+    <pre v-else-if="view.kind === 'unsupported'" class="artifact-content" aria-label="Original artifact text" aria-live="polite">{{ view.content }}</pre>
+    <details v-else-if="view.kind === 'read'" class="original-bytes"><summary>公开的结构化证明（已裁剪）</summary><pre class="artifact-content" aria-label="Bounded public read proof">{{ view.originalContent }}</pre></details>
   </section>
 </template>
 

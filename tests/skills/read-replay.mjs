@@ -213,10 +213,10 @@ try {
   assert.equal((await admin.get('/api/v1/audit/verify')).valid,true)
   const doctor=await promisify(execFile)('cargo',['run','-q','-p','loom-concierge','--bin','loom','--','--data-dir',server.dataDir,'doctor'],{env:{...process.env,LOOM_CLIENT_TOKEN:server.clientToken},timeout:120000,encoding:'utf8'})
   const persistence=JSON.parse(doctor.stdout)
-  assert.equal(persistence.schema_version,15)
+  assert.equal(persistence.schema_version,16)
   assert.equal(persistence.integrity[0].integrity_check,'ok')
   assert.equal(persistence.audit_valid,true)
-  record('controller reopen keeps both exact byte proofs, original lineage, independently accepted Skill and additive storage schema v15',{schema_version:persistence.schema_version,integrity:persistence.integrity[0].integrity_check,audit_valid:persistence.audit_valid,source_sha256:sourceSha,replay_sha256:freshSha,ordinary_replays:1,new_grants:0})
+  record('controller reopen keeps both exact byte proofs, original lineage, independently accepted Skill and additive storage schema v16',{schema_version:persistence.schema_version,integrity:persistence.integrity[0].integrity_check,audit_valid:persistence.audit_valid,source_sha256:sourceSha,replay_sha256:freshSha,ordinary_replays:1,new_grants:0})
 
   console.log(JSON.stringify({overall:'PASS',schema:15,source_sha256:sourceSha,replay_sha256:freshSha,tickets:await countTickets(),checks,not_implemented:['general learned Skills','arbitrary commands','live LLM','general Grant or activation','provider/distribution','HTTP connectors'],foreground_workers_stopped:true},null,2))
 } catch (error) {

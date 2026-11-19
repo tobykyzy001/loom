@@ -2425,7 +2425,7 @@ mod tests {
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            15,
+            16,
             "preference reads require no schema migration"
         );
         let now = crate::now();
@@ -5096,8 +5096,18 @@ async fn artifact_upload(
     };
     // Only a fixed, strictly validated tool invocation has a public code
     // projection. All unrelated metadata retains its prior private behavior.
-    let code_evidence = crate::code_evidence::projected_metadata(&metadata)
+    let mut code_evidence = crate::code_evidence::projected_metadata(&metadata)
         .map_err(|error| ApiError::bad(error.to_string()))?;
+    let read_evidence = code_evidence
+        .as_ref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(|value| value["schema"] == "loom.read-provenance.v1")
+        .map(|value| value.to_string());
+    if read_evidence.is_some() {
+        // These public proof types are exclusive. Do not present the read
+        // projection to the older source-code change/verification validator.
+        code_evidence = None;
+    }
     let bytes_base64 = body["bytes_base64"]
         .as_str()
         .or_else(|| body["bytes"].as_str())
@@ -5110,6 +5120,13 @@ async fn artifact_upload(
             "Inline artifact must be 1 byte through 8 MiB",
         ));
     };
+    if let Some(proof) = read_evidence
+        .as_ref()
+        .map(|value| serde_json::from_str::<Value>(value).expect("validated above"))
+    {
+        crate::code_evidence::validate_read_artifact(&proof, &data)
+            .map_err(|error| ApiError::bad(format!("read_artifact_body: {error}")))?;
+    }
     let initial_lease = {
         let store = state.lock().unwrap();
         valid_lease(&store, &body, &node, false)
@@ -5117,17 +5134,21 @@ async fn artifact_upload(
     let (ticket, assignment, _) = match initial_lease {
         Ok(binding) => binding,
         Err(original) => {
-            let candidate = code_evidence.as_ref().is_some_and(|text| {
-                serde_json::from_str::<Value>(text).is_ok_and(|proof| proof["kind"] == "change")
-            }) && crate::code_evidence::can_upload_cancelled_change(
-                &state.lock().unwrap(),
-                body["ticket_id"].as_str().unwrap_or_default(),
-                body["assignment_id"].as_str().unwrap_or_default(),
-                &node,
-                &metadata,
-                &data,
-            )
-            .map_err(|error| ApiError::denied("cancelled_source_evidence", error.to_string()))?;
+            let candidate = read_evidence.is_none()
+                && code_evidence.as_ref().is_some_and(|text| {
+                    serde_json::from_str::<Value>(text).is_ok_and(|proof| proof["kind"] == "change")
+                })
+                && crate::code_evidence::can_upload_cancelled_change(
+                    &state.lock().unwrap(),
+                    body["ticket_id"].as_str().unwrap_or_default(),
+                    body["assignment_id"].as_str().unwrap_or_default(),
+                    &node,
+                    &metadata,
+                    &data,
+                )
+                .map_err(|error| {
+                    ApiError::denied("cancelled_source_evidence", error.to_string())
+                })?;
             if !candidate {
                 return Err(original);
             }
@@ -5255,6 +5276,18 @@ async fn artifact_upload(
         .join("artifacts")
         .join(format!("{artifact}.artifact"));
     if let Some(current) = store.get("artifacts", &artifact)? {
+        let existing_read = crate::code_evidence::read_projection(&current)?;
+        if read_evidence.as_deref()
+            != existing_read
+                .as_ref()
+                .map(|value| value.to_string())
+                .as_deref()
+        {
+            return Err(ApiError::conflict(
+                "read_evidence_conflict",
+                "Duplicate read evidence must keep the same tool, Session, sequence and source proof; add none or replace none is not a duplicate",
+            ));
+        }
         let existing_evidence = crate::code_evidence::projection(&current)?;
         if code_evidence
             .as_ref()
@@ -5327,7 +5360,7 @@ async fn artifact_upload(
     }
     let tx = store.conn_mut().transaction()?;
     let result = (|| -> rusqlite::Result<()> {
-        tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,code_evidence_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),serde_json::Value::Array(lineage.clone()).to_string(),now(),code_evidence])?;
+        tx.execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,code_evidence_json,read_evidence_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![artifact,ticket,assignment,node,name,media,data.len() as i64,digest,format!("{artifact}.artifact"),format!("loom://artifact/{artifact}"),serde_json::Value::Array(lineage.clone()).to_string(),now(),code_evidence,read_evidence])?;
         if let Some(observation) = model_observation.as_ref() {
             crate::model_observation::insert(&tx, observation)?;
         }
@@ -5753,10 +5786,21 @@ async fn artifact(
         ));
     }
     let public_evidence = crate::code_evidence::projection(&a)?;
+    let public_read = crate::code_evidence::read_projection(&a)?;
+    if public_evidence.is_some() && public_read.is_some() {
+        return Err(ApiError::conflict(
+            "artifact_evidence_conflict",
+            "An Artifact cannot expose both code and read proof namespaces",
+        ));
+    }
     if let Some(storage_fields) = a.as_object_mut() {
         storage_fields.remove("code_evidence_json");
     }
     a["code_evidence"] = public_evidence.unwrap_or(Value::Null);
+    if let Some(storage_fields) = a.as_object_mut() {
+        storage_fields.remove("read_evidence_json");
+    }
+    a["read_evidence"] = public_read.unwrap_or(Value::Null);
     let path = artifact_storage_path(&store.root, &a)?;
     let mut file = artifact_file_io(std::fs::File::open(&path))?;
     let metadata = artifact_file_io(file.metadata())?;
@@ -5812,7 +5856,18 @@ async fn ticket(
         if let Some(storage_fields) = artifact.as_object_mut() {
             storage_fields.remove("code_evidence_json");
         }
+        let public_read = crate::code_evidence::read_projection(artifact)?;
+        if public_evidence.is_some() && public_read.is_some() {
+            return Err(ApiError::conflict(
+                "artifact_evidence_conflict",
+                "An Artifact cannot expose both code and read proof namespaces",
+            ));
+        }
         artifact["code_evidence"] = public_evidence.unwrap_or(Value::Null);
+        if let Some(storage_fields) = artifact.as_object_mut() {
+            storage_fields.remove("read_evidence_json");
+        }
+        artifact["read_evidence"] = public_read.unwrap_or(Value::Null);
     }
     detail["model_observation"] = crate::model_observation::for_ticket(&store, &id)?
         .map_or(Value::Null, |entry| json!(entry));

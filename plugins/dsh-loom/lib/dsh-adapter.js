@@ -5,14 +5,53 @@ import { createHash } from 'node:crypto'
 import { stableArtifactId } from './ids.js'
 import { modelRef } from './model-policy.js'
 import { fixtureCodeTask, captureCodeCall, captureCodeResult, hasCodeRecord, codeEvidence } from './code-evidence.js'
+import { boundedReadArtifact, fixtureReadAssignment } from './read-evidence.js'
 
 // Only versions whose relevant public Agent/Session APIs were actually inspected.
+// rc.3 legacy uses its previously accepted assistant read evidence. Current Hosts
+// use the public read projection; old stored artifacts are not rewritten.
 // The optional default preserves old already-signed evidence and unit fixtures; the
 // production `apply` always supplies the version read from the selected Host.
 const VERIFIED_HOST_VERSIONS = new Set(['0.2.2-rc.3', '0.2.2-rc.5'])
 export function supportedDshHostVersion(value = '0.2.2-rc.3') {
   if (!VERIFIED_HOST_VERSIONS.has(value)) throw new Error('This fixed source-evidence fixture does not accept an unverified DSH host version')
   return value
+}
+
+function captureReadEvent(record, session, event, sessionRef) {
+  if (!record.code_task && event.type === 'tool/call' && event.data?.name === 'loom_fixture_inspect') {
+    try {
+      const args = JSON.parse(event.data.arguments)
+      record.read_calls ||= new Map()
+      record.read_calls.set(event.data.callId, { name: event.data.name, args, seq: event.seq })
+    } catch { record.read_invalid = true }
+    return
+  }
+  if (record.code_task || event.type !== 'tool/result') return
+  const message = event.data?.message
+  const calls = [...(record.read_calls?.entries() || [])]
+  const match = calls.find(([id]) => message?.toolCallId === id || message?.source?.callId === id)
+  if (!match) {
+    // Do not assign a different tool's arbitrary text to a read proof. A named
+    // error for the currently captured name must still not leak its message.
+    if (message?.name === 'loom_fixture_inspect' || message?.source?.name === 'loom_fixture_inspect') record.read_invalid = true
+    return
+  }
+  if (typeof message?.id !== 'string' || !message.id) { record.read_invalid = true; return }
+  const [call_id, call] = match
+  const text = (message.content || []).filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('\n')
+  const recordOut = { call, call_id, result_id: message.id, result_seq: event.seq, session: sessionRef(), is_error: message.isError === true }
+  if (recordOut.is_error) recordOut.is_error = true
+  try {
+    const proof = JSON.parse(text)
+    if (proof.schema === 'loom.fixture-read.v1' && proof.path === 'input.txt' && /^[a-f0-9]{64}$/.test(proof.sha256)
+      && Number.isSafeInteger(proof.size_bytes) && proof.size_bytes > 0 && proof.size_bytes <= 4096 && proof.read === true
+      && Object.keys(proof).length === 5 && ['schema', 'path', 'sha256', 'size_bytes', 'read'].every(key => key in proof)) {
+      recordOut.result = { schema: proof.schema, path: proof.path, sha256: proof.sha256, size_bytes: proof.size_bytes, read: true }
+    } else record.read_invalid = true
+  } catch { record.read_invalid = true }
+  record.read_records ||= []
+  record.read_records.push(recordOut)
 }
 
 /**
@@ -29,6 +68,7 @@ export class DshAdapter {
     this.delegationAgentSetup = delegationAgentSetup
     this.fixtureCodeTools = fixtureCodeTools
     this.sessionMapPath = sessionMapPath; this.sessionMap = null
+    this.readCaptureEnabled = supportedDshHostVersion(hostVersion) === '0.2.2-rc.5'
     this.owned = new Map(); this.waiters = new Map(); this.latest = new Map(); this.sequence = new Map()
     this.sessionOwners = new Map()
     this.pendingCancellations = new Set()
@@ -51,11 +91,17 @@ export class DshAdapter {
         }
       }
       // still selects only this assignment's terminal waiter, never new tools.
-      if (tracked?.code_task && tracked.agent.session === session
+      if (tracked?.agent.session === session
         && (tracked.request_seq === undefined || event.seq >= tracked.request_seq)) {
-        // Ordinary tool evidence still requires the exact live Session object.
-        if (event.type === 'tool/call') captureCodeCall(tracked, event.data?.name, { ...(event.data || {}), __seq: event.seq })
-        if (event.type === 'tool/result') captureCodeResult(tracked, { ...(event.data || {}), seq: event.seq }, this.sessionRef(session))
+        // The actual attached Agent/Session is the owner boundary, not code_task.
+        if (tracked.code_task) {
+          if (event.type === 'tool/call') captureCodeCall(tracked, event.data?.name, { ...(event.data || {}), __seq: event.seq })
+          if (event.type === 'tool/result') captureCodeResult(tracked, { ...(event.data || {}), seq: event.seq }, this.sessionRef(session))
+        }
+        if (this.readCaptureEnabled && !tracked.code_task && tracked.read_fixture) {
+          // Fixed read projection only; no arbitrary tool or assistant plaintext.
+          captureReadEvent(tracked, session, event, () => this.sessionRef(session))
+        }
       }
       // During SDK resume a session has a different identity but is the exact live Agent named by our mapping.
       const replacement = this.ctx.agents.get(session.id)
@@ -335,6 +381,7 @@ export class DshAdapter {
       last_seq: handle.agent.session.seq, refReported: false }
     this.sequence.set(assignment.id, record)
     record.code_task = codeTask
+    record.read_fixture = fixtureReadAssignment(assignment) !== null
     this.sessionOwners.set(handle.agent.session.id, assignment.id)
     await this.persistSessionMap(assignment.id, handle.agent.session.id)
     await reportLink(this.sessionRef(handle.agent.session))
@@ -396,6 +443,13 @@ export class DshAdapter {
       await settled
       const snapshot = this.latest.get(assignment.id)
       const terminal = this.sequence.get(assignment.id)?.code_outcome_requires_review
+      if ((!snapshot || !snapshot.full_text) && terminal?.kind !== 'error' && !this.readCaptureEnabled) throw new Error('DSH completed without an assistant message; no success can be inferred')
+      // A recognized real read can succeed without trusting or publishing the
+      // followup assistant narration. All other outcomes keep their old paths.
+      const readResult = this.readCaptureEnabled && tracked?.read_fixture
+        ? await boundedReadArtifact(assignment, config.projectRoot || assignment.grant?.project_root, this.sequence.get(assignment.id))
+        : null
+      if (readResult) return readResult
       if ((!snapshot || !snapshot.full_text) && terminal?.kind !== 'error') throw new Error('DSH completed without an assistant message; no success can be inferred')
       const fileEvidence = await this.boundedFileEffects(assignment, config, this.sequence.get(assignment.id))
       if (fileEvidence.state === 'unknown') {

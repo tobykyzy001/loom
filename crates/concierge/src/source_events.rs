@@ -716,7 +716,7 @@ mod tests {
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            15
+            16
         );
         assert_eq!(
             upgraded.get("grants", "legacy-grant").unwrap().unwrap()["digest"],

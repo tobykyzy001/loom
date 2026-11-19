@@ -30,6 +30,63 @@ pub struct SessionEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ReadEvidence {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub name: String,
+    pub call_id: String,
+    pub call_seq: u64,
+    pub result_id: String,
+    pub result_seq: u64,
+    pub session: SessionEvidence,
+    pub path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub read_observed: bool,
+    pub raw_artifact_published: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadArtifactBody {
+    pub schema: String,
+    pub source: ReadSourceBody,
+    pub read_observed: bool,
+    pub raw_artifact_published: bool,
+    pub proof: ReadProofBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadSourceBody {
+    pub schema: String,
+    pub path: String,
+    pub bytes: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadProofBody {
+    pub schema: String,
+    pub name: String,
+    pub call_id: String,
+    pub call_seq: u64,
+    pub result_id: String,
+    pub result_seq: u64,
+    pub session: ReadSessionBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadSessionBody {
+    pub session_id: String,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StopBoundaryEvidence {
     pub schema: String,
     #[serde(rename = "type")]
@@ -134,7 +191,7 @@ pub fn projected_metadata(metadata: &Value) -> Result<Option<String>> {
         let fixed_marker = evidence
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| matches!(name, CHANGE | VERIFY));
+            .is_some_and(|name| matches!(name, CHANGE | VERIFY | "loom_fixture_inspect"));
         if fixed_marker {
             bail!("fixed-name evidence must be a single tool record in an array");
         }
@@ -146,7 +203,7 @@ pub fn projected_metadata(metadata: &Value) -> Result<Option<String>> {
         record
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| matches!(name, CHANGE | VERIFY))
+            .is_some_and(|name| matches!(name, CHANGE | VERIFY | "loom_fixture_inspect"))
     });
     if !known {
         return Ok(None);
@@ -190,13 +247,227 @@ pub fn projected_metadata(metadata: &Value) -> Result<Option<String>> {
             );
             Ok(Some(Value::Object(projection).to_string()))
         }
+        "loom_fixture_inspect" => {
+            let read: ReadEvidence = decode(record.clone(), "read evidence")?;
+            validate_read(&read)?;
+            Ok(Some(
+                json!({
+                    "schema":"loom.read-provenance.v1", "call_id":read.call_id,
+                    "call_seq":read.call_seq, "result_id":read.result_id,
+                    "result_seq":read.result_seq, "session":read.session,
+                    "path":read.path, "sha256":read.sha256, "size_bytes":read.size_bytes,
+                    "read_observed":true, "raw_artifact_published":false,
+                })
+                .to_string(),
+            ))
+        }
         _ => bail!("name must identify a supported fixed code tool"),
     }
 }
 
-/// Reads a validated nullable Artifact projection without accepting arbitrary
+/// This projection deliberately contains no raw ToolResult text, ToolCall
+/// arguments, objective or assistant bytes. Only this exact source-proof shape
+/// becomes public; unrelated metadata keeps its pre-existing private behavior.
+fn validate_read(read: &ReadEvidence) -> Result<()> {
+    if read.schema != "loom.read-evidence.v1"
+        || read.record_type != "dsh-tool-result"
+        || read.name != "loom_fixture_inspect"
+        || read.path != "input.txt"
+        || !read.read_observed
+        || read.raw_artifact_published
+    {
+        bail!("read evidence requires the bounded read fixture with no raw Artifact");
+    }
+    validate_session(&read.session)?;
+    ordered_event(read.call_seq, read.result_seq, read.session.observed_seq)?;
+    tool_id_text(&read.call_id, "call_id")?;
+    tool_id_text(&read.result_id, "result_id")?;
+    sha_text(&read.sha256, "sha256")?;
+    if read.size_bytes == 0 || read.size_bytes > 4_096 {
+        bail!("read source size must be in 1..=4096");
+    }
+    Ok(())
+}
+
+/// Reads a validated public read-provenance projection without accepting arbitrary
 /// JSON. Both the internal checker and the API integration use this same shape.
+/// The public read Artifact is structurally bound to its own bytes and Session.
+/// Unrelated artifact rows keep their earlier private/public behavior: returning
+/// None does not promote them into this special proof type.
+pub fn read_projection(value: &Value) -> Result<Option<Value>> {
+    if value.get("read_evidence_json").is_none_or(Value::is_null) {
+        return Ok(None);
+    }
+    let decoded: Value;
+    let object = match value.get("read_evidence_json") {
+        Some(Value::Object(object)) => object,
+        Some(Value::String(text)) => {
+            decoded = decode(text.clone(), "stored read projection")?;
+            decoded
+                .as_object()
+                .context("read_evidence_json must be a JSON object")?
+        }
+        _ => bail!("read_evidence_json must be an object or internal row JSON"),
+    };
+    let expected = [
+        "schema",
+        "call_id",
+        "call_seq",
+        "result_id",
+        "result_seq",
+        "session",
+        "path",
+        "sha256",
+        "size_bytes",
+        "read_observed",
+        "raw_artifact_published",
+    ];
+    if object.len() != expected.len() || !expected.iter().all(|key| object.contains_key(*key)) {
+        bail!("read_evidence_json must hold only its selected public fields");
+    }
+    let value = Value::Object(object.clone());
+    if required_string(&value, "schema")? != "loom.read-provenance.v1"
+        || required_string(&value, "path")? != "input.txt"
+        || value["read_observed"] != true
+        || value["raw_artifact_published"] != false
+    {
+        bail!("read projection must identify one real read and no raw Artifact");
+    }
+    tool_id(&value, "call_id")?;
+    tool_id(&value, "result_id")?;
+    ordered(&value)?;
+    session(&value["session"])?;
+    sha(&value, "sha256")?;
+    let size = sequence(&value, "size_bytes")?;
+    if size == 0 || size > 4_096 {
+        bail!("read source size must be in 1..=4096");
+    }
+    Ok(Some(value))
+}
+
+/// Gate the bounded public read bytes BEFORE any upload reaches disk or index.
+/// A valid projection must not make an arbitrary secret/plaintext Artifact legal.
+pub fn validate_read_artifact(proof: &Value, bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+        bail!("read proof bytes exceed the bounded inline Artifact limit");
+    }
+    let parsed: Value =
+        serde_json::from_slice(bytes).context("read proof bytes must be valid UTF-8 JSON")?;
+    let body: ReadArtifactBody = decode(parsed, "read body")?;
+    let source = &body.source;
+    if body.schema != "loom.read-evidence.v1"
+        || source.schema != "loom.read-source.v1"
+        || source.path != proof["path"]
+        || source.bytes != proof["sha256"]
+        || source.size_bytes != proof["size_bytes"]
+        || !body.read_observed
+        || body.raw_artifact_published
+    {
+        bail!("read proof body must match bounded source hash/size and public flags");
+    }
+    sha_text(&source.bytes, "source bytes")?;
+    let named = &body.proof;
+    if named.schema != "loom.read-proof.v1"
+        || named.name != "loom_fixture_inspect"
+        || named.call_id != proof["call_id"]
+        || named.call_seq != proof["call_seq"]
+        || named.result_id != proof["result_id"]
+        || named.result_seq != proof["result_seq"]
+    {
+        bail!("read body must preserve the exact tool invocation and result identity");
+    }
+    if named.session.session_id != proof["session"]["session_id"]
+        || named.session.protocol != proof["session"]["protocol"]
+    {
+        bail!("read body must preserve the ordinary Session reference");
+    }
+    uuid_text(&named.session.session_id, "session.session_id")?;
+    Ok(())
+}
+
+/// Enforce a Report's exact read-evidence link without changing its Grant/Lease.
+#[allow(clippy::too_many_arguments)]
+fn validate_read_outcome(
+    store: &Store,
+    ticket_id: &str,
+    assignment_id: &str,
+    projected: &[Value],
+    artifact_ids: &[Value],
+    effects: &[Value],
+    state: &str,
+    cancel_acknowledged: bool,
+    report_evidence: &Value,
+) -> Result<()> {
+    if artifact_ids.len() != 1 || cancel_acknowledged {
+        bail!("a bounded read Report needs exactly one read Artifact and no cancellation claim");
+    }
+    let (row, proof) = (
+        &projected[0],
+        read_projection(&projected[0])?.expect("read evidence was selected above"),
+    );
+    if artifact_ids[0] != row["id"] {
+        bail!("read Report must nominate its own public evidence Artifact");
+    }
+    let assignment = store.query(
+        "SELECT node_id,attempt FROM assignments WHERE id=?1 AND ticket_id=?2",
+        rusqlite::params![assignment_id, ticket_id],
+    )?;
+    let assignment = assignment.first().context("read Assignment not found")?;
+    if row["origin_node_id"] != assignment["node_id"]
+        || row["ticket_id"] != ticket_id
+        || row["assignment_id"] != assignment_id
+        || state != "succeeded"
+    {
+        bail!("read evidence must belong to the same successful assignment and Node");
+    }
+    let ticket = store
+        .get("tickets", ticket_id)?
+        .context("read Ticket not found")?;
+    if ticket["kind"] != "read_summary" || ticket["relative_path"] != "input.txt" {
+        bail!("public read evidence requires the currently supported read_summary/input.txt scope");
+    }
+    let bytes = verification_artifact(store, row)?;
+    validate_read_artifact(&proof, &bytes)?;
+    if row["name"].as_str() != Some(format!("read-evidence-{assignment_id}.json").as_str())
+        || row["media_type"] != "application/json"
+        || !row["lineage"].as_array().is_some_and(Vec::is_empty)
+    {
+        bail!("read Artifact requires bounded identifying metadata with no invented parent");
+    }
+    if !effects.is_empty() {
+        bail!("read completion is a non-mutating proof, not a fabricated confirmed file Effect");
+    }
+    let evidence = report_evidence
+        .as_array()
+        .context("read Report evidence is the existing SessionRef array")?;
+    if evidence.len() != 1 {
+        bail!("a bounded read needs exactly one existing SessionRef and no auxiliary raw proof");
+    }
+    let session_ref: SessionEvidence = decode(evidence[0].clone(), "report SessionRef")?;
+    validate_session(&session_ref)?;
+    if session_ref.session_id != proof["session"]["session_id"]
+        || session_ref.host_api != proof["session"]["host_api"]
+        || session_ref.harness != proof["session"]["harness"]
+        || session_ref.protocol != proof["session"]["protocol"]
+    {
+        bail!("read report's SessionRef must match its actual host and ordinary captured Session");
+    }
+    if session_ref.observed_seq < proof["result_seq"].as_u64().unwrap_or(u64::MAX) {
+        bail!("read report's observed sequence cannot predate the actual tool result");
+    }
+    Ok(())
+}
+
 pub fn projection(value: &Value) -> Result<Option<Value>> {
+    // These are different public proof namespaces. Do not attempt legacy code
+    // interpretation for a read-only Artifact; it must use read_projection.
+    if value
+        .get("read_evidence_json")
+        .is_some_and(|v| !v.is_null())
+        && value.get("code_evidence_json").is_none_or(Value::is_null)
+    {
+        return Ok(None);
+    }
     let Some(value) = value.get("code_evidence_json").filter(|v| !v.is_null()) else {
         return Ok(None);
     };
@@ -584,14 +855,43 @@ fn validate_legacy_outcome(
         bail!("Report cites code evidence outside its exact Ticket and Assignment scope");
     }
     let mut projected = Vec::new();
+    let mut read = Vec::new();
     for row in scoped {
-        if let Some(value) = projection(&row)? {
-            projected.push((row, value));
+        if read_projection(&row)?.is_some() {
+            if projection(&row)?.is_some() {
+                bail!("a single Artifact cannot mix read and edit proof namespaces");
+            }
+            read.push(row);
+        } else if projection(&row)?.is_some() {
+            projected.push(row);
         }
+    }
+    if !read.is_empty() {
+        if !projected.is_empty() {
+            bail!("read proof cannot be mixed with source edit-evidence in one report");
+        }
+        return validate_read_outcome(
+            store,
+            ticket_id,
+            assignment_id,
+            &read,
+            artifact_ids,
+            effects,
+            state,
+            cancel_acknowledged,
+            report_evidence,
+        );
     }
     if projected.is_empty() {
         return Ok(());
     }
+    let projected: Vec<_> = projected
+        .into_iter()
+        .map(|row| {
+            let value = projection(&row)?.expect("validated projected row");
+            Ok((row, value))
+        })
+        .collect::<Result<_>>()?;
     if projected.len() == 1 && projected[0].1["kind"] == "change" {
         return validate_cancelled_change(
             store,
@@ -1297,6 +1597,185 @@ mod tests {
         .unwrap();
         (directory, store)
     }
+    #[test]
+    fn bounded_read_projection_and_report_never_trust_raw_publication_markers() {
+        fn proof(result_seq: u64) -> Value {
+            json!({
+                "schema":"loom.read-provenance.v1", "call_id":"read-call", "call_seq":10,
+                "result_id":"read-result", "result_seq":result_seq,
+                "session":{"harness":"dsh", "host_api":"0.2.2-rc.5", "protocol":"dsh-session-log",
+                    "session_id":SESSION, "observed_seq":17},
+                "path":"input.txt", "sha256":"a".repeat(64), "size_bytes":47,
+                "read_observed":true, "raw_artifact_published":false,
+            })
+        }
+        let public = proof(11);
+        assert_eq!(
+            read_projection(&json!({"read_evidence_json":&public})).unwrap(),
+            Some(public.clone())
+        );
+        for bad in [
+            json!({"artifact_id":"unused"}),
+            json!(42),
+            json!({"sha256": public["sha256"]}),
+            proof(10),
+            {
+                let mut v = public.clone();
+                v["raw_artifact_published"] = true.into();
+                v
+            },
+            {
+                let mut v = public.clone();
+                v["text"] = "private raw assistant text".into();
+                v
+            },
+            {
+                let mut v = public.clone();
+                v["session"]["host_api"] = "0.2.2-rc.4".into();
+                v
+            },
+        ] {
+            if bad.get("read_evidence_json").is_some() {
+                assert!(
+                    read_projection(&json!(bad)).is_err(),
+                    "invalid bounded read shape must reject: {bad}"
+                );
+            } else {
+                assert!(
+                    read_projection(&json!({"read_evidence_json":bad.clone()})).is_err(),
+                    "read_projection must reject {}",
+                    bad
+                );
+            }
+        }
+        let metadata = json!({"evidence":[{
+            "schema":"loom.read-evidence.v1", "type":"dsh-tool-result", "name":"loom_fixture_inspect",
+            "call_id":"read-call","call_seq":10,"result_id":"read-result","result_seq":11,
+            "session":session(11),"path":"input.txt","sha256":"a".repeat(64),
+            "size_bytes":47,"read_observed":true,"raw_artifact_published":false
+        }]});
+        let projected = projected_metadata(&metadata).unwrap().unwrap();
+        assert!(!projected.contains("private"));
+        let projected: Value = serde_json::from_str(&projected).unwrap();
+        assert!(read_projection(&json!({"read_evidence_json":projected}))
+            .unwrap()
+            .is_some());
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let now = crate::now();
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','read','fixture','read_write',1,?1,'{}')", [&now]).unwrap();
+        store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','project','node','default','installation','[\"read\"]',1,'digest',?1)", [&now]).unwrap();
+        store.conn().execute("INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) VALUES('ticket','project','read actual small source','read_summary','input.txt',NULL,'running','grant','digest','node','installation','default',1,?1,?1)", [&now]).unwrap();
+        store.conn().execute("INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) VALUES('assignment','ticket','node','default',1,'lease',1,'2099-01-01T00:00:00Z',?1)", [&now]).unwrap();
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "schema":"loom.read-evidence.v1",
+            "source":{"schema":"loom.read-source.v1","path":"input.txt","bytes":"a".repeat(64),"size_bytes":47},
+            "read_observed":true,"raw_artifact_published":false,
+            "proof":{"schema":"loom.read-proof.v1","name":"loom_fixture_inspect",
+                "call_id":"read-call","call_seq":10,"result_id":"read-result","result_seq":11,
+                "session":{"session_id":SESSION,"protocol":"dsh-session-log"}}
+        })).unwrap();
+        let artifact_id = CHANGE_ID;
+        store.conn().execute("INSERT INTO artifacts(id,ticket_id,assignment_id,origin_node_id,name,media_type,size_bytes,sha256,storage_name,location,lineage,created_at,read_evidence_json) VALUES(?1,'ticket','assignment','node',?2,'application/json',?3,?4,?5,'loom://artifact/x','[]',?6,?7)", params![artifact_id, "read-evidence-assignment.json".to_string(), bytes.len(), crate::sha256(&bytes), format!("{artifact_id}.artifact"), now, public.to_string()]).unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join("artifacts")
+                .join(format!("{artifact_id}.artifact")),
+            &bytes,
+        )
+        .unwrap();
+        let report_ref: SessionEvidence =
+            decode(public["session"].clone(), "report scope").unwrap();
+        let accepted = validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &[json!(artifact_id)],
+            &[],
+            "succeeded",
+            false,
+            &json!([report_ref]),
+        );
+        assert!(accepted.is_ok(), "valid read report rejected: {accepted:?}");
+        let stale = SessionEvidence {
+            observed_seq: 0,
+            ..report_ref.clone()
+        };
+        let other_host = SessionEvidence {
+            host_api: "0.2.2-rc.3".into(),
+            ..report_ref.clone()
+        };
+        for invalid in [stale, other_host] {
+            assert!(validate_outcome_with_evidence(
+                &store,
+                "ticket",
+                "assignment",
+                &[json!(artifact_id)],
+                &[],
+                "succeeded",
+                false,
+                &json!([invalid])
+            )
+            .is_err());
+        }
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &[json!(artifact_id)],
+            &[],
+            "succeeded",
+            false,
+            &json!([])
+        )
+        .is_err());
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &[json!(artifact_id)],
+            &[],
+            "failed",
+            false,
+            &json!([report_ref])
+        )
+        .is_err());
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &[json!(artifact_id)],
+            &[],
+            "succeeded",
+            true,
+            &json!([report_ref])
+        )
+        .is_err());
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &[json!(artifact_id)],
+            &[],
+            "succeeded",
+            false,
+            &json!([])
+        )
+        .is_err());
+        assert!(validate_outcome_with_evidence(
+            &store,
+            "ticket",
+            "assignment",
+            &[json!(artifact_id)],
+            &[json!({"status":"confirmed","artifacts":[]})],
+            "succeeded",
+            false,
+            &json!([report_ref])
+        )
+        .is_err());
+    }
+
     #[test]
     fn session_host_api_is_bounded_to_independently_reviewed_fixture_versions() {
         for version in ["0.2.2-rc.3", "0.2.2-rc.5"] {

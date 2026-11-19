@@ -35,6 +35,7 @@
 | 协议、数据模型和一般测试策略 | [testing.md](testing.md)、`crates/protocol`、`crates/concierge` |
 | LocalNode 入场、注册、ACK、事件、撤权、优先级和恢复 | [tests/runner/README.md](tests/runner/README.md) |
 | DSH 宿主、真实生命周期与通用证据 | [tests/harness/EVIDENCE.md](tests/harness/EVIDENCE.md)、`tests/harness/real-lifecycle.mjs` |
+| 真实受限读取的公开投影和敏感过程验收 | [tests/harness/SENSITIVE_READ.md](tests/harness/SENSITIVE_READ.md)、`node tests/harness/sensitive-read.mjs` |
 | 受限源码修改、diff/test、停止、撤权、Unknown 和重试 | [CODE_TASK.md](tests/harness/CODE_TASK.md)、`node tests/harness/real-code-task.mjs` |
 | DSH 普通 ACK 丢失、持久出箱和真实 Host 重开 | [ACK_REPLAY.md](tests/harness/ACK_REPLAY.md)、`tests/harness/ack-replay.mjs` |
 | Source 接收、显式授权工作、审批和 Source Web | [tests/sources/README.md](tests/sources/README.md)、`events.mjs`、`authorized-ticket.mjs`、`browser.mjs` |
@@ -135,6 +136,9 @@
 - DSH 验证只安装到独立 fixture Profile，加载真实公开 SDK/Tool/Session API。真实 `desktop` 的生产 profile、当前凭据和全局插件不能为了测试被配置；插件单测不覆盖真实安装与任务，Stub 也不覆盖付费 Provider。
 - DSH `ctx.agents.followup` 需要正式 UserMessage；曾因多余 forwarded `@deepseek-ai/dsh-llm` 发生 ESM race，应移除旁路桥并沿用真实 public SDK，而非私有 Session event 或 mock 代替 Agent。
 - **宿主升级要贯通 manifest、证据与客户端解析，不能只改版本号。** rc.3→rc.5先读实际升级指南和所用接口；strict allowlist `host_api` 的版本必须由选中 Host 的公开 manifest 提供。普通Node读ASAR会ENOTDIR，应由该Electron运行时只读检查。Rust/前端各自hardcode分别会导致中心拒绝或UI退成不完整证据；新增同白名单正向和不详版本负例，再实测真实链，不能靠exact-version豁免绕过。
+- **公开读取证据必须同时穿过 Host→中心→回放→视图。** 适配器只投影真正的tool call/result与Session、事件顺序和源bytes SHA，复核实际ProjectBinding文件，不复制Tool args/Tool文本/assistant转录或绝对路径；普通Source/Dsh对话不因同path就被当成这项固定支持能力。schema16用独立reader projection而非把read-provenance写入旧code-provenance；duplicate若替换proof、删proof或换Session不能返回duplicate。Report还需同Session/host/protocol与 `observed_seq>=result_seq`，读取不是confirmed file Effect。详情/下载先验证内部TEXT对象，再公开 `read_evidence`，绝不直接展示JSON存储名；独立查看结果需同TicketAssignment、actual Report和完整DTO匹配。
+- **安全测试需要真实反证和对每种证明身份做跨层复核。** 用临时SDK制造真echo再回到敏感source正常状态，证明宣读内容不在公开Ticket/Message/Audit/Artifact；缺Tool结果仅unknown/no successful proof。不要单靠hidden UI、metadata flag或测试自造session来宣称无泄漏；要同时验证ProjectRoot的实际字节与独立hash、failed read unknown、unauthorized sibling、invalid host/call/session/sequence/digest。检查原计划/报告删除或替换prove没有duplicate机会；兼两namespace的证据不能被旧code parser静默绕过。实际UI selector只在所属tab适用，先选择原ticket再点到协作展开/审计/证据；默认最近Ticket会误导测试读错对象。Realtime中心完成和Session持久化flush可能有先后，需等待observable stored bytes eliminate false negative。复查这些真实源:[SENSITIVE_READ](tests/harness/SENSITIVE_READ.md)。
+- **新增字段后，schema与使用中的driver同步前行而非只改Rust断言。** 对真实Rust/Node升级保存旧Grant/Ticket/Artifact/audit与bytes，把当前schema升级并清零新增projection旧数据（不 backfill）。以前跑过Source/Skill/Pipeline/Runtime的实际driver版本bind也必须更新；future拒绝另一版本。只跑单元migration会发现不了客户端旧expectations，需把每一种受影响run入口作为独立小验收。否则大量“旧 schema expected 15”会把真实安全增量混入未验证状态。
 - 父子委派需 center 验证 source/current Assignment/Lease、真实 parent Session、parent/child Artifact/Session 关系；`source_verified` 布尔或 Session UUID 不能取代这一检查。原 ToolResult 的 source metadata 丢失时不可伪造补齐后端关系。
 - 固定 `loom-stub` 的 SDK text invocation 只证明该目录/adapter/Session/text Artifact 链。`invoke_text`、`place_model`、read/write 是独立 Permission；descriptor 的原始 source bytes、proof SHA、source Assignment logical digest、placement 和新 invocation Assignment/digest 不同。
 - `model-inventory` 是从已认证 heartbeat 得到的目录观察，不是中心直接探测、Registry、安装、激活、下载或推理授权。保存 JSON 时已可能是 object，不要再按 string parse；观察时间不因 GET 或重复 heartbeat 偷换为“新实测”。
@@ -161,7 +165,7 @@
 
 ## 6. 尚未解决、不要误判为已闭环的事项
 
-- **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及 M0 涉及路径的敏感过程审查。桌面窄视口和桌面浏览器离线壳不替代它们。
+- **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。
 - 真实自然语言/通用编程质量、通用代码工具与 Shell、外部 Provider/Live LLM、完整模型治理、通用 Pipeline/Reviewer/多 Harness。
 - 第二物理 Host、非 loopback TLS、Linux/Windows 实际 Host/服务生命周期、签名安装器、真实远程 Bootstrap、OS Credential Store、生产 DSH Profile/凭据集成。
 - 全局 exactly-once、跨进程 NodeState 协作、所有工具/Provider 的中道 kill 恢复、任意 Artifact 大流/Range/跨机 Unknown 对账。

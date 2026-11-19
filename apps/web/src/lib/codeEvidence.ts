@@ -21,6 +21,7 @@ type Rec = Record<string, unknown>
 type Line = { text: string; kind: 'added' | 'removed' | 'context' | 'heading' }
 type Relation = { assignmentId: string; attempt: number; effectId: string; reportStatus: 'failed' | 'succeeded'; sessionId: string }
 export type CodeArtifactPresentation =
+  | { kind: 'read'; name: string; path: string; sha256: string; sessionId: string; rawContentPublished: false; originalContent: string }
   | { kind: 'unsupported'; reason: 'ordinary_artifact' | 'incomplete_relation'; name?: string; content: string }
   | { kind: 'change'; name: string; artifactId: string; relation: Relation & { verificationArtifactId: string }; previousSha256: string; sha256: string; path: string; lines: Line[] }
   | { kind: 'verification'; name: string; artifactId: string; relation: Relation & { sourceArtifactId: string; previousSha256: string; sha256: string; path: string; editResultId: string; verificationResultId: string }; command: string; exitCode: number; passed: boolean; previousTestExitCode: number; stdout: string; stderr: string }
@@ -42,7 +43,7 @@ function session(value: unknown): SessionEvidence | null {
   return data && data.harness === 'dsh' && typeof data.host_api === 'string' && REVIEWED_HOST_VERSIONS.has(data.host_api) && data.protocol === 'dsh-session-log' && uuid(data.session_id) && integer(data.observed_seq) ? data as SessionEvidence : null
 }
 const CHANGE_FIELDS = ['schema', 'type', 'name', 'call_id', 'call_seq', 'result_id', 'result_seq', 'session', 'path', 'previous_sha256', 'sha256', 'size_bytes'] as const
-function orderedEvents(value: unknown): value is Rec & { call_seq: number; result_seq: number; session: { observed_seq: number } } {
+function orderedEvents(value: unknown): value is Rec & { call_seq: number; result_seq: number } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Rec
   const currentSession = session(record.session)
@@ -152,8 +153,45 @@ function linked(ticket: Ticket, diff: ArtifactContent, verifier: ArtifactContent
   return { change, verify: body, report, relation: { assignmentId: shared.assignment.id, attempt: shared.assignment.attempt, effectId: shared.effect.effect_id, reportStatus: report.status as 'failed' | 'succeeded', sessionId: editSession.session_id } }
 }
 
+/** The center-issued public read projection has no raw arguments/assistant text.
+ * Its source hash is the bounded input file's SHA, not the summary byte SHA.
+ * Showing a gap is honest: an unknown marker or added field is not legacy proof. */
+function sessionId(value: unknown): string | null { return typeof value === 'string' && UUID.test(value) ? value : null }
+function sessionIdentity(value: unknown): value is Rec & { session_id: string } {
+  const candidate = object(value)
+  return candidate !== null && sessionId(candidate.session_id) !== null && candidate.protocol === 'dsh-session-log'
+}
+export function readArtifactPresentation(ticket: Ticket, artifact: ArtifactContent): CodeArtifactPresentation | null {
+  const meta = object(artifact.metadata)
+  if (!meta || meta.read_evidence === undefined) return null
+  const fields = ['schema', 'call_id', 'call_seq', 'result_id', 'result_seq', 'session', 'path', 'sha256', 'size_bytes', 'read_observed', 'raw_artifact_published']
+  const proof = exact(meta.read_evidence, fields)
+  if (ticket.id !== meta.ticket_id || ticket.kind !== 'read_summary' || !ticket.assignments?.some(assignment => assignment.id === meta.assignment_id && assignment.ticket_id === ticket.id && assignment.node_id === meta.origin_node_id)
+    || (proof && ticket.relative_path !== proof.path)
+    || !ticket.reports?.some(report => report.assignment_id === meta.assignment_id && (report.status === 'succeeded' || report.state === 'succeeded')) || (ticket.effects ?? []).length !== 0) {
+    return { kind: 'unsupported', reason: 'incomplete_relation', content: artifact.content }
+  }
+  if (!proof || !sessionIdentity(proof.session) || proof.schema !== 'loom.read-provenance.v1' || proof.path !== 'input.txt' || proof.read_observed !== true || proof.raw_artifact_published !== false || !orderedEvents(proof) || !sha(proof.sha256) || !id(proof.call_id) || !id(proof.result_id) || !integer(proof.size_bytes, true) || proof.size_bytes > 4096 || !uuid(meta.artifact_id) || !id(meta.assignment_id)) {
+    return { kind: 'unsupported', reason: 'incomplete_relation', name: typeof meta.name === 'string' ? meta.name : undefined, content: artifact.content }
+  }
+  try {
+    const body = exact(JSON.parse(artifact.content), ['schema', 'source', 'read_observed', 'raw_artifact_published', 'proof'])
+    const source = exact(body?.source, ['schema', 'path', 'bytes', 'size_bytes'])
+    const named = exact(body?.proof, ['schema', 'name', 'call_id', 'call_seq', 'result_id', 'result_seq', 'session'])
+    const namedSession = exact(named?.session, ['session_id', 'protocol'])
+    const same = source && named && namedSession && source.path === proof.path && source.bytes === proof.sha256 && source.size_bytes === proof.size_bytes
+      && source.schema === 'loom.read-source.v1' && named.schema === 'loom.read-proof.v1' && named.name === 'loom_fixture_inspect'
+      && named.call_id === proof.call_id && named.call_seq === proof.call_seq && named.result_id === proof.result_id && named.result_seq === proof.result_seq
+      && namedSession.session_id === sessionId(proof.session.session_id) && namedSession.session_id === proof.session.session_id
+    if (!body || !same || body.schema !== 'loom.read-evidence.v1') return { kind: 'unsupported', reason: 'incomplete_relation', content: artifact.content }
+    return { kind: 'read', name: `已核验来源：${proof.path}`, path: 'input.txt', sha256: proof.sha256 as string, sessionId: sessionId(proof.session.session_id)!, rawContentPublished: false, originalContent: artifact.content }
+  } catch { return { kind: 'unsupported', reason: 'incomplete_relation', content: artifact.content } }
+}
+
 /** Reads already downloaded/authorized evidence, checking structural links only. It does not create Grants, execute content, or replace center authority. */
 export function codeArtifactPresentation(ticket: Ticket, artifact: ArtifactContent, sourceArtifacts: ArtifactContent[] = []): CodeArtifactPresentation {
+  const read = readArtifactPresentation(ticket, artifact)
+  if (read) return read
   const name = typeof (artifact.metadata as Meta | undefined)?.name === 'string' ? (artifact.metadata as Meta).name : undefined
   const raw = { kind: 'unsupported' as const, reason: 'ordinary_artifact' as const, name, content: artifact.content }
   try {
