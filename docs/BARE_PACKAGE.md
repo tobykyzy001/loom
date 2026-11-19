@@ -14,12 +14,12 @@ The runner builds `loom-node` from the checked-in Rust source and verifies the r
 
 ## Observed current-host evidence
 
-The coordinator independently ran the completed script with exit **0** and **14** labeled checks. An observed run wrote `./package/manifest.json` and a private smoke report under its owned directory `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-bare-package-N48LaV`.
+The coordinator independently ran the completed script with exit **0** and **14** labeled checks. An observed run wrote `./package/manifest.json` and a private smoke report under its owned directory `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-bare-package-sTpREX`.
 
 - Package: `loom.bare-host-package.v1`, `loom-node 0.1.0`.
 - Observed current host/toolchain: **macOS arm64**, a `Mach-O 64-bit executable arm64`, Rust `1.99.0 (b940084d7 2026-09-28)`. The workspace MSRV has now been explicitly raised to **1.89** for the real `std::fs::File::try_lock` ownership guard in `LocalNodeRunner::open`; this toolchain requirement must not be described as an untested compatibility claim on older compilers or other OS hosts.
-- Binary size: **21,952,808 bytes**; executable mode `0755` for this generated local candidate. Owned root/state/artifact/project fixture directories are checked `0700` on POSIX.
-- SHA-256 of the actual built and copied binary: `2fcaa6283a39b9b2c0bd8575cedc10a51bdd444f5082ebc19af66e6d8e550430`. Copying preserved both size and bytes; the final package contains only `loom-node` and `manifest.json`.
+- Binary size: **21,952,520 bytes**; executable mode `0755` for this generated local candidate. Owned root/state/artifact/project fixture directories are checked `0700` on POSIX.
+- SHA-256 of the actual built and copied binary: `f47cf83f15a4b2912e345dee2cd25865cb520ea1518b7111d4564ac62ec7b46b`. Copying preserved both size and bytes; the final package contains only `loom-node` and `manifest.json`.
 - Actual `otool -L` inspection observed the system `/usr/lib/libiconv.2.dylib`, `/usr/lib/libSystem.B.dylib` and CoreFoundation dependencies. These are facts for this candidate, not a cross-platform dependency guarantee.
 - `cargo build --locked --offline -p loom-node` was used for the source build. An environment missing a locked cached dependency is a real failure/NOT RUN; the script does not silently fetch an alternative dependency.
 - `--version` prints `loom-node 0.1.0`; `--help` exposes only the real `bind` and `start` commands. These informational calls return 0 without creating an identity, registration request, coordinator grant, Agent/session or project effect. The test actually executes both and compares owned-root contents before and after.

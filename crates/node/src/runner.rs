@@ -51,12 +51,60 @@ pub enum TickStatus {
 
 impl LocalNodeRunner {
     fn acquire_state_lock(state_dir: &Path) -> Result<std::fs::File> {
+        let path = state_dir.join("runner.lock");
+        let original = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    bail!("state ownership lock must be an ordinary single-linked file, not a symlink or non-file");
+                }
+                Some(metadata)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("cannot inspect the Node ownership lock"),
+        };
+        #[cfg(unix)]
+        if let Some(metadata) = &original {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                bail!(
+                    "state ownership lock must be an ordinary single-linked file, not a hard link"
+                );
+            }
+        }
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
-            .open(state_dir.join("runner.lock"))
+            .open(&path)
             .context("cannot open the local Node ownership lock")?;
+        let opened = lock.metadata()?;
+        if opened.file_type().is_symlink() || !opened.is_file() {
+            bail!("state ownership lock must remain an ordinary single-linked file");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened.nlink() != 1 {
+                bail!("state ownership lock must have exactly one filesystem link");
+            }
+            if let Some(before) = &original {
+                if before.ino() != opened.ino() || before.dev() != opened.dev() {
+                    bail!("state ownership lock was replaced while opening");
+                }
+            }
+            let current = std::fs::symlink_metadata(&path)?;
+            if current.file_type().is_symlink()
+                || !current.is_file()
+                || current.nlink() != 1
+                || current.ino() != opened.ino()
+                || current.dev() != opened.dev()
+            {
+                bail!("state ownership lock path changed while opening");
+            }
+        }
+        if path.canonicalize()? != path {
+            bail!("state ownership lock path was redirected while opening");
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -751,6 +751,46 @@ async fn a_corrupt_identity_releases_the_owner_lock_without_silently_creating_a_
     assert_eq!(std::fs::read(identity_path).unwrap(), original_bytes);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_preexisting_lock_link_must_not_redirect_or_alias_the_state_owner() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    for linked_kind in ["symlink", "hardlink"] {
+        let fixture = Fixture::new(false).await;
+        let external = fixture
+            ._owned
+            .path()
+            .join(format!("external-{linked_kind}.txt"));
+        std::fs::write(&external, b"untouched external bytes").unwrap();
+        std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let lock = fixture.state.join("runner.lock");
+        if linked_kind == "symlink" {
+            symlink(&external, &lock).unwrap();
+        } else {
+            std::fs::hard_link(&external, &lock).unwrap();
+        }
+        let result = fixture.try_runner().await;
+        if let Err(error) = &result {
+            assert!(
+                error.to_string().contains("ordinary single-linked"),
+                "{linked_kind}: {error}"
+            );
+        } else {
+            let metadata = std::fs::metadata(&external).unwrap();
+            panic!(
+                "a preexisting {linked_kind} was accepted; external mode is {:o}, originally 644",
+                metadata.mode() & 0o777
+            );
+        }
+        let metadata = std::fs::metadata(&external).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o644);
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            b"untouched external bytes"
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_completed_replay_checks_full_input_before_evidence_delivery() {
     let fixture = Fixture::new(false).await;
