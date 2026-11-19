@@ -165,18 +165,16 @@ impl LocalNodeRunner {
         // Decode cancellation and identity before trusting any other field. Cancel
         // reports never grant execution permission and never expose a configured root.
         let preliminary = PreliminaryAssignment::decode(&raw, &self.identity)?;
-        if self.state.data.completions.contains_key(&preliminary.id) {
-            self.state.data.last_assignment_id = Some(preliminary.id.clone());
-            self.state.flush()?;
-            // A persisted completion/outbox is retried exactly as written; no replay
-            // of the executor or creation of a replacement request identity.
-            self.dispatch_outbox().await?;
-            return Ok(TickStatus::Deferred);
-        }
+        let has_completion = self.state.data.completions.contains_key(&preliminary.id);
         // Before responding to cancellation, apply the same grant/binding/lease and
         // relative-path validation as execution. Intent alone is not an authorization.
         let root = match self.options.bindings.require(&preliminary.project_id) {
             Ok(root) => root,
+            Err(error) if has_completion => {
+                return Err(error.context(
+                    "completed assignment cannot be replayed under an invalid assignment",
+                ))
+            }
             Err(error) => return self.reject_assignment(preliminary, raw, error).await,
         };
         let assignment = match Assignment::decode(
@@ -187,8 +185,30 @@ impl LocalNodeRunner {
             chrono::Utc::now(),
         ) {
             Ok(assignment) => assignment,
+            Err(error) if has_completion => {
+                return Err(error.context(
+                    "completed assignment cannot be replayed under an invalid assignment",
+                ))
+            }
             Err(error) => return self.reject_assignment(preliminary, raw, error).await,
         };
+        if has_completion {
+            // State::start compares this fully decoded packet with the original
+            // immutable assignment-digest. It returns the existing completion without
+            // running another executor, so a validated replay emits only its originals.
+            // If decoding/digests fail, preserve the completed history and original
+            // outbox rather than overwriting it with a generated rejection.
+            if let Some(previous) = self.state.start(&assignment)? {
+                if previous["state"] == "running" {
+                    bail!("running assignment requires reconciliation before evidence replay");
+                }
+                self.state.data.last_assignment_id = Some(assignment.id.clone());
+                self.state.flush()?;
+                self.dispatch_outbox().await?;
+                return Ok(TickStatus::Deferred);
+            }
+            bail!("completed assignment replay does not match the original assignment evidence");
+        }
         let cancel_now = if raw["purpose"] == "reconcile" {
             false
         } else {

@@ -150,6 +150,8 @@ Host 数量、设备类型、模型能力和任务组合均由用户环境决定
 
 节点可以访问自身 DSH 内部能力，不代表中心自动信任其自报权限。Owner、Device Link、Node Identity、Profile Identity 和 Workspace Scope 分开映射，避免把整台机器或任意 DSH Profile 混为同一主体。
 
+**Bare Rust 完成证据的重放不能只认Assignment ID。** 已有completion/未决outbox只可在poll中的packet重新通过显式ProjectBinding、Grant/binding/lease/root及完整Assignment decoder检查后使用。`StateStore::start()`再把当前输入与历史immutable logical digest（ID、lease ID/epoch、grant digest、kind、relative path及content）比对。它负责重放同一个工作输入，不是把动态lease timing写进digest，或以新Grant/epoch重贴旧Execution的证据标签。精确匹配已有完成时保留原outbox request/effect/artifact标识，不再次执行，也不因再见到取消帧而生成新报告。输入不匹配、完整decode失败或completion缺digest都fail closed；不能用通用reject路径覆盖原Assignment/completion和未完成证据。该约束可经 `cargo test -p loom-node --test completed_replay` 复核。测试用真实原生源文件读取及持久化、受控制的loopback协议transport，明确不把Synthetic poll/Grant说成Concierge签发；普通真实Concierge/Bare签署、读写、取消和重开须再以原生集成验证。这里不推导全局Exactly-once、OS进程崩溃回放或其它Harness的权限。
+
 ### 3.3 Router、Project Scheduler、Resource Scheduler
 
 三者不应混为一个路由 LLM：

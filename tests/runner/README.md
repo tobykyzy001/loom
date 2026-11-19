@@ -44,7 +44,21 @@ driver比较first写入前后的**完整SQL行结构**：first更新为busy及�
 
 这里只current self-reported观察数据，**不是两个物理Host、DSH profile实质认证、Grant/Assignment变更、全局 exactly-once或新的逐Installation撤销模型**。最终结果[scope proof](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-node-installation-scope-proof-fEdyqy/result.json)只包含counts/status/diff/bool，不含token/私钥/Authorization。Rust workspace **205 passed**及原生`node scripts/bare-integration.mjs`也保留正常注册、文件作用、取消与重开证据；没有改动Model Catalog或任务协议。
 
-## failed-only公共重试与独立审批
+## Bare Rust：已完成工作的输入关联与重放保留
+
+```sh
+cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
+```
+
+这不是TypeScript/DSH测试，而是直接调用原生 `LocalNodeRunner.once()`、实际读取受控project文件，并持久化Artifact/Report/取消完成状态及Node credential root。受控Axum loopback仅提供poll/delivery响应；构造的Grant/binding也经过实际`Assignment::decode`和digest重建，**不是已授权真实Concierge签发恶意变体或接受上传**。
+
+第一次正常读取保留原Artifact及Report pending；随后原实现会仅凭同ID重发旧证据。当前修复要求先重新验证binding、Grant/root、Lease及完整输入，并由`StateStore::start`比对原始logical digest（ID、lease ID/epoch、grant digest、kind、path与content）。变更kind/content并附cancel flag、epoch改变、撤销Grant、非法Lease和缺失digest的负例均拒绝，**原Assignment/completion/outbox/cursor与effect文件数保持，根本不发新的ack/report/artifact或取消报告**。普通resolve后的正确packet只重放原outbox，不额外执行；已经取消的工作不会因新变体或正常replay再次制造cancel ACK/report。
+
+证据从首次真实执行、负例保留，到到期重放时逐一行比对原body、artifact/effect/request IDs。已为这个`completed_replay` **2/2**运行，且已验证移除了自有临时baseline worktree/target；`1d834eb`的临时离 线worktree中同一测试[真实RED](/tmp/loom-native-replay-red.log)。当前[Rust workspace执行](/tmp/loom-native-replay-rust-regression.log)按target汇总为**186通过/0失败/1 opt-in硬件probe忽略**（不把Node/Vue等其它套件混入Rust数量）。另外实际`node scripts/bare-integration.mjs`仍完成真实Concierge签署注册、注册Binding/Grant、原子文件写入、取消及重开；这不是真实中心发出恶意poll、OS crash或任意unknown/running等其它回放的证明，也不推导全局精确一次。
+
+入口文件为 [completed_replay.rs](../../crates/node/tests/completed_replay.rs)。所有生成的身份、目录及临时端口专属测试，没有使用现有DSH profile。
+
+
 
 `maintenance::retry` 不再让 pending/running/cancelled/succeeded/等待审批等状态借用原Grant新增Assignment或生成no-op成功校验日志；public retry仅接受已完成 `failed` 且没有停止意图的Ticket，沿原Grant/digest、Node/worker/binding生成独立下一Attempt（epoch递增，原历史不改）。已与reconciling、revoke Grant等拒绝场景逐状态比较原Assignment/Report/Artifact/Effect及审计不变。`retry_after_approval` 仅保留库内generic兼容及自身测试，不是HTTP绕开人工理由的授权旁路。真实 `/approval` 改走携带规范化 `reason≤1000 UTF-8字节` 的 `approve_ticket`，并验证同票Source/current Grant/root/worker。批准理由与实际Assignment/Lease/epoch、原Grant/digest与审批事件在同一个BEGIN IMMEDIATE内写入，拒绝仅记录理由而保持waiting/零工作。公共retry的assignment.retried与ticket.retried已经收进该相同事务，TTL里任一DML/audit失败都回滚ticket和lease。实际HTTP仍保持scope非法403和非pending409，SQL trigger拒绝后零变更，并有真实heartbeat恢复和artifact证据。具体见 [tests/sources/README.md](../sources/README.md) 的当前三源审批闭环，和刚重跑的[真实DSH重试证明](/tmp/loom-approval-dsh-final-wvhkGI/result.json)。Node自身的 `validateAssignment`/admission仍需逐项核对当前作用域，这不是让UI拥有更强的执行权。
 

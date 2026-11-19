@@ -2,7 +2,17 @@
 
 Updated: 2026-11-19.
 
-## Heartbeat preserves each authenticated Node/Installation
+## Bare completion replay must preserve the original validated input
+
+At parent `1d834eb`, the Rust `LocalNodeRunner.once()` shortcut treated any packet with an existing completion ID as a replay before full Assignment decoding. It could then dispatch the cardinally retained Artifact/Report and advance the local cursor while ignoring different content, epoch, grant, binding, or lease details. This cannot replay the executor or alter an outbox body; the defect is the unverified local evidence-replay decision, not execution of attacker content or a claim about a normally functioning real Concierge emitting a bad packet.
+
+The historical-completion path now occurs **after** explicit ProjectBinding lookup and full `Assignment::decode`, and before cancellation or executor handling. The existing `StateStore::start` compares the complete immutable logical digest—including lease ID/epoch, grant digest, kind, relative path and content—rather than only the array of preliminary fields. A fully validated matching completion can dispatch only its persisted bodies, with original request/effect/artifact IDs, without another executor or fresh cancellation report. Missing/changing digests and decoder/binding errors fail closed without replacing the saved Assignment/completion/outbox with a generated rejection. This is not a new Grant, a global dedup guarantee, or a claim that a lease timestamp is another immutable payload. Grant and lease checks remain independently active.
+
+The [native replay regression](../crates/node/tests/completed_replay.rs) uses an actual Rust reader, real file-backed StateStore/reopens, an owned loopback HTTP transport, validly reconstructed local Grant/binding/digests, and a private synthetic token. It runs ordinary execution with pending Artifact/Report, changed kind/content plus cancellation, changed epoch, revoked Grant, invalid lease and absent completion digest assertions. It also verifies pre-start cancellation writes no target content, while exact valid pre-cancel replay returns the existing cancellation report, not a second one. Complete selected persist state remains intact, and queued/delivered HTTP bodies must equal the saved original entries. `cargo test --locked -p loom-node --test completed_replay -- --test-threads=1` passes **2/2**. It explicitly **does not** claim a real-Concierge malicious poll, an OS process crash, complete unknown/running transitions, or real-world exact-once registration/authorization.
+
+[Pre-fix RED](/tmp/loom-native-replay-red.log) shows these same two tests failing on `1d834eb`, not compilation errors. [Current execution](/tmp/loom-native-replay-rust-regression.log) sums only the Rust targets: **186 passed, 0 failed, 1 opt-in hardware probe ignored**. This count is specific to this invocation rather than a reused total from an older historical section. Strict Rust formatting/Clippy, shared Node **39/39**, Vue **155/155 + `vue-tsc`**, and actual `node scripts/bare-integration.mjs` registration/read/atomic-file-write/cancel/reopen also pass. The latter is evidence for the ordinary real Concierge→Bare lifecycle, not synthetic-response acceptance or publisher authorization.
+
+
 
 A real shared-key, two-Installation regression at parent `1aec8e5` demonstrated that heartbeat matched only `id`, despite authentication using `(node_id, installation_id, token)` and the existing primary key `(id, installation_id)`. The first Installation's heartbeat wrote `marker-for-first` into **both** rows; the second then wrote `marker-for-second` into both, replacing each other's inventory/liveness/worker observations.
 
