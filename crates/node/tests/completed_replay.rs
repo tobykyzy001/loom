@@ -631,7 +631,34 @@ async fn two_runners_sharing_a_node_state_directory_must_not_execute_the_same_as
     );
     assert_eq!(fixture.history(), original_history);
     assert!(fixture.server.calls("/artifacts").is_empty());
-    first.once().await.unwrap();
+    assert!(matches!(first.once().await.unwrap(), TickStatus::Succeeded));
+    let other = Fixture::new(false).await;
+    other.server.delivery_attempts.store(1, Ordering::SeqCst);
+    assert_ne!(other.state, fixture.state);
+    let mut other_runner = other
+        .try_runner()
+        .await
+        .expect("a separate owned directory must remain independently usable");
+    assert!(matches!(
+        other_runner.once().await.unwrap(),
+        TickStatus::Succeeded
+    ));
+    let other_artifacts = std::fs::read_dir(&other.artifacts)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "bin")
+        })
+        .count();
+    assert_eq!(
+        other_artifacts, 1,
+        "a distinct owned state directory still executes once while the first lock is held"
+    );
+    drop(other_runner);
     drop(first);
     assert!(matches!(
         fixture.tick(fixture.original.clone()).await.unwrap(),
