@@ -161,6 +161,8 @@
 
 - **持久化迁移还需要真实公开读取证明。** 旧schema行能`Store::get`不等于客户端能安全读取：应分别验证detail与byte下载的Authorization、`read_evidence:null`及内部`_json`列不泄漏，旧bytes/Grant/digest/audit完整保留。真实测试表明invalid read projection实际返回400，字节不一致为409，不要先假设一律500。错误路径也可能经过raw row的FromSqlConversionFailure，且需要在`public_read_projection`与detail原始SQL读取边界同时剥除storage列名/内部错误文本，不能通过删字段名的泄漏断言来“解决”。原row/bytes/审计最后必须恢复同值校验。命令与完整范围见`cargo test -p loom-concierge store::tests::v15_upgrade_is_additive_and_preserves_old_authority_and_bytes -- --exact --nocapture`，它是源码迁移回归而不是Full host或Universal DLP证明。
 
+- **同一public artifact上的`read_evidence:null`不是read_namespace标记。** Schema16会让旧code/普通record显式携带空缺reader字段，只有真正非NULL候选才应进入严格reader关系检查。若把缺省元数据与`null`合并忽略，代码Artifact将因有Effect而被降级为incomplete，即使原始diff、验证、Grant、Assignment和Report都合法。这正是旧UI fixture没有server新null字段才会漏检的情况：应把真实payload放入code/view tests，旧Attempt失败/新Attempt正确对应到完整真实DSH Chain，而非只测自己构的value。原始Report SQL只有`state`，`ticketFrom`派生status；单独state应照常匹配，两字段矛盾必须继续失败，不可以借 new statuses/no Status 提升成功等级。本次已跑真实code-task(script完整cancel/reopen/revoke及旧失败→新attempt)证明；不要靠`public_code_projection`输出errors换成null来逃逸身份/byte integrity leaks。涉及同一新reader namespace的私有坏对象，在公开detail/download投影与SQL行错误处同样要收紧bounded error，而不是把内部Column名字/私有验证器原文交给客户端。可复验[迁移后的受保护读取](tests/harness/SENSITIVE_READ.md#schema-15--16-migration-through-protected-read-endpoints)。
+
 ### 5.6 Web、断连和 PWA 静态壳
 
 - UI 条件分支被额外节点打断会让 Help 与 Ticket 同时出现，横向 overflow 也可能由长 Node ID 和 flex layout 引起。要按真实截图、DOM 和宽度修复条件链/`min-width`/换行，不能仅隐藏溢出或把面板 z-index 调高。

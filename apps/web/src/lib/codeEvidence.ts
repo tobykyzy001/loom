@@ -121,10 +121,20 @@ function sharedRelation(ticket: Ticket, diff: Meta, verifier: Meta, change: Rec,
   if (!source) return null
   return { assignment, effect, change }
 }
+function reportMatches(report: Report, assignmentId: string, expected: 'failed' | 'succeeded'): boolean {
+  if (report.assignment_id !== assignmentId) return false
+  const { state, status } = report
+  // `undefined` is an absent compatibility field; explicit null is malformed,
+  // not another value to silently convert into a validated success or failure.
+  if ((state !== undefined && typeof state !== 'string')
+    || (status !== undefined && typeof status !== 'string')) return false
+  if (state === undefined && status === undefined) return false
+  if (state !== undefined && status !== undefined && state !== status) return false
+  return (state ?? status) === expected
+}
 function reportFor(reports: Report[] | undefined, assignmentId: string, passed: boolean) {
-  const expected = passed ? 'succeeded' : 'failed'
-  const found = reports?.filter(item => item.assignment_id === assignmentId) ?? []
-  return found.length === 1 && (found[0].state ?? found[0].status) === expected && found[0].status === expected ? found[0] : null
+  const found = reports?.filter(item => reportMatches(item, assignmentId, passed ? 'succeeded' : 'failed')) ?? []
+  return found.length === 1 ? found[0] : null
 }
 function linked(ticket: Ticket, diff: ArtifactContent, verifier: ArtifactContent): { change: Rec; verify: Rec; report: Report; relation: Relation } | null {
   const dm = metadata(diff.metadata), vm = metadata(verifier.metadata)
@@ -150,7 +160,7 @@ function linked(ticket: Ticket, diff: ArtifactContent, verifier: ArtifactContent
     || ['call_id', 'result_id', 'path', 'previous_sha256', 'sha256'].some(key => effect[key] !== change[key]) || session(effect.session)?.session_id !== editSession.session_id) return null
   const report = reportFor(ticket.reports, shared.assignment.id, body.passed as boolean)
   if (!report) return null
-  return { change, verify: body, report, relation: { assignmentId: shared.assignment.id, attempt: shared.assignment.attempt, effectId: shared.effect.effect_id, reportStatus: report.status as 'failed' | 'succeeded', sessionId: editSession.session_id } }
+  return { change, verify: body, report, relation: { assignmentId: shared.assignment.id, attempt: shared.assignment.attempt, effectId: shared.effect.effect_id, reportStatus: (report.state ?? report.status) as 'failed' | 'succeeded', sessionId: editSession.session_id } }
 }
 
 /** The center-issued public read projection has no raw arguments/assistant text.
@@ -163,12 +173,16 @@ function sessionIdentity(value: unknown): value is Rec & { session_id: string } 
 }
 export function readArtifactPresentation(ticket: Ticket, artifact: ArtifactContent): CodeArtifactPresentation | null {
   const meta = object(artifact.metadata)
-  if (!meta || meta.read_evidence === undefined) return null
+  // v16 emits an explicit null for absent reader proof on ordinary/code artifacts.
+  // Only a real non-null candidate belongs to the reader validator below.
+  if (!meta || meta.read_evidence === undefined || meta.read_evidence === null) return null
   const fields = ['schema', 'call_id', 'call_seq', 'result_id', 'result_seq', 'session', 'path', 'sha256', 'size_bytes', 'read_observed', 'raw_artifact_published']
   const proof = exact(meta.read_evidence, fields)
-  if (ticket.id !== meta.ticket_id || ticket.kind !== 'read_summary' || !ticket.assignments?.some(assignment => assignment.id === meta.assignment_id && assignment.ticket_id === ticket.id && assignment.node_id === meta.origin_node_id)
+  const assignmentId = meta.assignment_id
+  if (ticket.id !== meta.ticket_id || ticket.kind !== 'read_summary' || typeof assignmentId !== 'string' || !id(assignmentId)
+    || !ticket.assignments?.some(assignment => assignment.id === assignmentId && assignment.ticket_id === ticket.id && assignment.node_id === meta.origin_node_id)
     || (proof && ticket.relative_path !== proof.path)
-    || !ticket.reports?.some(report => report.assignment_id === meta.assignment_id && (report.status === 'succeeded' || report.state === 'succeeded')) || (ticket.effects ?? []).length !== 0) {
+    || !ticket.reports?.some(report => reportMatches(report, assignmentId, 'succeeded')) || (ticket.effects ?? []).length !== 0) {
     return { kind: 'unsupported', reason: 'incomplete_relation', content: artifact.content }
   }
   if (!proof || !sessionIdentity(proof.session) || proof.schema !== 'loom.read-provenance.v1' || proof.path !== 'input.txt' || proof.read_observed !== true || proof.raw_artifact_published !== false || !orderedEvents(proof) || !sha(proof.sha256) || !id(proof.call_id) || !id(proof.result_id) || !integer(proof.size_bytes, true) || proof.size_bytes > 4096 || !uuid(meta.artifact_id) || !id(meta.assignment_id)) {
@@ -207,7 +221,7 @@ export function codeArtifactPresentation(ticket: Ticket, artifact: ArtifactConte
       const linkedData = linked(ticket, artifact, verifier[0])
       if (!linkedData) return { ...raw, reason: 'incomplete_relation' }
       const lines = artifact.content.split('\n').map(line => ({ text: line, kind: line.startsWith('+') && !line.startsWith('+++') ? 'added' as const : line.startsWith('-') && !line.startsWith('---') ? 'removed' as const : line.startsWith('@@') || line.startsWith('diff --git') || line.startsWith('---') || line.startsWith('+++') ? 'heading' as const : 'context' as const }))
-      return { kind: 'change', name: meta.name!, artifactId: meta.artifact_id, relation: { ...linkedData.relation, reportStatus: linkedData.report.status as 'failed' | 'succeeded', verificationArtifactId: verifier[0].metadata.artifact_id }, previousSha256: linkedData.change.previous_sha256 as string, sha256: linkedData.change.sha256 as string, path: PATH, lines }
+      return { kind: 'change', name: meta.name!, artifactId: meta.artifact_id, relation: { ...linkedData.relation, reportStatus: (linkedData.report.state ?? linkedData.report.status) as 'failed' | 'succeeded', verificationArtifactId: verifier[0].metadata.artifact_id }, previousSha256: linkedData.change.previous_sha256 as string, sha256: linkedData.change.sha256 as string, path: PATH, lines }
     }
     const body = (() => { try { return verificationBody(JSON.parse(artifact.content)) } catch { return null } })()
     if (!body) return meta ? { ...raw, reason: 'incomplete_relation' } : raw

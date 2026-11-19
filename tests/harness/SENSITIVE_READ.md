@@ -54,8 +54,15 @@ One independent review caught duplicate proof acceptance, a mixed read/code proj
 
 This regression specifically demonstrates **old-record authorized reading and privacy-preserving error projection**. It is not a DSH installation/actuator test, another source-profile migration, mobile lifecycle, second Host or claim of full M0/M1 closure.
 
+### Source-change projection also protects legacy error output
 
+`cargo test -p loom-concierge store::tests::v13_upgrade_preserves_legacy_authority_and_artifact_hash -- --exact --nocapture` separately exercises the older **code-provenance** namespace. It retains migrated project/Grant/Ticket/Artifact records and creates an explicitly **non-NULL invalid post-migration candidate**, `{"never_backfill":true}`. That is different from legitimate absence of the additive new projection: the latter remains a successful `code_evidence:null` read and must not be falsely labeled a security failure.
 
+Both authenticated Ticket details and the actual Artifact text download return actual **400 `invalid_request`** for this malformed old candidate, without releasing bytes. Their full error bodies do not expose `code_evidence_json`, the old candidate's `never_backfill` value, the internal field-validation wording or the artifact text. No-token access returns 401 and another Ticket's scope returns 403, independent of the candidate error. `public_code_projection` keeps the existing strict change/verification validation but converts projection errors to a bounded public explanation rather than echoing storage/internal text.
+
+The fixture then restores the original `NULL` field and verifies the real original text, exact original SQL row and valid audit chain. It does not erase legitimate legacy code evidence or synthesize it from metadata. This proves residual code-projection privacy and compatibility, not a general source-code parser, remote registry, personal-profile validation or full M0.
+
+## Explicitly still NOT RUN / not claimed
 - No general secret detector, arbitrary Host DLP or guarantee over all Worker Transcripts. The proof is specific to this exact read fixture. Ordinary DSH conversations retain their existing assistant Artifact delivery behavior; new unknown markers are not proof of read success.
 - No production Profile install/activation, host OS credential store, live provider/model calls, paid token cost, other Harness versions, or a claim that a controller observed the SDK directly instead of receiving a checked Node report.
 - No physical second Host, cross-host artifact exchange, unrelated model lifecycle, arbitrary DAG, generic model or code-agent support.

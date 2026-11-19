@@ -785,8 +785,8 @@ mod tests {
             .any(|column| column["name"] == "read_evidence_json"));
     }
 
-    #[test]
-    fn v13_upgrade_preserves_legacy_authority_and_artifact_hash() {
+    #[tokio::test]
+    async fn v13_upgrade_preserves_legacy_authority_and_artifact_hash() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
         let bytes = b"existing bounded artifact bytes";
@@ -846,6 +846,109 @@ mod tests {
             bytes
         );
         assert!(store.verify_audit().unwrap());
+
+        let previous = store.get("artifacts", artifact_id).unwrap().unwrap();
+        // A post-migration non-NULL private candidate must be explicitly
+        // rejected by the public projection; it is not the same as a legitimately
+        // absent new projection after the additive migration.
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET code_evidence_json=?1 WHERE id=?2",
+                rusqlite::params![r#"{"never_backfill":true}"#, artifact_id],
+            )
+            .unwrap();
+        let token = "legacy-client-token-for-real-router";
+        store
+            .set_setting("client_token_hash", &hash(token))
+            .unwrap();
+        let state = std::sync::Arc::new(crate::api::State::open(tmp.path(), Some(token)).unwrap());
+        let router = crate::api::router(state.clone());
+        async fn read(
+            app: &axum::Router,
+            path: &str,
+            authorized: bool,
+        ) -> (axum::http::StatusCode, Value) {
+            let mut request = axum::extract::Request::builder().method("GET").uri(path);
+            if authorized {
+                request = request.header(
+                    "authorization",
+                    "Bearer legacy-client-token-for-real-router",
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            (status, body)
+        }
+        use tower::ServiceExt;
+        for path in [
+            "/api/v1/tickets/legacy-ticket",
+            &format!("/api/v1/tickets/legacy-ticket/artifacts/{artifact_id}"),
+        ] {
+            let (status, body) = read(&router, path, true).await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+            let serialized = body.to_string();
+            assert!(!serialized.contains("code_evidence_json"), "{serialized}");
+            assert!(!serialized.contains("never_backfill"), "{serialized}");
+            assert!(
+                !serialized.contains("kind must be change or verification"),
+                "{serialized}"
+            );
+            assert!(
+                !serialized.contains("existing bounded artifact bytes"),
+                "{serialized}"
+            );
+            assert!(
+                !body.get("content").is_some(),
+                "invalid legacy evidence must not release bytes"
+            );
+        }
+        let href = format!("/api/v1/tickets/legacy-ticket/artifacts/{artifact_id}");
+        let unauthorized = read(&router, &href, false).await;
+        assert_eq!(unauthorized.0, axum::http::StatusCode::UNAUTHORIZED);
+        let wrong_owner = format!("/api/v1/tickets/wrong-owner/artifacts/{artifact_id}");
+        assert_eq!(
+            read(&router, &wrong_owner, true).await.0,
+            axum::http::StatusCode::FORBIDDEN
+        );
+
+        store
+            .conn()
+            .execute(
+                "UPDATE artifacts SET code_evidence_json=NULL WHERE id=?1",
+                [artifact_id],
+            )
+            .unwrap();
+        let reopened =
+            std::sync::Arc::new(crate::api::State::open(tmp.path(), Some(token)).unwrap());
+        let reopened_router = crate::api::router(reopened.clone());
+        let (_, valid) = read(&reopened_router, &href, true).await;
+        assert_eq!(valid["artifact"]["read_evidence"], Value::Null);
+        assert_eq!(valid["artifact"]["code_evidence"], Value::Null);
+        assert!(!valid.get("code_evidence_json").is_some());
+        assert!(!valid.get("read_evidence_json").is_some());
+        assert_eq!(valid["content"].as_str().unwrap().as_bytes(), bytes);
+        assert_eq!(
+            reopened
+                .store
+                .lock()
+                .unwrap()
+                .get("artifacts", artifact_id)
+                .unwrap(),
+            Some(previous)
+        );
+        assert!(reopened.store.lock().unwrap().verify_audit().unwrap());
     }
 
     #[tokio::test]

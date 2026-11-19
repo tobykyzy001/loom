@@ -276,6 +276,10 @@ schema 16 升级后的旧记录保留原始 Grant/Ticket/Artifact SHA、原字�
 
 新增迁移验证既有v15的project/grant/ticket/file/audit升级到16后的真实protected Axum detail与base64读取：无凭据返回401，非法`read_evidence_json`和JSON对象不当申明被400拒绝，非原生JSON/Schema处理不足不成为新Namespace对象。后续bytes变质由integrity gate409拒绝，原nullable字段/row/bytes恢复后仍可核。此为资源读取与隐私兼容缺陷修复，不是整体M0完成、全Host产品的版本迁移或新device/Profile验收。详见[迁移后真实读取](tests/harness/SENSITIVE_READ.md#schema-15--16-migration-through-the-protected-read-endpoints)。
 
+同一出口的`code_evidence_json`也由`public_code_projection`保留change/verification严格校验、私有列移除与双证据冲突，非法旧对象以bounded public错误返回而不泄漏/storage列及其候选值。v13迁移验证在`NULL`合法基线上另行注入非NULL坏候选验证拒绝，再恢复NULL；合法空投影原文仍会成功读取，不能拿初始合法200误称泄漏证明。原Grant/row/原byte/audit均不变。
+
+公开字段扩展还会影响UI证据namespace：code/legacy Artifact可以带 `read_evidence:null`。客户端在分派前区分null/absent与真正的readerproof；缺失不进入reader验证，避免把合法的代码Effect误判为不完整。真正的非NULL reader候选仍按原有公开结构、来源与bytes检查。原始SQL Report只有`state`；`ticketFrom`会派生客户端status，纯函数也支持同assignment唯一Report的state-only，但两个状态矛盾仍拒绝。显示diff或verification时使用这个已核验Report，不倒选父Artifact、借用另一Attempt或把Ticket终态改写为旧Attempt结果。真实Edge的旧失败→新Attempt验收见 [CODE_TASK](tests/harness/CODE_TASK.md#real-nullable-projection-compatibility-inside-the-client)，没有新增Artifact、Grant或执行权。
+
 ## 9. 授权、调度与可靠性
 
 ### 9.1 Grant 与 Lease 分离

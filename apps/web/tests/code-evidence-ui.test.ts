@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import CodeArtifactView from '../src/components/CodeArtifactView.vue'
 import { codeArtifactPresentation, CODE_DIFF } from '../src/lib/codeEvidence'
 import type { ArtifactContent, ArtifactRef, Effect, Ticket } from '../src/api/types'
+import { ticketFrom } from '../src/api/parsing'
 
 type Evidence = Record<string, unknown>
 type Meta = ArtifactRef & { assignment_id: string; name: string; parents: []; code_evidence: Evidence }
@@ -38,7 +39,7 @@ function projected(evidence: Evidence): Evidence {
     ...(isChange ? { previous_sha256: evidence.previous_sha256, size_bytes: evidence.size_bytes } : { source_change_artifact_id: evidence.code_change_artifact_id }) }
 }
 function content(id: string, assignmentId: string, evidence: Evidence, bytes: string, mediaType: 'text/x-diff' | 'application/json'): ArtifactContent {
-  return { metadata: { artifact_id: id, assignment_id: assignmentId, ticket_id: ticketId, origin_node_id: nodeId, name: 'evidence.bin', media_type: mediaType, parents: [], code_evidence: projected(evidence) } as Meta, content: bytes, encoding: 'utf8', truncated: false }
+  return { metadata: { artifact_id: id, assignment_id: assignmentId, ticket_id: ticketId, origin_node_id: nodeId, name: 'evidence.bin', media_type: mediaType, parents: [], code_evidence: projected(evidence), read_evidence: null } as Meta, content: bytes, encoding: 'utf8', truncated: false }
 }
 function fixture(passed = false, second = false): { ticket: Ticket; diff: ArtifactContent; verification: ArtifactContent } {
   const prefix = passed ? 'second' : ''
@@ -94,6 +95,26 @@ describe('strict downloaded code evidence relation', () => {
     expect(diffHtml).toContain(CODE_DIFF)
     expect(passedHtml).toContain('node --test test/calc.test.js')
     expect(passedHtml).toContain('class="artifact-content"')
+  })
+
+  it('matches true normalized state-only Report rows without converting contradictory or absent statuses into proof', () => {
+    const f = fixture(false)
+    const realRows = ticketFrom(JSON.parse(JSON.stringify({
+      ...f.ticket,
+      reports: [{ assignment_id: 'assignment-failed', state: 'failed', summary: 'actual public SQL Report row' }],
+      effects: f.ticket.effects!.map(({ effect_id, ...row }) => ({ ...row, id: effect_id })),
+      artifacts: f.ticket.artifacts!.map(({ artifact_id, type, ...row }) => ({ ...row, id: artifact_id })),
+    })))
+    expect(realRows.reports![0].status).toBe('failed')
+    expect(codeArtifactPresentation(realRows, f.verification, [f.diff])).toMatchObject({ kind: 'verification', exitCode: 1, relation: { reportStatus: 'failed' } })
+    const stateOnly = JSON.parse(JSON.stringify({ ...f.ticket, reports: f.ticket.reports!.map(({ status: ignoredStatus, ...row }) => row) })) as Ticket
+    expect(codeArtifactPresentation(stateOnly, f.verification, [f.diff])).toMatchObject({ kind: 'verification', exitCode: 1, relation: { reportStatus: 'failed' } })
+    incomplete({ ...f.ticket, reports: [] }, f.verification, [f.diff])
+    incomplete({ ...f.ticket, reports: [{ assignment_id: 'assignment-failed', status: 'failed' as const, state: 'succeeded', summary: 'conflict' }] }, f.verification, [f.diff])
+    const nullState = JSON.parse(JSON.stringify({ ...f.ticket, reports: [{ assignment_id: 'assignment-failed', state: null, status: 'failed', summary: 'malformed explicit null' }] })) as Ticket
+    incomplete(nullState, f.verification, [f.diff])
+    const nonStringState = JSON.parse(JSON.stringify({ ...f.ticket, reports: [{ assignment_id: 'assignment-failed', state: { name: 'failed' }, status: 'failed', summary: 'malformed scalar' }] })) as Ticket
+    incomplete(nonStringState, f.verification, [f.diff])
   })
 
   it('follows the selected reviewed DSH version through every evidence relation without accepting unknown hosts', () => {
@@ -209,6 +230,13 @@ describe('strict downloaded code evidence relation', () => {
     }
     const corrupted = { ...artifact, content: JSON.stringify({ ...JSON.parse(artifact.content), source: { ...source, bytes: oldSha } }) }
     incomplete(ticket, corrupted, [artifact])
+    for (const report of [
+      { assignment_id: 'assignment-failed', state: 'failed', status: 'succeeded', summary: 'conflict' },
+      { assignment_id: 'assignment-failed', state: null, status: 'succeeded', summary: 'explicit null is not missing' },
+      { assignment_id: 'assignment-failed', state: ['succeeded'], status: 'succeeded', summary: 'not a state scalar' },
+    ]) {
+      incomplete(JSON.parse(JSON.stringify({ ...ticket, reports: [report] })) as Ticket, artifact, [artifact])
+    }
   })
 
   it('escapes sensitive stdout as text and preserves an ordinary artifact verbatim', async () => {

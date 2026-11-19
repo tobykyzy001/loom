@@ -5939,6 +5939,16 @@ fn read_projection_db_error(error: anyhow::Error) -> ApiError {
     }
 }
 
+fn public_code_projection(value: &Value) -> ApiResult<Option<Value>> {
+    crate::code_evidence::projection(value).map_err(|_| {
+        // Validation errors cannot expose the private SQL field or its arbitrary
+        // original provenance candidate to the API consumer.
+        ApiError::bad(
+            "Stored source-change evidence is invalid or incompatible; no code proof was asserted.",
+        )
+    })
+}
+
 fn public_read_projection(value: &Value) -> ApiResult<Option<Value>> {
     crate::code_evidence::read_projection(value).map_err(|_| {
         // Failed raw projection must not echo SQLite columns or private
@@ -5981,7 +5991,7 @@ async fn artifact(
             "Ticket does not own this artifact",
         ));
     }
-    let public_evidence = crate::code_evidence::projection(&a)?;
+    let public_evidence = public_code_projection(&a)?;
     let public_read = public_read_projection(&a)?;
     if public_evidence.is_some() && public_read.is_some() {
         return Err(ApiError::conflict(
@@ -6048,7 +6058,7 @@ async fn ticket(
     let store = state.lock()?;
     let mut detail = store.detail(&id).map_err(read_projection_db_error)?;
     for artifact in detail["artifacts"].as_array_mut().into_iter().flatten() {
-        let public_evidence = crate::code_evidence::projection(artifact)?;
+        let public_evidence = public_code_projection(artifact)?;
         if let Some(storage_fields) = artifact.as_object_mut() {
             storage_fields.remove("code_evidence_json");
         }
