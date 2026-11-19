@@ -4177,7 +4177,27 @@ async fn nodes(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> 
             )
         })?;
         if declared_roots.is_object() {
+            let canonical_roots: std::collections::BTreeMap<String, String> = declared_roots
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(project, root)| Some((project.clone(), root.as_str()?.to_owned())))
+                .collect();
             n["inventory"]["project_roots"] = declared_roots;
+            // Project creation stores the canonical directory; Host inventory
+            // intentionally preserves its exact original declaration. Publish
+            // both existing declarations and their independently inspected
+            // canonical forms without discarding binding identity or creating a Grant.
+            let inspected_roots: serde_json::Map<String, Value> = canonical_roots
+                .into_iter()
+                .map(|(project, root)| match std::fs::canonicalize(root) {
+                    Ok(path) if path.is_dir() => {
+                        (project, Value::String(path.to_string_lossy().to_string()))
+                    }
+                    _ => (project, Value::Null),
+                })
+                .collect();
+            n["inventory"]["canonical_project_roots"] = Value::Object(inspected_roots);
         }
         if let Value::Array(ref mut workers) = n["workers"] {
             for worker in workers.iter_mut() {

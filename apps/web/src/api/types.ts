@@ -273,6 +273,8 @@ export interface NodeInventory {
   facts?: ResourceFact[]
   issues?: Array<{ resource?: string; code?: string; confidence?: ResourceFact['confidence'] }>
   project_roots?: Record<string, string>
+  /** Public controller inspection of an already-declared Node root, null when unavailable. */
+  canonical_project_roots?: Record<string, string | null>
   permission_boundary?: string
 }
 
@@ -296,6 +298,7 @@ export interface LoomNode {
 export interface Grant {
   id: string
   version?: number
+  digest?: string
   project_id: string
   ticket_id?: string
   node_id?: string
@@ -577,6 +580,13 @@ export interface SourceWorkDraft {
   worker_id: string
   /** Client-only context; sourceWorkBodyFrom deliberately does not send these to /tickets. */
   source_scope?: { source_id: string; client_thread_id: string }
+  /** A client-only preparation/confirmation fence, never serialized as new authority. */
+  authority_snapshot?: {
+    grant_version: number
+    grant_digest: string
+    project_binding_id: string
+    installation_id: string
+  }
 }
 export interface SourceTicketReceipt {
   ticket: Ticket

@@ -202,7 +202,7 @@ class DeterministicAdapter extends LlmAdapter {
         // Preserve the old observable probe marker without disclosing caller text.
         chunks = textResponse('Observed actual controlled tool result for the fixed artifact.txt write probe.')
       } else chunks = textResponse('The controlled fixture ToolResult did not match a permitted public source/probe shape.')
-    } else if (text.includes('ORBITAL-731') || /LOOM_FIXTURE_(?:READ|WRITE|RESUME)/i.test(latestUser)) {
+    } else if (text.includes('ORBITAL-731') || /LOOM_FIXTURE_(?:READ|WRITE|RESUME)/i.test(latestUser) || /^(?:读取|阅读|总结)[\s]+/.test(latestUser)) {
       const args = JSON.stringify({ mode: 'read', relative_path: 'input.txt' })
       chunks = [
         { type: 'block-start', index: 0, blockType: 'tool-call' },

@@ -49,11 +49,11 @@ function commandWords(source) {
 }
 
 /** A foreground child of this test. It is always terminated in finally, never installed as a service. */
-export async function startRustConcierge({ env = process.env, root } = {}) {
+export async function startRustConcierge({ env = process.env, root, dataDir: savedDataDir, baseUrl: savedBaseUrl } = {}) {
   root ||= await testingRoot()
   const clientToken = env.LOOM_CLIENT_TOKEN || testingClientToken()
   if (clientToken.length < 24) throw new Error('The synthetic integration client token must have at least 24 characters')
-  const dataDir = join(root, 'concierge')
+  const dataDir = savedDataDir ? resolve(savedDataDir) : join(root, 'concierge')
   await mkdir(dataDir, { recursive: true, mode: 0o700 })
   let binary
   if (env.LOOM_SERVER_CMD) binary = commandWords(env.LOOM_SERVER_CMD)
@@ -64,7 +64,8 @@ export async function startRustConcierge({ env = process.env, root } = {}) {
     binary = [join(repository, 'target/debug/loom')]
   }
   const [executable, ...args] = binary
-  const port = await availablePort()
+  const port = savedBaseUrl ? Number(new URL(assertLoopback(savedBaseUrl)).port) : await availablePort()
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('An explicit test Concierge needs a concrete loopback port')
   const log = []
   const child = spawn(executable, [...args, '--data-dir', dataDir, 'serve', '--listen', `127.0.0.1:${port}`], {
     cwd: repository, shell: false,

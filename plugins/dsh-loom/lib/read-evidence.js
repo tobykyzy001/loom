@@ -30,12 +30,15 @@ function publicResult(value) {
     && value.size_bytes >= 1 && value.size_bytes <= MAX_SOURCE && value.read === true
 }
 
-/** Identify the fixed reader without inspecting or authorizing objective text. */
+/** Host fixture selection, never an Objective-derived permission or execution claim.
+ * Compatibility: older explicit LOOM_FIXTURE_READ/no-objective requests and the
+ * same ordinary bounded fixture ticket all use this exact installed protected tool.
+ * The real ToolCall/Result, current source bytes and existing Grant still matter.
+ */
 export function fixtureReadAssignment(assignment) {
   if (assignment?.kind !== 'read_summary' || assignment.relative_path !== SOURCE
     || !boundedId(assignment.id) || !boundedId(assignment.node_id)) return null
-  if (assignment.objective !== undefined
-    && (typeof assignment.objective !== 'string' || !/LOOM_FIXTURE_READ\b/.test(assignment.objective))) return null
+  if (assignment.objective?.includes('LOOM_FIXTURE_RESUME')) return null // Existing Session-replay fixture keeps its normal text handoff.
   return Object.freeze({ assignment_id: assignment.id, relative_path: SOURCE })
 }
 

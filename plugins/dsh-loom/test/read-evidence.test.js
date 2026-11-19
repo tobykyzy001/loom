@@ -64,9 +64,10 @@ test('bounded real file and ordinary tool events issue only provable source meta
   assert.equal(JSON.stringify(empty).includes(PRIVATE), false)
 })
 
-test('the read proof never applies to another path or ordinary unmarked DSH conversation', () => {
-  for (const objective of ['LOOM_FIXTURE_RESUME', 'Review arbitrary prior conversation', 'LOOM_FIXTURE_READ_ONLY']) {
-    assert.equal(fixtureReadAssignment({ id: 'assignment', node_id: 'node', kind: 'read_summary', relative_path: 'input.txt', objective }), null)
+test('a fixed root read is independent of objective wording but never applies to another task kind/path', () => {
+  assert.equal(fixtureReadAssignment({ id: 'assignment', node_id: 'node', kind: 'read_summary', relative_path: 'input.txt', objective: 'LOOM_FIXTURE_RESUME' }), null)
+  for (const objective of ['Review with a bounded Source intent', '读取 input.txt', 'LOOM_FIXTURE_READ_ONLY']) {
+    assert.notEqual(fixtureReadAssignment({ id: 'assignment', node_id: 'node', kind: 'read_summary', relative_path: 'input.txt', objective }), null)
   }
   assert.equal(fixtureReadAssignment({ id: 'assignment', node_id: 'node', kind: 'edit_file', relative_path: 'input.txt', objective: 'LOOM_FIXTURE_READ' }), null)
   assert.equal(fixtureReadAssignment({ id: 'assignment', node_id: 'node', kind: 'read_summary', relative_path: 'private.txt', objective: 'LOOM_FIXTURE_READ' }), null)

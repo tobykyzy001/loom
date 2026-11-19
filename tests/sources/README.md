@@ -35,6 +35,25 @@
 
 `crates/concierge/src/source_events.rs` 的迁移测试涵盖实际 populated v11：存在Project、Grant、Ticket、Assignment、Artifact、Message，所有原ID/内容/grant digest/status 保持，Legacy message新 field是 null；schema 经12增量到13后还能**再次打开同一store**而不被未来版本误拒绝。更早快照即使原本没有messages table，也会**只创建符合既有消息结构的空表**（含可空 `source_event_id`），让后续Source ingestion真的有位置记录一条新message，而不虚构历史消息。已有表则保留原始内容和NULL relation，绝不把旧消息伪造成新Source；这种补DDL和现在可接收/重开场景也都有覆盖。未改变中央原任务权限、Grant/Artifact模型或DSH版本。不会额外写DSH Session/log或访问私有源提供方。
 
+## 受限的两句 Source 读取入口（真实 SDK / Edge 已验证）
+
+当前本机 **schema 16** 的 `SourceWorkPanel` 支持一个明确受限的二段短语样例，例如：
+
+1. `读取 input.txt`（或 `阅读` / `总结`，后接严格相对路径）；
+2. `用 Grant <当前完整 Grant ID>`。
+
+两者都先被记录成彼此独立的真实 `user_message` SourceEvent。只有同一 Source、internal/client thread 都精确一致、`thread_sequence +1`、Source sequence递增，并且前条是普通读取请求、后条列举一个当前有效Grant的唯一精确ID时，客户端才准备**读取请求那一条**的 `SourceWorkDraft`。重排、跳步、不同thread、空/过长正文、注入形参数、绝对路径/反斜杠/空段/`..`、假Grant与重复匹配都拒绝。不会自动选择现有列表中的第一个Grant，也不会根据Objective获得Grant或把授权句本身当成文件读取Objective。原手工选择路径的入口仍然保留。
+
+纯输入解析见 `apps/web/src/lib/sourceIntent.ts`、`apps/web/tests/source-intent.test.ts`。它发**零**IO、不会选择Resource，不代表通用NLP、其它语言意图或Live LLM。生产组件只用这种候选预填既有授权规范：Grant对应的 ProjectBinding/Node/Installation/Worker 与公开注册 root 进一步复核；`authority_snapshot` 只是客户端 **prepare-confirm 版本/digest/Binding/Installation 围栏**，从 `sourceWorkBodyFrom()` 永远剥除，`POST /tickets` 仍是原八字段，中心继续按当前Grant接管。打开父confirm之后真实撤权仍导致零新任务，不会换绑。
+
+`real DSH lifecycle` 由 `node tests/harness/source-intent.mjs` 在已经先执行 `pnpm --dir apps/web build` 的真实静态生产包上完成。`/tmp/loom-source-intent-proof.json`（2026-11-19，rc.5、隔离profile+零网络Stub）实测：真正两对用户操作，旧grant准备完成后撤销零Ticket，更新一组合法当前read Grant后只有一次Ticket、Assignment、Source-to-TaskSpec和公开读取Artifact；真实工具事件与原始输入SHA一致，但读取不产生写effect。第二个授权说明始终是独立Source记录，没有自己的任务。实际 390px **桌面 viewport**、当前URL默认跳转与原中心/Host重开均通过，零新工具调用、零新模型请求、零新副作用。没有通用对话或多 Harness能力承诺。
+
+首次打开一个尚无事件的Source/thread可能读取404；这不被补造成有效空白历史。发送首个实际上获得接收的事件之后，Production source transport 必须在**同一个外层 `source-read` action**里分别校验已注册来源与获取精确线程，不再以同一busy键递归lookup造成后续读取 `undefined`。面板回读确认该事件真实持久后才展示历史，不用本地event顶替。`openThread()`期间禁用记录；已有其它旧事件时，仍然只从新一对连续事件准备，**其后紧邻 Grant 消息**关联当前请求scope；不把此前其它pair中的授权或同类内容误拼到新Ticket中。
+
+另为处理 Project root 是 `/private/var/...`而Node原始声明是 `/var/...` 的实际inventory形状：中心在 `GET /nodes` 对已声明的目录增加公开 `inventory.canonical_project_roots`，保留原 `project_roots`及Binding `root_scope`/digest。字段不可解析时为null，不等同授权；前端展示与候选检查由同一个 `publishedSourceRoot()` 共用，没有新字段时只保留严格同字符串的legacy case。真实Binding仍然校验原声明。多个同Node ID Installation必须匹配Grant的精确installation，不能取第一条冒充同resource。新root字段不是权限、Activation、Grant或新协议版本。
+
+以下项目仍未验证/不提供：通用自然语言理解和自动生成任务、从聊天新建/变更 Grant、任意文件级受保护读取摘要、第二物理主机/平台安装器、真实计费模型、移动真机交互、iOS/Android/第二 Harness、通用Transcript DLP。`SourceWorkSpec`与Source权限规范未新增数据库版本或服务器长期对话计划对象。
+
 ## 已执行与尚存边界
 
 真实 driver 验证未认证拒绝、 同Source首建競争、读回与冲突、边界按钮uint duplicate、原Ticket状态/message与Artifact/grant不变化、另一个Source同eventId 同thread名独立、实际分页cursor、raw wildcard 拒绝、Source重新加入与重开一致、owned SQL行计数及audit verify。

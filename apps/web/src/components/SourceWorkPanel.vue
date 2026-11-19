@@ -17,6 +17,15 @@ export function eligibleSourceGrant(grant: Grant | undefined): grant is Grant & 
   return Array.isArray(grant.operations) && grant.operations.includes('read')
 }
 
+export function publishedSourceRoot(node: LoomNode | undefined, project: Project | undefined): string {
+  if (!node || !project) return ''
+  const canonical = node.inventory?.canonical_project_roots?.[project.id]
+  if (typeof canonical === 'string') return canonical
+  if (node.inventory?.canonical_project_roots) return ''
+  const declared = node.inventory?.project_roots?.[project.id]
+  return typeof declared === 'string' && declared === project.root ? declared : ''
+}
+
 export function sourceWorkError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 401) return '客户端凭据无效或已过期。请更新连接后重试；没有创建 Ticket 或新 Grant。'
@@ -62,6 +71,7 @@ export function createWebSourceTransport(workspace: {
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { safeRelativePath, statusLabel, statusToneFor } from '../lib/format'
+import { sourceIntentFromEvent } from '../lib/sourceIntent'
 import type { SourceEvent, SourceTicketReceipt, SourceThread } from '../api/types'
 import { acceptSourceTicketReceipt, rejectSourceSpecMismatch } from '../api/parsing'
 import AppIcon from './AppIcon.vue'
@@ -100,17 +110,34 @@ const localError = ref('')
 const eligibleGrants = computed(() => props.grants.filter(eligibleSourceGrant).filter(grant => props.projects.some(project => project.id === grant.project_id) && props.nodes.some(node => node.id === grant.node_id && (node.node_id ?? node.id) === grant.node_id && !node.revoked_at)))
 const selectedGrant = computed(() => eligibleGrants.value.find(grant => grant.id === selectedGrantId.value))
 const selectedProject = computed(() => props.projects.find(project => project.id === selectedGrant.value?.project_id))
-const selectedNode = computed(() => props.nodes.find(node => node.id === selectedGrant.value?.node_id))
-const nodeRoot = computed(() => {
-  const node = selectedNode.value
-  const project = selectedProject.value
-  if (!node || !project) return ''
-  const value = node.inventory?.project_roots?.[project.id]
-  return typeof value === 'string' ? value : ''
-})
+const selectedNode = computed(() => props.nodes.find(node => node.id === selectedGrant.value?.node_id && node.installation_id === selectedGrant.value?.installation_id))
+const nodeRoot = computed(() => publishedSourceRoot(selectedNode.value, selectedProject.value))
 const selectedEvent = computed(() => submittedEvent.value)
 const formError = computed(() => localError.value || props.error || '')
 const showResult = computed(() => receipt.value?.ticket ?? null)
+const intentMessage = ref('')
+function reviewConsecutiveIntent(event: SourceEvent) {
+  const previous = [...(thread.value?.events ?? [])].sort((a, b) => a.thread_sequence - b.thread_sequence)
+    .find(item => item.source_id === event.source_id && item.thread_id === event.thread_id
+      && item.client_thread_id === event.client_thread_id && item.thread_sequence === event.thread_sequence - 1)
+  const exactGrantIds = eligibleGrants.value.filter(grant => {
+    const project = props.projects.find(item => item.id === grant.project_id)
+    const node = props.nodes.find(item => item.id === grant.node_id && item.installation_id === grant.installation_id)
+    return !!node && !node.revoked_at && publishedSourceRoot(node, project) === project?.root
+  }).map(grant => grant.id)
+  const candidate = sourceIntentFromEvent(event, exactGrantIds, previous)
+
+  if (candidate.kind === 'ready') {
+    if (previous?.task_ticket_id || event.task_ticket_id) throw new Error('之前或授权补充消息已关联任务，不能通过新对话重绑或自动重放；请复查原 Spec。')
+    if (previous) selectEvent(previous)
+    relativePath.value = candidate.relativePath
+    selectedGrantId.value = candidate.grantId
+    intentMessage.value = `已从同 Source/thread 的连续两条真实消息准备 ${candidate.relativePath} 与精确 Grant。原始 Objective 仍是首句原文，确认前不会创建 Ticket。`
+  } else if (candidate.kind === 'need-grant') {
+    relativePath.value = candidate.relativePath
+    intentMessage.value = '已确认受限读取路径；下一句可明确“用 Grant <完整ID>”，不会自动选择首个现有授权。'
+  } else intentMessage.value = candidate.reason
+}
 
 watch([() => props.sourceKey, () => props.threadId], () => {
   thread.value = null
@@ -120,6 +147,7 @@ watch([() => props.sourceKey, () => props.threadId], () => {
   relativePath.value = ''
   content.value = ''
   localError.value = ''
+  intentMessage.value = ''
 })
 // Never auto-select a Grant when the old selection disappears or another list loads.
 watch(() => props.result, result => {
@@ -133,10 +161,16 @@ watch(() => props.result, result => {
 watch(eligibleGrants, grants => {
   if (selectedGrantId.value && !grants.some(grant => grant.id === selectedGrantId.value)) {
     selectedGrantId.value = ''
+    intentMessage.value = ''
     localError.value = '原选 Grant 已不是可用的精确读取授权，请重新选择。'
   }
 })
 
+function authoritySnapshot(grant: Grant): SourceWorkDraft['authority_snapshot'] {
+  if (!Number.isSafeInteger(grant.version) || (grant.version ?? 0) < 1 || typeof grant.digest !== 'string' || !/^[a-f0-9]{64}$/.test(grant.digest)
+    || !grant.project_binding_id || !grant.installation_id) return undefined
+  return { grant_version: grant.version!, grant_digest: grant.digest, project_binding_id: grant.project_binding_id, installation_id: grant.installation_id }
+}
 function requireGrant() {
   const grant = selectedGrant.value
   if (!grant) throw new Error('请选择一个未撤销、含 read 操作、具有实际 Binding、非 auto Node 和非空 Worker 的 Grant。')
@@ -155,6 +189,11 @@ function summarize(event: SourceEvent) {
     return
   }
   selectEvent(event)
+  if (!event.task_ticket_id) {
+    try {
+      reviewConsecutiveIntent(event)
+    } catch (error) { localError.value = sourceWorkError(error); submittedEvent.value = null; return }
+  }
   if (event.task_ticket_id && event.task_spec) {
     relativePath.value = event.task_spec.relative_path
     selectedGrantId.value = eligibleSourceGrant(props.grants.find(grant => grant.id === event.task_spec?.grant_id))
@@ -175,7 +214,7 @@ async function openThread() {
   finally { opening.value = false }
 }
 async function recordMessage() {
-  if (recording.value || props.busy) return
+  if (recording.value || opening.value || props.busy) return
   if (!content.value.trim()) { localError.value = '请输入完整消息。只记录消息，不创建 Ticket。'; return }
   recording.value = true
   localError.value = ''
@@ -188,8 +227,18 @@ async function recordMessage() {
     if (event.task_created || event.permission_granted || event.ticket_id) {
       throw new Error('Source 接收回包含未预期的任务/授权关联；已停止，不把它当作新任务。')
     }
+    // An initially empty source/key namespace is not yet a readable thread.
+    // After the acceptor has actually written its first event, fetch that exact
+    // persisted source/client thread and the event instead of inventing local
+    // history or leaving the legitimate stale not-found error on display.
+    const stored = await props.transport.readThread({ thread_id: props.threadId })
+    if (!stored || !stored.events.some(row => row.id === event.id && row.content === event.content
+      && row.source_id === event.source_id && row.client_thread_id === event.client_thread_id && row.thread_sequence === event.thread_sequence)) {
+      throw new Error('Source 已接收，但未能从同一精确 thread 核对原事件；不会补造历史或任务授权。')
+    }
     // Recording is not itself an explicit authorization-to-create; a distinct summarize click is required.
-    thread.value = thread.value ? { ...thread.value, events: [...thread.value.events.filter(item => item.id !== event.id), event] } : null
+    thread.value = stored
+    intentMessage.value = ''
     recordedEvent.value = event
     emit('recorded', event)
   } catch (error) { localError.value = sourceWorkError(error) }
@@ -227,9 +276,17 @@ function submitReviewed() {
     node_id: grant.node_id,
     worker_id: grant.worker_id,
     source_scope: { source_id: event.source_id, client_thread_id: event.client_thread_id },
+    authority_snapshot: authoritySnapshot(grant),
   }
   if (event.task_ticket_id) {
     try { rejectSourceSpecMismatch(event, draft) } catch (error) { localError.value = sourceWorkError(error); return }
+  }
+  reviewConsecutiveIntent(event)
+  if (localError.value || !submittedEvent.value) { submitting.value = false; return }
+  const confirmedGrant = selectedGrant.value
+  if (!confirmedGrant || selectedGrantId.value !== grant.id || confirmedGrant.id !== grant.id || confirmedGrant.version !== grant.version) {
+    localError.value = '已选择的精确 Grant 已变化或不可用，请重新审查；不会替换授权或创建任务。'
+    return
   }
   submitting.value = true
   // Parent owns the protected second confirmation and sole POST /tickets call.
@@ -244,10 +301,11 @@ function submitReviewed() {
     <p class="muted small">仅记录已认证 Web Source 的消息。打开、读取与记录都不会创建 Ticket、Grant、Assignment 或 Artifact。</p>
     <p class="mono small">Source: {{ sourceKey }} · exact client thread: {{ threadId }}</p>
     <label for="source-message">用户消息 <span class="muted">完整原文，服务端保存后不写入浏览器持久存储</span></label>
-    <textarea id="source-message" v-model="content" rows="5" maxlength="16000" autocomplete="off" :disabled="busy" />
+    <textarea id="source-message" v-model="content" rows="5" maxlength="16000" autocomplete="off" :disabled="opening || recording || busy" />
+    <p class="hint">受限两句入口：先记录“读取 input.txt”等明确相对路径，再记录“用 Grant &lt;完整ID&gt;”。授权句只能接续同 thread 的紧贴上一条读取句，仍须你在下方二次确认；不会自动选第一个 Grant 或扩大权限。</p>
     <div class="button-row">
       <button class="button secondary" :disabled="opening || busy" @click="openThread">打开单 Source / thread</button>
-      <button class="button secondary" :disabled="recording || busy" @click="recordMessage">{{ recording ? '正在记录…' : '记录完整消息（不创建 Ticket）' }}</button>
+      <button class="button secondary" :disabled="recording || opening || busy" @click="recordMessage">{{ recording ? '正在记录…' : '记录完整消息（不创建 Ticket）' }}</button>
     </div>
     <p v-if="formError" class="form-error" role="alert">{{ formError }}</p>
     <section v-if="thread" aria-label="此 Source thread 的有界消息">
@@ -270,6 +328,7 @@ function submitReviewed() {
     <section class="source-review-card" aria-labelledby="source-review-heading" :data-selected-event="submittedEvent?.id">
       <h3 id="source-review-heading">明确选择并检查 read_summary</h3>
       <p class="hint">只有再次确认后才会向 Ticket API 提交。Project / Grant / Node / Worker 必须来自同一已公开授权，不能混搭。</p>
+      <p v-if="intentMessage" class="hint" role="status" data-testid="consecutive-source-intent">{{ intentMessage }}</p>
       <label for="source-grant">现有精确读取 Grant <span class="muted">必选</span></label>
       <select id="source-grant" v-model="selectedGrantId" :disabled="busy || !!submittedEvent?.task_ticket_id"><option value="">请选择，不默认选择</option><option v-for="grant in eligibleGrants" :key="grant.id" :value="grant.id">{{ grant.id }} · Project {{ grant.project_id }} · Node {{ grant.node_id }} · Worker {{ grant.worker_id }}</option></select>
       <p v-if="!submittedEvent" class="hint">请记录当前完整消息，或在上方历史消息中明确点击「基于此消息创建摘要」。未选择已接收事件时只可审查授权，不可提交。</p>      <label for="source-relative-path">显式项目内文件路径 <span class="muted">必填，不默认 README</span></label>

@@ -54,6 +54,31 @@ describe('Source explicit authorization and exact request contracts', () => {
     expect('source_event' in sourceWorkBodyFrom({ ...draft, source_event: sourceEvent() })).toBe(false)
     for (const key of ['objective', 'relative_path', 'grant_id', 'node_id', 'worker_id'] as const) expect(() => sourceWorkBodyFrom({ ...draft, [key]: '' })).toThrow()
   })
+  it('keeps the preparation authority snapshot client-only and refuses a change before the sole Ticket POST', async () => {
+    const snapshot = { grant_version: 1, grant_digest: 'c'.repeat(64), project_binding_id: 'binding-a', installation_id: 'install-a' }
+    const prepared = { ...draft, source_event: sourceEvent(), source_scope: { source_id: 'src_internal', client_thread_id: 'custom-thread' }, authority_snapshot: snapshot }
+    let version = 1
+    let digest = 'c'.repeat(64)
+    const posted: unknown[] = []
+    const fetch = vi.fn(async (url, init) => {
+      const path = String(url)
+      if (pathMatchesThread(path)) return json(eventPage())
+      if (path === '/api/v1/grants') return json({ grants: [{ ...goodGrant, version, digest }] })
+      if (path === '/api/v1/tickets' && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)))
+        return json({ ticket: sourceTicket(), source_event_id: 'sre_exact', task_digest: 'a'.repeat(64), duplicate: false, task_created: true, linked_existing_authorized_ticket: false })
+      }
+      return json({ error: { code: 'unexpected', message: 'unexpected route' } }, 500)
+    }) as typeof globalThis.fetch
+    let workspace = await setup(fetch)
+    expect(await workspace.createTicketFromSource(prepared)).not.toBeNull()
+    expect(posted).toEqual([draft])
+    expect(Object.keys(posted[0] as object)).not.toContain('authority_snapshot')
+    version = 2
+    expect(await workspace.createTicketFromSource(prepared)).toBeNull()
+    expect(posted).toHaveLength(1)
+    expect(workspace.sourceOperationError()).toContain('Grant 版本')
+  })
   it('records full raw user text using stable UUID and an exact client thread, and never creates a Ticket on open/record', async () => {
     const requests: Array<{ path: string; body?: Record<string, unknown>; method?: string }> = []
     const fetch = vi.fn(async (url, init) => {

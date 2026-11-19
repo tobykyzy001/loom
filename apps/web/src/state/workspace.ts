@@ -494,28 +494,30 @@ export function rememberSourceThread(sourceId: string, threadId: string, eventId
   rememberedSourceThreads.set(opaqueSourceId(eventId), { source_id: opaqueSourceId(sourceId), client_thread_id: opaqueSourceId(threadId) })
 }
 
-export async function findWebSource(sourceKey: string, label = 'User-authorized web messages'): Promise<SourceInstance | null> {
+async function lookupRegisteredSource(sourceKey: string, label: string): Promise<SourceInstance | null> {
   const key = opaqueSourceId(sourceKey)
+  const cached = retainedSourceIds.get(key)
+  if (cached) return { id: cached, source_key: key, kind: 'web' as const, label }
+  let cursor: string | null = null
+  for (let page = 0; page < 100; page++) {
+    const query = new URLSearchParams({ limit: '100' })
+    if (cursor) { query.delete('limit'); query.set('source_cursor', cursor) }
+    const value = sourceObjectForSource(await client.get<unknown>(`/sources?${query}`))
+    const sources = value.sources
+    if (!Array.isArray(sources)) throw new Error('Source 列表格式无效，未进行跨 Source 推断。')
+    const found = sources.map(sourceRegistrationSummary).find(source => source.source_key === key && source.kind === 'web')
+    if (found) { retainedSourceIds.set(key, found.id); return found }
+    if (value.has_more !== true) return null
+    const nextCursor: unknown = value.next_cursor
+    cursor = typeof nextCursor === 'string' ? nextCursor : null
+    if (typeof cursor !== 'string') throw new Error('Source 列表 cursor 无效。')
+  }
+  throw new Error('Source 列表超过有界页数，未继续全局读取。')
+}
+
+export async function findWebSource(sourceKey: string, label = 'User-authorized web messages'): Promise<SourceInstance | null> {
   const epoch = sourceIdentityEpoch
-  const result = await run('source-read', async () => {
-    const cached = retainedSourceIds.get(key)
-    if (cached) return { id: cached, source_key: key, kind: 'web' as const, label }
-    let cursor: string | null = null
-    for (let page = 0; page < 100; page++) {
-      const query = new URLSearchParams({ limit: '100' })
-      if (cursor) { query.delete('limit'); query.set('source_cursor', cursor) }
-      const value = sourceObjectForSource(await client.get<unknown>(`/sources?${query}`))
-      const sources = value.sources
-      if (!Array.isArray(sources)) throw new Error('Source 列表格式无效，未进行跨 Source 推断。')
-      const found = sources.map(sourceRegistrationSummary).find(source => source.source_key === key && source.kind === 'web')
-      if (found) { retainedSourceIds.set(key, found.id); return found }
-      if (value.has_more !== true) return null
-      const nextCursor: unknown = value.next_cursor
-      cursor = typeof nextCursor === 'string' ? nextCursor : null
-      if (typeof cursor !== 'string') throw new Error('Source 列表 cursor 无效。')
-    }
-    throw new Error('Source 列表超过有界页数，未继续全局读取。')
-  })
+  const result = await run('source-read', () => lookupRegisteredSource(sourceKey, label))
   return result !== undefined && epoch === sourceIdentityEpoch ? result : null
 }
 function sourceObjectForSource(value: unknown): Record<string, unknown> {
@@ -551,20 +553,25 @@ export async function recordSourceMessage(input: { source_id: string; thread_id:
   return event
 }
 
+async function requestSourceThread(sourceId: string, threadId: string, pageSize: number): Promise<SourceThread> {
+  const source = opaqueSourceId(sourceId), thread = opaqueSourceId(threadId)
+  const result = await client.get<unknown>(`/source-events?source_id=${encodeURIComponent(source)}&thread_id=${encodeURIComponent(thread)}&limit=${pageSize}`)
+  const page = sourceThreadFrom(result, { source_id: source, client_thread_id: thread })
+  if (page.source_id !== source || page.client_thread_id !== thread || page.events?.some(event => event.source_id !== source || event.client_thread_id !== thread)) throw new Error('受保护的 Source/thread 响应与精确读取范围不一致。')
+  for (const event of page.events) rememberSourceThread(source, thread, event.id)
+  return page
+}
+
 export async function loadSourceThread(sourceId: string, threadId: string, limit = 50, eventIds: string[] = []): Promise<SourceThread | null> {
   const source = opaqueSourceId(sourceId)
   const thread = opaqueSourceId(threadId)
   const pageSize = Number.isInteger(limit) && limit > 0 && limit <= 200 ? limit : (() => { throw new Error('Source 单 thread 页大小必须在 1 到 200 之间。') })()
   const epoch = sourceIdentityEpoch
-  const result = await run('source-read', () => {
-    return client.get<unknown>(`/source-events?source_id=${encodeURIComponent(source)}&thread_id=${encodeURIComponent(thread)}&limit=${pageSize}`)
-  })
+  const result = await run('source-read', () => requestSourceThread(source, thread, pageSize))
   if (result === undefined) return null
   if (epoch !== sourceIdentityEpoch) throw new Error('凭据已变化，旧 Source 读取未用于新工作区。')
-  const page = sourceThreadFrom(result, { source_id: source, client_thread_id: thread })
-  for (const event of page.events) rememberSourceThread(source, thread, event.id)
   for (const eventId of eventIds) rememberSourceThread(source, thread, eventId)
-  return page
+  return result
 }
 export async function continueSourceThread(cursor: string, limit = 50, expected?: { source_id: string; client_thread_id: string }): Promise<SourceThread | null> {
   if (state.credentialState !== 'valid') {
@@ -600,22 +607,28 @@ export function createSourceWorkTransport(sourceKey: string, threadId: string, l
     },
     async readThread(input: { thread_id: string }) {
       if (input.thread_id !== thread) throw new Error('只能读取绑定的 exact client thread。')
-      const registered = await ensureWebSourceThread(source, label, thread)
-      if (!registered) return null
-      return loadSourceThread(registered.id, thread, 200)
+      return ensureWebSourceThread(source, label, thread)
     },
   }
 }
-async function ensureWebSourceThread(sourceKey: string, label: string, thread: string): Promise<SourceInstance | null> {
-  let existing = await findWebSource(sourceKey, label)
+async function ensureWebSourceThread(sourceKey: string, label: string, thread: string): Promise<SourceThread | null> {
+  const sourceEpoch = sourceIdentityEpoch
+  let existing = await run('source-read', async () => {
+    const registered = await lookupRegisteredSource(sourceKey, label)
+    // Keep identity lookup and this exact thread read under the same outer
+    // read-latch. Do not invoke findWebSource()/loadSourceThread() here, which
+    // would use source-read recursively and silently lose the second read.
+    return registered ? requestSourceThread(registered.id, thread, 200) : null
+  })
+  if (existing && sourceEpoch !== sourceIdentityEpoch) throw new Error('凭据已变化，旧 Source 读取未用于新工作区。')
   if (!existing) {
     if (state.errors['source-read']) return null
     const registered = await registerSource({ source_key: sourceKey, kind: 'web', label })
     if (!registered) return null
-    existing = registered
+    existing = await loadSourceThread(registered.id, thread, 200)
   }
-  // Registration alone doesn't prove readability: the transport next performs
-  // the exact source_id + client_thread_id protected read; it must not be nested.
+  // A registered ID alone is not readable or permissive history. All events
+  // come from the real, exact authenticated source_id + client_thread_id read.
   return existing
 }
 
@@ -666,6 +679,11 @@ export async function createTicketFromSource(draft: SourceWorkDraft, sourceConte
       if (matchingThread.creation_kind !== 'explicit_task_created_after_intake' || matchingThread.task_digest !== matchingThread.task_spec?.digest) throw new Error('Source 已绑定事件的 task_digest / creation_kind 不完整，禁止重放或改绑。')
     }
     const grant = await findCurrentSourceGrant(body)
+    const frozen = draft.authority_snapshot
+    if (frozen && (!grant || grant.version !== frozen.grant_version || grant.digest !== frozen.grant_digest
+      || grant.project_binding_id !== frozen.project_binding_id || grant.installation_id !== frozen.installation_id)) {
+      throw new Error('Grant/Project/Node/Worker：准备与确认之间的 Grant 版本、摘要、Binding 或 Installation 已变化；不会替换或创建新任务。')
+    }
     if (!grant) throw new Error('Grant/Project/Node/Worker 不符合同一精确 read 授权；未发送 Ticket。')
     // Pre-read authorization in the same unchanged operation scope; a revoked
     // current Grant fails before POST while the controller remains authoritative.
