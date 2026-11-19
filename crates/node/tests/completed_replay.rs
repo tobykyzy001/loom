@@ -542,6 +542,67 @@ async fn delivery_receipts_preserve_original_queue_without_artifact_id_or_unused
 }
 
 #[tokio::test]
+async fn failed_artifact_holds_only_its_own_report_not_an_independent_assignment() {
+    let fixture = Fixture::new(false).await;
+    fixture.server.delivery_attempts.store(1, Ordering::SeqCst);
+    *fixture.server.artifact_receipt.lock().unwrap() = Some(json!({
+        "artifact_id":"00000000-0000-0000-0000-000000000000", "duplicate":true
+    }));
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Rejected
+    ));
+    let failed_slice = StateStore::open(&fixture.state)
+        .unwrap()
+        .data
+        .outbox
+        .clone();
+    assert_eq!(failed_slice.len(), 2);
+    let mut independent = fixture.original.clone();
+    independent["id"] = json!("asg_independent_replay");
+    independent["assignment_id"] = json!("asg_independent_replay");
+    independent["ticket_id"] = json!("tkt_independent_replay");
+    independent["lease_id"] = json!("lease_independent_replay");
+    assert!(loom_node::wire::Assignment::decode(
+        &independent,
+        fixture.original["node_id"].as_str().unwrap(),
+        fixture.original["installation_id"].as_str().unwrap(),
+        &fixture.project,
+        chrono::Utc::now(),
+    )
+    .is_ok());
+    *fixture.server.artifact_receipt.lock().unwrap() = None;
+    assert!(matches!(
+        fixture.tick(independent).await.unwrap(),
+        TickStatus::Succeeded
+    ));
+    let remaining = StateStore::open(&fixture.state)
+        .unwrap()
+        .data
+        .outbox
+        .clone();
+    assert_eq!(remaining.len(), 2);
+    for (actual, original) in remaining.iter().zip(failed_slice.iter()) {
+        assert_eq!(actual.body, original.body);
+        assert_eq!(actual.body["assignment_id"], ASSIGNMENT);
+        assert_eq!(actual.next_attempt_at, "+999999999-12-31T23:59:59Z");
+    }
+    for endpoint in ["/artifacts", "/reports"] {
+        let received = fixture.server.calls(endpoint);
+        assert_eq!(
+            received
+                .iter()
+                .filter(|body| body["assignment_id"] == "asg_independent_replay")
+                .count(),
+            1,
+            "the independent assignment has its own exact accepted {endpoint}"
+        );
+    }
+    assert_eq!(std::fs::read_dir(&fixture.artifacts).unwrap().count(), 4,
+        "the independent assignment reads and publishes once; the failed assignment is not reexecuted");
+}
+
+#[tokio::test]
 async fn native_completed_replay_checks_full_input_before_evidence_delivery() {
     let fixture = Fixture::new(false).await;
     assert!(matches!(
