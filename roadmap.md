@@ -215,6 +215,8 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 | 显式记忆 | 用户说“记住默认用中文报告”后可查看、修改和删除该 Memory；它不改变项目访问权限 |
 | 记忆隔离 | 项目级偏好不在另一个项目自动生效；旧偏好不覆盖本次明确指令 |
 
+M0/M1边界的**项目绑定选择已实际落到Vue**：同一Node ID下多个未撤销Installation不再被Node ID第一行或目录巧合代选。真实production Vue与Rust/Edge现在完成一组合成Node/Installation的绑定确认；多候选才附送精确`installation_id`，单active原四字段契约保持。root与Worker仍由原项目及用户填写并由中心复核；Missing/duplicate identity与撤销/丢失候选不自动换位。确认框的pointer遮罩及underlying modal焦点也已修正，390px真实DOM点击与桌面hit-test均有证据。第二份安装的不同worker/root保存为匹配Binding/audit，并另由授权的**admin API**取得该指定Binding的read Grant；没有以Access页面Grant、真实Agent任务、第二物理机或移动真机代替缺失验收。可见选择、持久化一致性与旧path保留是这一新增量，节点撤销期间的刷新恢复仍分开继续验证。详见 [installation/confirm browser driver](tests/browser/installation-ui.mjs)及其[最终结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-kJL3dd/result.json)。
+
 **进入 M1 的证据**
 
 至少两类真实任务完成端到端运行，并分别覆盖成功、失败、取消和重启。先根据实测确认最小领域模型，再冻结 M1 的 Registry Schema。

@@ -210,6 +210,8 @@ Host Agent
 
 当前开发基线使用 `InstallationResourceBinding` 表示“哪个 ProjectId 在某个 Node + Installation + Worker 的真实本地位置上如何映射”。Host 先声明候选位置，单用户管理员显式确认绑定，Grant 再引用绑定及 digest；**生命周期为发现候选 → 绑定确认 → Grant → Assignment/Lease**，不是发现即授权。Ticket/Grant digest 与绑定版本需要一致，不能指向另一个 installation 或另一个 root，且当前实现没有 fallback 到任意备用目录。节点本地 Executor 也应把中心签发 binding 与 operator 私有 config 的 Canonical Root 再次核验。
 
+配套的Vue项目绑定对话框现在把一份**实际存在的Node/Installation记录**作为一个选择，不接受含混的裸Node ID作为多安装选择。仅当该Node ID有超过一个未撤销记录时，前端才以编码的精确组合值提交可选`installation_id`；单个有效记录仍发送原来的四字段payload。提交前的纯函数校验与实际按钮共用一个判定，缺失、重复、撤销或不再返回的身份不会被丢弃后自动改用另一份。inventory与状态只描述已有自报，不能替用户换root或Worker，也不代表物理硬件认证。确认框直接呈现此次payload里的project/root/Node/Installation/Worker，不把第一项重新解释为另一项或创建新的Grant权限。后打开确认模态有专用层级，原绑定表单在确认期间inert且不再接收全局keydown；保留选择保持、用户取消或返回检查后再编辑，不隐藏原后端错误。子项检查与既有严格root/worker/权限校验都在；binding receipt与紧随其后的资源读取/刷新仍是两个事实，不把后者失败伪装成未提交或实时同步成功。真实浏览器proof及边界见[tests/browser/README.md](tests/browser/README.md)。
+
 `ResourceObservation` 对应正在引入的 `loom.inventory.v1`。它至少具有名义资源、可选值、来源（用户声明 / Host 自报 / Controller 实测 / 未验证）、观测时刻、新鲜度、available/missing/unknown/denied/offline/busy/error/stale 等状态、放置范围和适用约束。**观测事实不能颁发 Grant**，Unavailable、Unknown、Offline、Timeout 和 Unsupported 不等价，更不得当成同一种“存在”。PlacementDecision 只解释当前事实与既有 Grant、Binding、Worker、心跳的关系，最终执行仍走原权威任务协议。`models` 未探测时明确 unknown，不默认存在模型/GPU或图片能力。
 
 该补充是在前述长期架构上的实现策略，不替代其他 Domain 定义，也不宣称 M1 全套能力已验收。实际验证入口与缺口见 [BASELINE.md](BASELINE.md) 与 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。

@@ -48,6 +48,41 @@ describe('static usability contracts (SSR, not a browser test)', () => {
     expect(html).toContain('value="node-a"')
     expect(html).not.toContain('value="node-a" selected')
   })
+  it('shows the complete Node/Installation choices without silently defaulting the shared-key target', async () => {
+    const ProjectBindingDialog = (await import('../src/components/ProjectBindingDialog.vue')).default
+    const html = await render(ProjectBindingDialog, {
+      project: { id: 'project-b', name: 'B', root: '/owned/actual-b', mode: 'read_write' },
+      nodes: [
+        { id: 'same-node', name: 'First install', installation_id: 'install-a', revoked_at: null },
+        { id: 'same-node', name: 'Second install', installation_id: 'install-b', revoked_at: null },
+      ],
+    })
+    expect(html).toContain('安装 install-a')
+    expect(html).toContain('安装 install-b')
+    const selected = [...html.matchAll(/<option\b[^>]*>/gu)].find(item => item[0].includes('install-b'))
+    expect(selected?.[0]).not.toContain('selected')
+    expect(html).toContain('请选择执行所在节点')
+  })
+
+  it('exposes missing installation identity and disabled revoked rows without fabricating substitutes', async () => {
+    const ProjectBindingDialog = (await import('../src/components/ProjectBindingDialog.vue')).default
+    const html = await render(ProjectBindingDialog, {
+      project: { id: 'project-b', name: 'B', root: '/owned/actual-b', mode: 'read_write' },
+      nodes: [
+        { id: 'same-node', name: 'Missing identity', revoked_at: null },
+        { id: 'same-node', installation_id: 'revoked-second', revoked_at: '2026-01-01T00:00:00Z' },
+      ],
+    })
+    expect(html).toContain('未提供安装 ID')
+    expect(html).toContain('已撤销')
+    const target = html.indexOf('revoked-second')
+    expect(target).toBeGreaterThan(-1)
+    const start = html.lastIndexOf('<option', target)
+    const end = html.indexOf('>', target)
+    expect(start).toBeGreaterThanOrEqual(0)
+    const tag = html.slice(start, end + 1)
+    expect(tag).toContain('disabled')
+  })
 })
 
 describe('typed resource facts view', () => {

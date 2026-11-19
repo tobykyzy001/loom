@@ -27,6 +27,8 @@ export interface ProjectBindingInput {
   node_id: string
   worker_id: string
   root_scope: string
+  /** Only needed when this Node has multiple usable Installation records. */
+  installation_id?: string
 }
 
 export interface Assignment {

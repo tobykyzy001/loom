@@ -171,6 +171,8 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 
 - **人工审批的决定/理由/执行证据应同一事务可追溯。** `/approval` 现要求非空规范化`reason≤1000 UTF-8字节`，真实存入`task.approval_granted`/`task.approval_rejected`，仍由原Grant/Binding/root/worker而非客户端授予新权限。Approval带着原有Source 校验进行唯一0→1首签，并保存实际Assignment/Lease/epoch、原Grant/digest，拒绝保持等待且零工作。新HTTP走`approve_ticket`，遗留`retry_after_approval`仅库内generic兼容，不能拿来略过人类理由或把approval_id当长期幂等授权。前端在确认时再核同ID/waiting和cancel intent，并将理由的明文持久化告诉用户不要粘贴Secret。已接受后的重读仅在仍选中同ID时按当前page进行，不改抢用户后来选择的其它Ticket/page，也不把已接受决定伪装取消或失败；这不是新授权，详见[Source验收](tests/sources/README.md)。公共failed retry的`assignment.retried`与`ticket.retried`也纳入同一BEGIN IMMEDIATE事务，任一DML或审计失败都回滚，`COMMIT`仅在写闭包成功之后。权限`403 grant_scope`及状态`409 approval_not_pending`保留。完整真实Source审批/真实DSH重试与SQL触发器回滚证明见[tests/sources/README.md](tests/sources/README.md)及`tests/runner/README.md`，不要把API按钮、单测状态名称或HTTP 200本身当完成。
 
+- **同一Node ID的多Installation必须在Vue中显式选择**：`ProjectBindingDialog`仍以明确人工绑定与`ProjectBindingInput`提交，不自动推定或使用第一行。`binding-input.ts`的`nodeOptionKey(node,group)`仅对同一Node ID有多个未撤销记录时编码`[node.id,installation_id]`，单个有效记录保留原Node value和原字段组成的payload；`selection()`共用按钮校验与提交，缺/重复ID、非法key、撤销或丢失的选择不会自动借用其他identity。不能从inventory另代填root或Worker，状态/online也不是信任许可。父级确认框稳定显示实际冻结payload里的installation。该确认打开期间，保留原来Project Binding表单但其`obscured`项应inert并取消keydown接管；专用`confirm-backdrop`高于原遮罩，避免同级50的其它模态遮挡pointer。实际Edge driver是`tests/browser/installation-ui.mjs`；已验证B的Node/Installation/worker/root→HTTP/Binding/audit、A的真实403与单active旧payload，且后续为独立admin read Grant而非Access UI Grant提交。不含手机生命周期、第二物理Host、额外DSH Profile、实际任务或整体M0完成宣称。
+
 ## 7. 修改和验证协议
 
 ### 每次改动

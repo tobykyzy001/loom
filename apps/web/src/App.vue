@@ -184,11 +184,14 @@ function grantCreate(value: { project_id: string; operations: GrantOperation[]; 
   ask({ title: '创建这个项目授权？', effect: '允许协调器在之前确认的精确节点绑定上匹配工作。这只是 Grant，不是执行中的 Lease，不会在前端自动执行任务。', changes: [`项目：${projects.value.find(p => p.id === value.project_id)?.name ?? value.project_id}`, `操作：${grantOperationsSummary(value.operations)}`, `节点：${value.node_id || '由协调器匹配合适的已有绑定'}`], confirmLabel: '确认创建 Grant' }, () => createGrant(value))
 }
 function bindProject(value: ProjectBindingInput) {
-  const node = nodes.value.find(node => node.id === value.node_id)
-  ask({ title: '确认这个精确的项目绑定？', effect: '仅确认项目 ID、所选 Node/Worker 与已注册根目录的对应关系，不授予读写权限。服务端会核对 host 的 inventory.project_roots 声明。', changes: [`项目：${bindingProject.value?.name ?? value.project_id}`, `项目根目录：${value.root_scope}`, `节点：${node?.name || value.node_id}（${value.node_id}）`, `Worker ID：${value.worker_id}`], confirmLabel: '确认绑定此位置' }, () => createProjectBinding(value)
+  const node = nodes.value.find(node => node.id === value.node_id
+    && (!value.installation_id || node.installation_id === value.installation_id))
+  const installation = value.installation_id || node?.installation_id
+  const installationFact = installation ? `安装身份：${installation}` : '安装身份：由服务端按唯一可用安装核对'
+  ask({ title: '确认这个精确的项目绑定？', effect: '仅确认项目 ID、所选 Node/Worker 与已注册根目录的对应关系，不授予读写权限。服务端会核对 host 的 inventory.project_roots 声明。', changes: [`项目：${bindingProject.value?.name ?? value.project_id}`, `项目根目录：${value.root_scope}`, `节点：${node?.name || value.node_id}（${value.node_id}）`, installationFact, `Worker ID：${value.worker_id}`], confirmLabel: '确认绑定此位置' }, () => createProjectBinding(value)
     .then(succeeded => {
     if (succeeded) {
-      bindingNotice.value = `已在节点 ${value.node_id} 为「${bindingProject.value?.name ?? value.project_id}」确认 Worker ${value.worker_id} 的资源绑定。下一步请单独创建 Grant；绑定本身不授予读写权限。`
+      bindingNotice.value = `已在节点 ${value.node_id}${installation ? `（安装：${installation}）` : ''} 为「${bindingProject.value?.name ?? value.project_id}」确认 Worker ${value.worker_id} 的资源绑定。下一步请单独创建 Grant；绑定本身不授予读写权限。`
       bindingProject.value = null
     }
     return succeeded
@@ -293,7 +296,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
     <ProjectDialog v-if="showProjects" :busy="state.busy.project" :error="state.errors.project" @close="showProjects = false" @submit="saveProject" />
     <ConnectionDialog v-if="showConnection" :checking="state.credentialState === 'checking'" :error="state.errors.workspace" @saved="token => void onConnectionSaved(token)" @close="showConnection = false" />
     <ConfirmDialog :confirmation="confirmation" :busy="confirmationBusy" :error="confirmationError" @confirm="void confirm()" @cancel="cancelConfirm" />
-    <ProjectBindingDialog v-if="bindingProject" :project="bindingProject" :nodes="nodes" :busy="state.busy['binding-write']" :error="confirmation ? '' : state.errors['binding-write']" @close="bindingProject = null" @submit="bindProject" />
+    <ProjectBindingDialog v-if="bindingProject" :project="bindingProject" :nodes="nodes" :obscured="!!confirmation" :busy="state.busy['binding-write']" :error="confirmation ? '' : state.errors['binding-write']" @close="bindingProject = null" @submit="bindProject" />
     <Teleport to="body"><div v-if="sourcePanelOpen" class="modal-backdrop">
       <section class="modal source-work-modal" role="dialog" aria-modal="true" aria-labelledby="source-work-heading" @keydown.esc="!sourceSubmitting && (sourcePanelOpen = false)">
         <SourceWorkPanel :result="state.sourceTicketReceipt" :transport="sourceTransport" source-key="browser-source" thread-id="browser-thread" :projects="projects" :grants="state.grants" :nodes="nodes" :busy="sourceSubmitting || !!state.busy['source-write'] || !!state.busy['source-read']" :error="sourceError" @submit="reviewSourceWork" @open="ticket => void openSourceTicket(ticket)" @open-ticket="openSourceTicketId" @closed="sourcePanelOpen = false" />

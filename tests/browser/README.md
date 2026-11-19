@@ -35,6 +35,21 @@ node tests/browser/run.mjs --vite --keep-evidence
 尝试修复/删除厂商 updater 或用户全局数据，也不把厂商自己 updater 当作 owned
 Loom child 来清理。标准 Playwright path 不执行这段支线。
 
+## 精确Installation绑定与可访问确认层
+
+`node tests/browser/installation-ui.mjs`（如确实需要桌面窗口可加`--headed`）独立构建production Vue，使用随机loopback Rust、真实同源`--web-dir`和owned standalone Edge profile。复用上述精确Playwright依赖，不连接生产浏览器、DSH Profile/Service或外部Host，不创建1+3 Compose场景。它的两个Installation共享一个合法公钥且各自有真实enrollment/heartbeat，但仍是两个逻辑fixture，不是第二物理设备。
+
+`ProjectBindingDialog`针对同一Node ID的多个未撤销记录要求用户选择准确的Node/Installation组合；只有一个有效记录才保留DOM中原Node value与原四键payload。缺、重复、撤销或已经不在当前记录中的选择不能由静默回退代替。Worker保持用户填写并trim后的值，root严格来自Project，不接受Node inventory提供的旁路换目录。确认请求由冻结payload展示真实installation，不会被同名节点第一条记录替换。
+
+后端真实证明包含：
+- A声明另一root并登记`worker-a`，B声明本项目root并登记`worker-b`；直接以Node token请求管理URL实际被拒401。
+- 用户选择B后的检查步骤尚未发POST，确认框见其安装/worker/root；实际390px与桌面按钮中心hit-test直接命中确认按钮，最后在390px恢复进行真实Playwright pointer确认。原先同级z-index遮罩拦截pointer的问题已专门修复，不能拿keyboard绕开它的旧FAIL充数。
+- B的HTTP request、response、精确SQLite binding与一条`project.binding.approved` audit都有对应公共字段；A原inventory继续保持。随后用**另一次明确授权admin调用**该returned Binding创建read Grant，验证安装/worker/binding及严格`['read']`，而不是宣称已在Access页完整提交Grant UI。
+- 选择A碰到B的项目root时得到实际403 `binding_not_declared_by_host`，错误文案可见，原A表单保留，原有binding/audit数量不变，不自动改为B。选择在A失效后只剩B时的legacy路径，实际POST没有`installation_id`字段，返回与DB都是B。这里的SQL撤销仅为私有negative fixture，不增加按Installation撤权的管理API。
+- 任何Task执行都不是这一driver的内容；Ticket/Assignment/Report/Artifact/Effect数量均为0。Ticket持有、 stale-selected刷新/撤销及真实Agent取消不在这次Web场景测试中。
+
+纯函数与SSR另有本地UI case，不能替代这段运行。旧的pointer阻塞复现见[HpSR2h](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-HpSR2h/result.json)；子任务通过之外，主Agent还用相同源码和driver独立重跑，最终[kJL3dd result](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-kJL3dd/result.json)为七阶段PASS，driver SHA `4111f8310041d217656ba73f4e579dc842caa94c770a6a18a404163a97bb8045`，proof SHA `66f38e09a01cc2cc022a653869236760301366d2598e4e4881108b5ebb013c82`。构建前后三个主要是Vue文件SHA相同；owned context/center停止，临时Node密钥、项目、browser profile实际删除，无凭据进入proof。
+
 ## M0同源PWA静态壳的online / offline / online实测
 
 执行 `node tests/browser/offline-shell.mjs`。代码先build真实`apps/web`；Rust需先用 `cargo build --locked -p loom-concierge --bin loom` 更新当前bin，因为真实WebRoot fixture采用显式命令包装以附加`--web-dir`，不会隐式重编译旧bin。服务只在owned的随机loopback port开原生Concierge；不借用当前 DSH GUI/desktop profile。它通过标准 `launchPersistentContext` 从另一个独立owned Edge profile打开同源页面，并实际完成原生连接设置，不靠注入localStorage或修改业务fetch。

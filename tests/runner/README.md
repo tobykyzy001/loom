@@ -92,7 +92,7 @@ node tests/runner/installation-binding.mjs
 
 最终[实际proof](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-binding-proof-S21Vie/result.json)比较选中第二份的完整SQL binding字段、独立第 一/第二inventory、唯一匹配审计，以及对应 **read-only Grant** 的installation/worker/binding，未产Ticket/Assignment/Report/Artifact/Effect。错误root 403且不附加去新Binding；手动撤销fixture仅用于已 撤销身份 负例（不是新增独立逐安装撤销API），Grant counts保持。真正center restart再检验 SQLite、hash chain、原有 binding与Grant都保留。**不推导create_grant等其它事务或跨进程Exactly-once。**
 
-`DatabaseSync.get()`返回null-prototype 对象，driver按值比较所有SQL SELECT字 段（复制为普通对象）而不把对象原型不同当身份差异；`grant.operations`已是JSON数组，无需二次parse。不暴露私钥/token。Rust完整target实测 **189 passed/0 failed/1 opt-in probe忽略**，[记录](/tmp/loom-installation-binding-rust.log)，配合[Rust bare原生正常流程](/tmp/loom-installation-binding-bare.log)和Node39/Vue155 + `vue-tsc`。**当前Vue对话框仍未Expose安装选择UI**, 后续需独立真实入口补测。
+`DatabaseSync.get()`返回null-prototype 对象，driver按值比较所有SQL SELECT字 段（复制为普通对象）而不把对象原型不同当身份差异；`grant.operations`已是JSON数组，无需二次parse。不暴露私钥/token。Rust完整target实测 **189 passed/0 failed/1 opt-in probe忽略**，[记录](/tmp/loom-installation-binding-rust.log)，配合[Rust bare原生正常流程](/tmp/loom-installation-binding-bare.log)和Node39/Vue155 + `vue-tsc`。后续Vue精确选择已由`node tests/browser/installation-ui.mjs`真正验收：同一Node的两个Installation不再只会一次Node ID绑定，B的root/worker/payload经真实Edge确认保存，单active请求仍保持原四键。[后续Edge proof](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-kJL3dd/result.json)和旧层叠复现见[tests/browser/README.md](../browser/README.md)；不把此UI后续混入此前的后端审计原子性result，也不由当前helper直接执行Agent任务。
 
 ## 用户 UI 撤权 + 两次未领取空poll的补充证据
 

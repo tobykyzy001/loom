@@ -43,7 +43,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 
 <template>
   <Teleport to="body">
-    <div v-if="confirmation" class="modal-backdrop" @click.self="!busy && emit('cancel')">
+    <div v-if="confirmation" class="modal-backdrop confirm-backdrop" @click.self="!busy && emit('cancel')">
       <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-heading">
         <span class="confirm-symbol" :class="{ danger: confirmation.danger }"><AppIcon :name="confirmation.danger ? 'warning' : 'shield'" :size="25" /></span>
         <h2 id="confirm-heading">{{ confirmation.title }}</h2>
