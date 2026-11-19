@@ -1101,6 +1101,590 @@ mod tests {
         server.abort();
     }
 
+    const ADMISSION_NODE_TOKEN: &str = "admission-node-token-1234567890";
+
+    fn admission_node_state() -> (tempfile::TempDir, Arc<State>) {
+        let (directory, state) = revocation_test_state();
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE nodes SET token_hash=?1 WHERE id='node' AND installation_id='installation'",
+                [crate::store::hash(ADMISSION_NODE_TOKEN)],
+            )
+            .unwrap();
+        (directory, state)
+    }
+
+    async fn acknowledge_admission_fixture(app: &Router) -> Value {
+        let (status, response) = response_json(
+            post_json(
+                app,
+                "/api/v1/nodes/acknowledge".into(),
+                ADMISSION_NODE_TOKEN,
+                json!({
+                    "protocol":"loom.node.v1", "node_id":"node",
+                    "installation_id":"installation", "request_id":"admission-fixture-ack",
+                    "ticket_id":"ticket", "assignment_id":"assignment", "lease_epoch":1,
+                    "accepted":true, "reason":"", "cancel_requested":false,
+                    "cancellation":false
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["accepted"], true);
+        response
+    }
+
+    fn admission_authority_snapshot(state: &Arc<State>) -> Value {
+        let store = state.lock().unwrap();
+        json!({
+            "ticket":store.get("tickets", "ticket").unwrap().unwrap(),
+            "grant":store.get("grants", "grant").unwrap().unwrap(),
+            "node":store.get("nodes", "node").unwrap().unwrap(),
+            "project":store.get("projects", "project").unwrap().unwrap(),
+            "bindings":store.query("SELECT * FROM project_bindings", []).unwrap(),
+            "assignment":store.get("assignments", "assignment").unwrap().unwrap(),
+        })
+    }
+
+    fn admission_authority_unchanged(
+        store: &crate::store::Store,
+        original: &(Value, Value, Value, Value, Vec<Value>, Value),
+    ) -> bool {
+        store.get("tickets", "ticket").unwrap().unwrap() == original.0
+            && store.get("grants", "grant").unwrap().unwrap() == original.1
+            && store.get("nodes", "node").unwrap().unwrap() == original.2
+            && store.get("projects", "project").unwrap().unwrap() == original.3
+            && store.query("SELECT * FROM project_bindings", []).unwrap() == original.4
+            && store.get("assignments", "assignment").unwrap().unwrap() == original.5
+    }
+
+    fn admission_artifact_body(artifact: &str, bytes: &[u8]) -> Value {
+        json!({
+            "protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation",
+            "request_id":format!("artifact-request-{artifact}"), "ticket_id":"ticket",
+            "assignment_id":"assignment", "lease_epoch":1, "artifact_id":artifact,
+            "bytes_base64":STANDARD.encode(bytes),
+            "metadata":{"artifact_id":artifact,"name":"admission.txt","media_type":"text/plain"}
+        })
+    }
+
+    fn admission_report_body(request: &str, requested_state: &str, artifacts: &[&str]) -> Value {
+        json!({
+            "protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation",
+            "request_id":request, "ticket_id":"ticket", "assignment_id":"assignment",
+            "lease_epoch":1, "state":requested_state, "artifact_ids":artifacts,
+            "summary":"Controlled API admission fixture", "effects":[]
+        })
+    }
+
+    #[tokio::test]
+    async fn new_ordinary_outcomes_need_prior_admission_but_receipts_remain_immutable() {
+        const ARTIFACT: &str = "55555555-5555-4555-8555-555555555555";
+        let (_directory, state) = admission_node_state();
+        let app = router(state.clone());
+        let original = {
+            let store = state.lock().unwrap();
+            (
+                store.get("tickets", "ticket").unwrap().unwrap(),
+                store.get("grants", "grant").unwrap().unwrap(),
+                store.get("nodes", "node").unwrap().unwrap(),
+                store.get("projects", "project").unwrap().unwrap(),
+                store.query("SELECT * FROM project_bindings", []).unwrap(),
+                store.get("assignments", "assignment").unwrap().unwrap(),
+            )
+        };
+        let artifact = admission_artifact_body(ARTIFACT, b"ordinary admitted bytes\n");
+        for state_name in ["running", "succeeded", "failed"] {
+            let request =
+                admission_report_body(&format!("unadmitted-{state_name}"), state_name, &[]);
+            let before = state
+                .lock()
+                .unwrap()
+                .query("SELECT * FROM audits", [])
+                .unwrap();
+            let (status, error) = response_json(
+                post_json(
+                    &app,
+                    "/api/v1/nodes/reports".into(),
+                    ADMISSION_NODE_TOKEN,
+                    request,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{state_name}: {error}");
+            assert_eq!(error["error"]["code"], "assignment_unadmitted");
+            let store = state.lock().unwrap();
+            assert!(store.query("SELECT * FROM reports", []).unwrap().is_empty());
+            assert!(store.query("SELECT * FROM effects", []).unwrap().is_empty());
+            assert_eq!(
+                store.query("SELECT * FROM requests", []).unwrap(),
+                Vec::<Value>::new()
+            );
+            let grant = &store.get("grants", "grant").unwrap().unwrap();
+            assert_eq!(grant["version"], 1);
+            assert_eq!(grant["digest"], "original-digest");
+            assert_eq!(grant["revoked_at"], Value::Null);
+            assert!(admission_authority_unchanged(&store, &original));
+            assert_eq!(store.query("SELECT * FROM audits", []).unwrap(), before);
+        }
+        let (status, error) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/artifacts".into(),
+                ADMISSION_NODE_TOKEN,
+                artifact.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(error["error"]["code"], "assignment_unadmitted");
+        {
+            let store = state.lock().unwrap();
+            assert!(store
+                .query("SELECT * FROM artifacts", [])
+                .unwrap()
+                .is_empty());
+            assert!(store.audits(Some("ticket")).unwrap().is_empty());
+            assert!(!store
+                .root
+                .join("artifacts")
+                .join(format!("{ARTIFACT}.artifact"))
+                .exists());
+        }
+
+        // This actual HTTP acknowledgement establishes the pre-existing admission
+        // pair. The rest is protocol persistence, not a claimed Agent execution.
+        let admitted = acknowledge_admission_fixture(&app).await;
+        let original_acknowledged_at = admitted["acknowledged_at"].clone();
+        let (status, uploaded) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/artifacts".into(),
+                ADMISSION_NODE_TOKEN,
+                artifact.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uploaded}");
+        assert_eq!(uploaded["artifact_id"], ARTIFACT);
+        let success = admission_report_body("admitted-success", "succeeded", &[ARTIFACT]);
+        let (status, accepted) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/reports".into(),
+                ADMISSION_NODE_TOKEN,
+                success.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["accepted"], true);
+        let report = state
+            .lock()
+            .unwrap()
+            .query("SELECT * FROM reports", [])
+            .unwrap()
+            .remove(0);
+        assert_eq!(report["lease_epoch"], 1);
+        assert_eq!(report["state"], "succeeded");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .get("assignments", "assignment")
+                .unwrap()
+                .unwrap()["acknowledged_at"],
+            original_acknowledged_at
+        );
+
+        let authority_before_results = admission_authority_snapshot(&state);
+        // Receipt lookup predates the new-admission fence. Even if external
+        // administration later removes the proof, an old exact receipt and old
+        // exact immutable bytes remain readable without minting another outcome.
+        {
+            let store = state.lock().unwrap();
+            store
+                .conn()
+                .execute(
+                    "UPDATE assignments SET acknowledged_at=NULL WHERE id='assignment'",
+                    [],
+                )
+                .unwrap();
+            store
+                .conn()
+                .execute(
+                    "DELETE FROM audits WHERE action='assignment.acknowledged'",
+                    [],
+                )
+                .unwrap();
+        }
+        let (status, replay) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/reports".into(),
+                ADMISSION_NODE_TOKEN,
+                success.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["receipt"], accepted);
+        let (status, duplicate) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/artifacts".into(),
+                ADMISSION_NODE_TOKEN,
+                artifact,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{duplicate}");
+        assert_eq!(duplicate["duplicate"], true);
+        let after_replay = admission_authority_snapshot(&state);
+        assert_eq!(after_replay["ticket"], authority_before_results["ticket"]);
+        assert_eq!(after_replay["grant"], authority_before_results["grant"]);
+        assert_eq!(after_replay["node"], authority_before_results["node"]);
+        assert_eq!(after_replay["project"], authority_before_results["project"]);
+        assert_eq!(
+            after_replay["bindings"],
+            authority_before_results["bindings"]
+        );
+        let mut expected_assignment = authority_before_results["assignment"].clone();
+        expected_assignment["acknowledged_at"] = Value::Null;
+        assert_eq!(after_replay["assignment"], expected_assignment);
+        let store = state.lock().unwrap();
+        assert_eq!(store.query("SELECT * FROM reports", []).unwrap().len(), 1);
+        assert_eq!(store.query("SELECT * FROM artifacts", []).unwrap().len(), 1);
+        assert_eq!(store.query("SELECT * FROM requests", []).unwrap().len(), 1);
+        assert_eq!(revocation_audits(&store, "report.accepted").len(), 1);
+        assert_eq!(revocation_audits(&store, "artifact.indexed").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn partial_or_ambiguous_admission_never_creates_ordinary_outcomes() {
+        const ARTIFACT: &str = "66666666-6666-4666-8666-666666666666";
+        let (_directory, state) = admission_node_state();
+        let app = router(state.clone());
+        let assert_fenced = |expected: &'static str| {
+            let app = &app;
+            let state = &state;
+            async move {
+                for (route, body) in [
+                    (
+                        "/api/v1/nodes/artifacts",
+                        admission_artifact_body(ARTIFACT, b"no new proof\n"),
+                    ),
+                    (
+                        "/api/v1/nodes/reports",
+                        admission_report_body("fence-running", "running", &[]),
+                    ),
+                ] {
+                    let before = {
+                        let store = state.lock().unwrap();
+                        (
+                            store.get("assignments", "assignment").unwrap().unwrap(),
+                            store.list("tickets").unwrap(),
+                            store.query("SELECT * FROM audits", []).unwrap(),
+                        )
+                    };
+                    let (status, error) = response_json(
+                        post_json(app, route.into(), ADMISSION_NODE_TOKEN, body).await,
+                    )
+                    .await;
+
+                    assert_eq!(status, StatusCode::CONFLICT, "{route}: {error}");
+                    assert_eq!(error["error"]["code"], expected);
+                    let store = state.lock().unwrap();
+                    assert!(store
+                        .query("SELECT * FROM artifacts", [])
+                        .unwrap()
+                        .is_empty());
+                    assert!(store.query("SELECT * FROM reports", []).unwrap().is_empty());
+                    assert!(store.query("SELECT * FROM effects", []).unwrap().is_empty());
+                    assert_eq!(
+                        store.query("SELECT * FROM requests", []).unwrap(),
+                        Vec::<Value>::new()
+                    );
+                    assert_eq!(
+                        store.get("assignments", "assignment").unwrap().unwrap(),
+                        before.0
+                    );
+                    assert_eq!(store.list("tickets").unwrap(), before.1);
+                    assert_eq!(store.query("SELECT * FROM audits", []).unwrap(), before.2);
+                }
+            }
+        };
+
+        // Valid timestamp alone is never admission.
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE assignments SET acknowledged_at='2026-01-01T00:00:00Z' WHERE id='assignment'",
+                [],
+            )
+            .unwrap();
+        assert_fenced("acknowledgement_inconsistent").await;
+
+        state
+            .lock()
+            .unwrap()
+            .audit(
+                Some("ticket"),
+                "node",
+                "assignment.acknowledged",
+                &json!({"assignment_id":"assignment"}),
+            )
+            .unwrap();
+        assert_fenced("acknowledgement_inconsistent").await;
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE assignments SET acknowledged_at=NULL WHERE id='assignment'",
+                [],
+            )
+            .unwrap();
+        assert_fenced("assignment_unadmitted").await;
+        state
+            .lock()
+            .unwrap()
+            .audit(
+                Some("ticket"),
+                "node",
+                "assignment.acknowledged",
+                &json!({"assignment_id":"assignment","delivered_is_not_read":true}),
+            )
+            .unwrap();
+        assert_fenced("acknowledgement_inconsistent").await;
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE assignments SET acknowledged_at='not-a-time' WHERE id='assignment'",
+                [],
+            )
+            .unwrap();
+        assert_fenced("acknowledgement_inconsistent").await;
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE assignments SET acknowledged_at='2026-01-01T00:00:00Z' WHERE id='assignment'",
+                [],
+            )
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .audit(
+                Some("ticket"),
+                "node",
+                "assignment.acknowledged",
+                &json!({"assignment_id":"assignment","delivered_is_not_read":true}),
+            )
+            .unwrap();
+        assert_fenced("acknowledgement_inconsistent").await;
+    }
+
+    async fn acknowledge_assignment_epoch(app: &Router, epoch: i64) {
+        let mut request = json!({
+            "protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation",
+            "request_id":"admission-fixture-ack", "ticket_id":"ticket", "assignment_id":"assignment",
+            "lease_epoch":1, "accepted":true, "reason":"", "cancel_requested":false, "cancellation":false
+        });
+        request["request_id"] = json!(format!("epoch-admission-{epoch}"));
+        request["lease_epoch"] = json!(epoch);
+        let (status, response) = response_json(
+            post_json(
+                app,
+                "/api/v1/nodes/acknowledge".into(),
+                ADMISSION_NODE_TOKEN,
+                request,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+    }
+
+    #[tokio::test]
+    async fn unknown_and_cancelled_reports_keep_their_existing_admission_semantics() {
+        let (_directory, state) = admission_node_state();
+        let app = router(state.clone());
+        let mut unknown = admission_report_body("pre-admission-unknown", "unknown", &[]);
+        unknown["effects"] = json!([{
+            "effect_id":"unknown-effect", "status":"unknown", "input_digest":"actual-input",
+            "evidence":{"outcome":"unknown"}, "artifacts":[]
+        }]);
+        let (status, response) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/reports".into(),
+                ADMISSION_NODE_TOKEN,
+                unknown,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["ticket_status"], "reconciling");
+        {
+            let store = state.lock().unwrap();
+            assert_eq!(
+                store.get("tickets", "ticket").unwrap().unwrap()["status"],
+                "reconciling"
+            );
+            assert!(
+                store.get("assignments", "assignment").unwrap().unwrap()["acknowledged_at"]
+                    .is_null()
+            );
+            assert!(revocation_audits(&store, "assignment.acknowledged").is_empty());
+            assert!(store.query("SELECT * FROM reports", []).unwrap()[0]["state"] == "unknown");
+        }
+
+        let (_directory, state) = admission_node_state();
+        let app = router(state.clone());
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE tickets SET cancel_requested=1,status='cancel_requested' WHERE id='ticket'",
+                [],
+            )
+            .unwrap();
+        let mut cancelled = admission_report_body("pre-admission-cancelled", "cancelled", &[]);
+        cancelled["cancel_acknowledged"] = json!(true);
+        let (status, response) = response_json(
+            post_json(
+                &app,
+                "/api/v1/nodes/reports".into(),
+                ADMISSION_NODE_TOKEN,
+                cancelled,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["ticket_status"], "cancelled");
+        let store = state.lock().unwrap();
+        assert_eq!(
+            store.get("tickets", "ticket").unwrap().unwrap()["status"],
+            "cancelled"
+        );
+        assert!(
+            store.get("assignments", "assignment").unwrap().unwrap()["acknowledged_at"].is_null()
+        );
+        assert!(revocation_audits(&store, "assignment.acknowledged").is_empty());
+        assert!(store
+            .query("SELECT * FROM artifacts", [])
+            .unwrap()
+            .is_empty());
+        assert!(store.query("SELECT * FROM effects", []).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn report_compares_ticket_attempt_and_persisted_lease_epoch_independently() {
+        const ARTIFACT: &str = "77777777-7777-4777-8777-777777777777";
+        for (ticket_attempt, lease_epoch, bad_epoch) in [(1, 2, 1), (2, 1, 1)] {
+            let (_directory, state) = admission_node_state();
+            state
+                .lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE tickets SET attempt=?1 WHERE id='ticket'",
+                    [lease_epoch],
+                )
+                .unwrap();
+            state
+                .lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE assignments SET attempt=?1,lease_epoch=?2 WHERE id='assignment'",
+                    params![lease_epoch, lease_epoch],
+                )
+                .unwrap();
+            let app = router(state.clone());
+            acknowledge_assignment_epoch(&app, lease_epoch).await;
+            let mut artifact = admission_artifact_body(ARTIFACT, b"epoch fixture\n");
+            artifact["lease_epoch"] = json!(lease_epoch);
+            let (status, uploaded) = response_json(
+                post_json(
+                    &app,
+                    "/api/v1/nodes/artifacts".into(),
+                    ADMISSION_NODE_TOKEN,
+                    artifact,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{uploaded}");
+            state
+                .lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE tickets SET attempt=?1 WHERE id='ticket'",
+                    [ticket_attempt],
+                )
+                .unwrap();
+            for (suffix, artifacts) in [
+                ("running", &[] as &[&str]),
+                ("success", &[ARTIFACT] as &[&str]),
+            ] {
+                let requested_state = if suffix == "running" {
+                    "running"
+                } else {
+                    "succeeded"
+                };
+                let (status, error) = response_json(
+                    post_json(
+                        &app,
+                        "/api/v1/nodes/reports".into(),
+                        ADMISSION_NODE_TOKEN,
+                        {
+                            let mut report =
+                                admission_report_body(suffix, requested_state, artifacts);
+                            report["lease_epoch"] = json!(bad_epoch);
+                            report
+                        },
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+                assert_eq!(error["error"]["code"], "stale_lease");
+            }
+            let store = state.lock().unwrap();
+            assert!(store.query("SELECT * FROM reports", []).unwrap().is_empty());
+            assert!(store.query("SELECT * FROM effects", []).unwrap().is_empty());
+            assert!(store
+                .query("SELECT * FROM requests", [])
+                .unwrap()
+                .is_empty());
+            assert!(revocation_audits(&store, "report.accepted").is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn first_grant_revocation_rolls_back_when_its_audit_write_fails() {
         let (_directory, state) = revocation_test_state();
@@ -5030,6 +5614,76 @@ pub(crate) async fn credential_authorize(
     Ok(Json(response))
 }
 
+/// Only the durable Assignment admission pair opens the ordinary-outcome path.
+/// A false result is either a not-yet-admitted pair or inconsistent history;
+/// callers choose the appropriate existing error for their protocol operation.
+fn assignment_admission(
+    store: &store::Store,
+    ticket: &str,
+    assignment: &str,
+) -> ApiResult<(bool, Option<String>, bool)> {
+    let owned = store.query(
+        "SELECT acknowledged_at FROM assignments WHERE id=?1 AND ticket_id=?2",
+        params![assignment, ticket],
+    )?;
+    if owned.len() != 1 {
+        return Ok((false, None, false));
+    }
+    let matching_audits = store
+        .audits(Some(ticket))?
+        .into_iter()
+        .filter(|entry| {
+            entry["actor"] == "node"
+                && entry["action"] == "assignment.acknowledged"
+                && entry["evidence"]
+                    .as_str()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .is_some_and(|envelope| {
+                        envelope["evidence"]["assignment_id"].as_str() == Some(assignment)
+                            && envelope["evidence"]["delivered_is_not_read"] == true
+                    })
+        })
+        .count();
+    let timestamp = owned[0]["acknowledged_at"]
+        .as_str()
+        .filter(|value| parse_time(value).is_ok())
+        .map(str::to_owned);
+    match (
+        owned[0]["acknowledged_at"].is_null(),
+        timestamp,
+        matching_audits,
+    ) {
+        (true, None, 0) => Ok((false, None, false)),
+        (false, Some(original), 1) => Ok((true, Some(original), false)),
+        _ => Ok((false, None, true)),
+    }
+}
+
+fn inconsistent_acknowledgement() -> ApiError {
+    ApiError::conflict(
+        "acknowledgement_inconsistent",
+        "A first acknowledgement needs neither timestamp nor audit; a replay needs one valid original timestamp and exactly one matching audit",
+    )
+}
+
+fn require_assignment_admission(
+    store: &store::Store,
+    ticket: &str,
+    assignment: &str,
+) -> ApiResult<()> {
+    let (admitted, _, inconsistent) = assignment_admission(store, ticket, assignment)?;
+    if admitted {
+        return Ok(());
+    }
+    if inconsistent {
+        return Err(inconsistent_acknowledgement());
+    }
+    Err(ApiError::conflict(
+        "assignment_unadmitted",
+        "A new ordinary Artifact or Report requires the Assignment's prior Node acknowledgement timestamp and exact matching audit",
+    ))
+}
+
 pub(crate) async fn acknowledge(
     AppState(state): AppState<Arc<State>>,
     headers: HeaderMap,
@@ -5047,48 +5701,21 @@ pub(crate) async fn acknowledge(
     // committed admission. The current Node, Grant, attempt and lease are
     // checked above *before* replay. An opaque request_id is not authorization.
     if !body["cancel_requested"].as_bool().unwrap_or(false) {
-        let assignment_record = store
-            .get("assignments", &assignment)?
-            .ok_or_else(|| ApiError::missing("Assignment not found"))?;
-        let audited = store.audits(Some(&ticket))?.into_iter().filter(|entry| {
-            if entry["actor"] != "node" || entry["action"] != "assignment.acknowledged" {
-                return false;
-            }
-            let evidence = entry["evidence"].as_str().unwrap_or_default();
-            serde_json::from_str::<Value>(evidence).is_ok_and(|envelope| {
-                envelope["evidence"]["assignment_id"].as_str() == Some(assignment.as_str())
-                    && envelope["evidence"]["delivered_is_not_read"] == true
-            })
-        });
-        let exactly_one_matching_audit = audited.count() == 1;
-        let timestamp = assignment_record["acknowledged_at"]
-            .as_str()
-            .filter(|value| parse_time(value).is_ok());
-        match (
-            assignment_record["acknowledged_at"].is_null(),
-            timestamp,
-            exactly_one_matching_audit,
-        ) {
-            (true, None, false) => {
-                // The only ordinary first-admission state: neither timestamp
-                // nor a corresponding audit yet exists.
-            }
-            (false, Some(original), true) => {
-                return Ok(Json(json!({
-                    "accepted":true,
-                    "acknowledged_at":original,
-                    "duplicate":true,
-                    "delivered_is_not_read":true,
-                    "report_or_execution_completed":false
-                })));
-            }
-            _ => {
-                return Err(ApiError::conflict(
-                    "acknowledgement_inconsistent",
-                    "A first acknowledgement needs neither timestamp nor audit; a replay needs one valid original timestamp and exactly one matching audit",
-                ));
-            }
+        let (admitted, acknowledged_at, inconsistent) =
+            assignment_admission(&store, &ticket, &assignment)?;
+        if admitted {
+            return Ok(Json(json!({
+                "accepted":true,
+                "acknowledged_at":acknowledged_at,
+                "duplicate":true,
+                "delivered_is_not_read":true,
+                "report_or_execution_completed":false
+            })));
         }
+        if inconsistent {
+            return Err(inconsistent_acknowledgement());
+        }
+        // Initial NULL with no exact matching audit is the sole first-write state.
     }
     let mut store = store;
     let acknowledged_at = now();
@@ -5684,6 +6311,9 @@ async fn artifact_upload(
             "sha256":current["sha256"],"location":current["location"]
         })));
     }
+    // Only a new ordinary Artifact creates a durable outcome here. Exact replay
+    // of already committed immutable bytes remains a read-only reconciliation.
+    require_assignment_admission(&store, &ticket, &assignment)?;
     // Model observation is derived from this same scoped immutable Artifact,
     // validated before any output bytes or auxiliary record are persisted.
     let model_observation = crate::model_observation::from_registration(
@@ -5819,10 +6449,10 @@ pub(crate) async fn report(
     let mut store = state.lock()?;
     let payload_digest = store::hash(&body.to_string());
     let ownership = store.query(
-        "SELECT t.attempt,a.lease_epoch,t.status FROM assignments a JOIN tickets t ON t.id=a.ticket_id WHERE a.id=?1 AND a.node_id=?2 AND a.ticket_id=?3",
+        "SELECT t.attempt AS ticket_attempt,a.lease_epoch AS lease_epoch,t.status FROM assignments a JOIN tickets t ON t.id=a.ticket_id WHERE a.id=?1 AND a.node_id=?2 AND a.ticket_id=?3",
         params![assignment, node, ticket],
     )?.into_iter().next().ok_or_else(||ApiError::denied("assignment_owner", "A node cannot report against another Assignment"))?;
-    if ownership["attempt"] != epoch || ownership["lease_epoch"] != epoch {
+    if ownership["ticket_attempt"] != epoch || ownership["lease_epoch"] != epoch {
         return Err(ApiError::denied(
             "stale_lease",
             "A report may not belong to a superseded Assignment attempt",
@@ -5852,6 +6482,11 @@ pub(crate) async fn report(
     }
     let evidence_only = matches!(requested_state, "unknown" | "cancelled");
     let (ticket, assignment, _) = valid_lease(&store, &body, &node, evidence_only)?;
+    // Running and terminal ordinary outcomes both require the durable admission;
+    // unknown/cancelled evidence keeps its established independent semantics.
+    if !evidence_only {
+        require_assignment_admission(&store, &ticket, &assignment)?;
+    }
     let ticket_record = store
         .get("tickets", &ticket)?
         .ok_or_else(|| ApiError::missing("Ticket not found"))?;

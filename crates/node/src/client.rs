@@ -374,7 +374,13 @@ impl NodeClient {
                 ),
                 retryable: status == StatusCode::REQUEST_TIMEOUT
                     || status == StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error(),
+                    || status.is_server_error()
+                    // This is not a Grant/lease denial: this assignment must first
+                    // receive its ordinary admission. Keep the immutable local
+                    // evidence queued while poll revalidates the same current
+                    // Assignment, instead of holding its Report forever and
+                    // letting an unrelated pending stop take the recovery order.
+                    || code == "assignment_unadmitted",
             }
             .into());
         }

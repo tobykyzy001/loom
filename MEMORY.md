@@ -193,6 +193,17 @@
 
 - **Vue记录 identity key应匹配协议的复合身份，而不是套用Node ID。** 同一Node有多个Installation/Worker/独立timeline时，Node ID只是共享公共身份，真实安装关联要靠`installation_id`。`nodeIdentityKey()`统一`node.node_id ?? node.id`与全程`installation_id`，card有data-installation-id便于按真实身份验证，避免Node ID相同导致VNode复用和 duplicate-key warning。不要只在一定事件后require unique names才验：要实际A新鲜、B老化时间后保留A在线、B陈旧、online sum恰一，同时 immutable worker/root/inventory/registration都原样。测试内部还分`NodeIdentity.nodeId / installationId` getter 与`report.results.fixture.node_id / installation_id`存储映射，绝不能用错误一层. 两common logical installs在**同一物理fixture computer**是否已有legitimate pubKey不能冒充第二host/物理断网，陈旧也≠自动撤权；原binding B、A worker/root mismatch拒绝及sole legacy payload仍应分别通过。完整真实Edge结果见 [installation-ui](tests/browser/installation-ui.mjs) 与 `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-pNBgte/result.json`。
 
+### 5.5.1 真实SIGKILL与本地outbox的准入恢复
+
+- **新的真实增量暴露并修复了“先传成果，后补准入”以及中心未检查准入的问题。** `tests/runner/kill-reconciliation.mjs`让原生CLI取得一份实际edit_file，hold的是executor完成后第一笔普通ACK（**不要hold pre-spawn的取消观察poll**），使写效果及两个原outbox先durable，而中心`acknowledged_at`和效果仍空。硬门前是28-byte真实目标文件、completion succeeded、capture的确切Grant/root/epoch/logical digest和confirmed ledger；真正`SIGKILL`并等待退出后开启同identity，才续原先work。
+
+- **中央须把当前Assignment的**正确RFC3339 acknowledged_at及恰一条same-node/same-assignment、delivered_is_not_read=true审计**作为新普通artifact和ordinary report的入场事实**；首次NULL+零matching audit不允许先登记，不全/多条/坏timestamp仍`acknowledgement_inconsistent`。 新Artifact在文件/索引/audit之前要求该项；完全相同的既有receipt/byte只read不新造事实。 unknown、cancelled和已有 code-stopped evidence依旧各自valid_lease/cancel/fallback语义，不让它们经由`assignment_unadmitted`程序升格成普通成功。
+- **Report SQL必须分别比较** `ticket_attempt`与持久`a.lease_epoch`和请求epoch。此前 用`t.attempt AS attempt`与epoch比较，让真实a.lease_epoch的检查错位，此前可能先接收结果、再失去恢复原本普通ACK的机会。
+
+- **Native `start()`现在先heartbeat，等待正常poll及completed replay的完整Grant/root/epoch/digest判定后，才普通ACK→原outbox**，不再`dispatch_outbox()`抢这一步。原有首次operation `Succeeded`和已完成 replay的`Deferred`并非要改成强制所有transport收尾才成立；本地准入、本地完成与证据运输属于不同层次，不要为其扩一种状态管理。`assignment_unadmitted`这个特定error仅 表示可回正常当前Assignment暂退而非authority变更，native保留原body/schedule；`acknowledgement_inconsistent / outcome_unknown /stale_lease`等其它拒绝仍HOLD，不因有效后续receipt被遗忘欺骗而放行。`completed_replay`14/14包含这链条与 三种相反负类，own fixture相应区分poll、cancellation_ack和原完整report body。
+
+- **真实证据：** 让独立child在kill后依据相同的current Grant/root/epoch重新读取，只有一笔实际ACK到上游伴随恰同一审计；原始Artifact、client report uuid、effect、bytes、request ID不替换，exactly one per central table；repeat出于first held request同一Node authorization的ack返回`duplicate:true`和**原来ACK timestamp、仍然一条audit**，绝不因为opaque request_id就免验scope。第二个idle不追加写入，SQLite integrity和audit均过。DAG/Tasks/stop/storage schema没变化，未读取live DSH token/private provider或给external Provider机会生成新证据。详见 runner的介绍与最新 owned proof：`/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-native-kill-outbox-proof-HNUHnr/result.json`。这只覆盖当前macOS的一次已持久edit file +尚未准入的硬停恢复，不是任意进程崩断、工具中途、NFS/第二物理 机/移动设备或 全域跨 系统 exactly-once的宣告。
+
 ### 5.6 Web、断连和 PWA 静态壳
 
 - UI 条件分支被额外节点打断会让 Help 与 Ticket 同时出现，横向 overflow 也可能由长 Node ID 和 flex layout 引起。要按真实截图、DOM 和宽度修复条件链/`min-width`/换行，不能仅隐藏溢出或把面板 z-index 调高。

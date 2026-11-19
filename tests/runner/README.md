@@ -60,6 +60,21 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 
 **交付结构和其依赖也已实证。** `NodeClient.deliver`不再把任意HTTP 200当作 Artifact/Report已收：Artifact要求response的UUID与本地outbox完全相同；Report需要accepted:true，任何顶层error envelope均拒收。原始在库首次 Artifact返回无accepted flag也不强行补造duplicate/freshness字段，因此符合已有服务端响应。原`once`即使HOLD了坏artifact回执，仍可能光凭本地outcome扩散为`Tick::Succeeded`；现在向调用方传播实际永久transport rejection，而不是让decoy outcome掩盖投递失败。发生不可重试失败时，**与该处理中的Artifact同assignment的Report也必须hold**，不能被队列"允许独立作业继续"偷渡此因果断裂；独立Assignment仍保留正常通行。新增负例分别用不同UUID以及accepted:false验证原body不被改写、controller层`dispatched=success`不会假完成；恢复正确响应和due timestamp**只是本地测试拥有的重试调度**，之后每个原body的往返id不变、file effect仍一份。Loopback不是真实Concierge持久记录的替代，正向流程以真实Rust bare读写与Native Descriptor注册的通过为伴。另有**同Host、同有效readGrant/root下**的真实A/B作业验证：A使Artifact ID失配时，自身两份pending body均保持HOLD；B用独立Ticket/Assignment/Lease实际`read_summary`，**单独各自一次artifact与report HTTP**。这使得依赖暂保不再只是单一作业的解析。B的新目录包含 一项bin+一项effect ledger，A没有被重复执行，cdn主体/owner及其原始关系仍一致。该文档提及的当前总量是**11/11**，同一主机逻辑作业隔离，非第二物理Host或新Grant声明。
 
+## 文件效果已落盘、Admission未达中心后的真实SIGKILL恢复
+
+运行 `node tests/runner/kill-reconciliation.mjs`。它先用真实CLI注册与单个read/write Grant和Binding，颁发一份edit_file；随后hold住**file effect和原始outbox都已持久化后**的首个普通ACK（不是提前poll）。在private state确认`completion=succeeded`、active为空、两个原outbox，确认28-byte目标内容与原artifact/effect ledger均已写入，而中心ack/Artifact/Report/Effect和准入审计为0后，才对所属PID实际发`SIGKILL`并等待其退出。
+
+这项真实测试首先暴露了：旧native `start()`会**先派发outbox**，中央`valid_lease`又没有要求Admission，可能在`acknowledgement_at=null`情况下收出一套正常成功证据。且Report 将 ticket attempt的SQL别名误用于lease epoch，错误接收后poll再没机会收回准入。现在的修复为：
+
+- 新普通Artifact及`running/succeeded/failed` Report在创建持久事实、文件和关联审计之前，必须有该Assignment的**合法** `acknowledgement_at`连同一个精确node/`assignment.acknowledged`审计；半边/异常历史维持`acknowledgement_inconsistent`，缺噪声拒绝`assignment_unadmitted`。旧不可变byte/receipt replay不是新事件，未知/取消报告沿用 自己的特殊契约，不把错误结果升格为普通成功。
+- Native启动不再无条件派发local outbox；随后由同一poll重验当前Grant/root/Lease/epoch和完整logical digest，完成结果的**普通ACK先行**，raw的请求Id nonce可变，但上传体、Artifact UUID、客户端ReportUUID与effect身份不变。已有Admission再次到API只会报告duplicate和原timestamp，不会再签发审计。
+- `assignment_unadmitted`在服务端只对应**可重新走正常当前Assignment准入**的返回，被native区分成限期保留与不换body的传输回退；`acknowledgement_inconsistent`、`outcome_unknown`、`stale_lease`则继续保持永久HOLD，不意外觉醒另一份entry的report。
+- 保留普通首次Ticket与completed replay各自原`TickStatus` 与 outbox distinction；这并非宣称对象全局exactly-once或将HTTP200当业务完成。`completed_replay`现为**14/14**，包含启动顺序、允许的精确暂退与三类其它authority负例，错误时仍按原始body保留。
+
+恢复后内部状态为恰 **1 Ticket / 1 Assignment / 1 Artifact / 1 Report / 1 Effect / 1条准入审计**，原bytes/SHA、effect/Receipt id、Lease epoch和原Grant/digest一致；再idle也不发生第二个写文件。另以代理内存中正牌Node的authorization发送一次当前、同Assignment的普通ACK请求（**不将Node或administrator token写入报告/日志**），得duplicate:true，**原timestamp未变、审计仍恰一条**。
+
+注: 证明只限同一macOS arm64、同一identity及单一edit_file的“原子文件效果+完整本地completion已写入、但ACK尚未到中心”窗口。处理硬停前的完整时机断言不能缺，提前拦截cancellation poll阻断不了执行，不能强行等同。补测不把mid-write crash、整机断电、任意Agent中断/外部副作用、异地NFS/第二Host或手机生命周期说成已验收。该增量未增schema/API资源或新的Grant来源，真实proof保存在自己的tmp path而非仓库。
+
 ## 真实多进程的owner和释放后业务对账
 
 运行 `node tests/runner/process-owner.mjs`。该driver使用当前源码构建的 `loom-node` **独立OS进程**和真实Rust Concierge，不引用进程内Runner。进程完成真实 `bind`、签名注册、一个read Grant与Binding后，再对同一state/artifact/project目录执行一份真实 `read_summary input.txt`。

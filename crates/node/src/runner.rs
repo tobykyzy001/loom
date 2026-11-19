@@ -190,7 +190,12 @@ impl LocalNodeRunner {
             .await?;
         self.state.data.heartbeat_at = Some(chrono::Utc::now().to_rfc3339());
         self.state.flush()?;
-        self.dispatch_outbox().await?;
+        // Wait for the normal poll below before transporting completed evidence.
+        // Bare execution precedes its ordinary ACK, so a local outbox alone does
+        // not prove that Concierge has durably admitted this Assignment. The poll
+        // revalidates the current Grant/root/epoch/logical digest; a completed
+        // success then gets its original (or first) admission before dispatch.
+        // Transport attempts without an admission remain queued for that closure.
         self.last_heartbeat = Instant::now();
         self.heartbeat_if_due().await?;
         Ok(

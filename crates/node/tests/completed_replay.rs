@@ -122,6 +122,13 @@ async fn answer(
             .unwrap()
             .clone()
             .unwrap_or_else(|| json!({"artifact_id":body["artifact_id"],"duplicate":true}));
+        if receipt["error"].is_object() {
+            let status = match receipt["error"]["code"].as_str() {
+                Some("stale_lease") => StatusCode::FORBIDDEN,
+                _ => StatusCode::CONFLICT,
+            };
+            return (status, Json(receipt));
+        }
         return (StatusCode::OK, Json(receipt));
     }
     if path.ends_with("/reports") {
@@ -138,10 +145,22 @@ async fn answer(
             .lock()
             .unwrap()
             .clone()
-            .unwrap_or_else(|| json!({"accepted":true,"duplicate":true}));
+            .unwrap_or_else(|| json!({"accepted":true,"acknowledged_at":chrono::Utc::now().to_rfc3339(),"duplicate":true}));
         return (StatusCode::OK, Json(receipt));
     }
     if path.ends_with("/acknowledge") {
+        if body.get("wait_seconds").is_some() {
+            return (
+                StatusCode::OK,
+                Json(json!({"assignment":body["last_assignment_id"]})),
+            );
+        }
+        if body["cancel_requested"] == true || body["cancellation"] == true {
+            return (
+                StatusCode::OK,
+                Json(json!({"accepted":true,"duplicate":true})),
+            );
+        }
         let acknowledgement = state
             .acknowledgement
             .lock()
@@ -274,6 +293,30 @@ impl Fixture {
             wait_seconds: 1,
             enrollment_code: None,
         })
+    }
+
+    // Native ordinary ACKs, cancellation observations and Reports are POSTed
+    // through a shared client path layout. Count by semantic body, not merely by
+    // the URL suffix, or a cancellation GET-like poll looks like an extra Report.
+    fn ordinary_admissions(&self) -> Vec<Value> {
+        self.server
+            .calls("/acknowledge")
+            .into_iter()
+            .filter(|body| {
+                body.get("wait_seconds").is_none()
+                    && body["acknowledgement"] == "accepted"
+                    && body["cancel_requested"] != true
+                    && body["cancellation"] != true
+            })
+            .collect()
+    }
+
+    fn actual_reports(&self) -> Vec<Value> {
+        self.server
+            .calls("/reports")
+            .into_iter()
+            .filter(|body| body["report_id"].is_string())
+            .collect()
     }
 
     async fn runner(&self) -> LocalNodeRunner {
@@ -1079,4 +1122,160 @@ async fn native_cancel_completion_does_not_generate_a_second_cancel_report() {
         "native replay project\noriginal fixture bytes\n"
     );
     fixture.exact_replay_retains_original_bodies().await;
+}
+
+#[tokio::test]
+async fn startup_recovers_admission_before_previously_unacknowledged_success_delivery() {
+    let fixture = Fixture::new(false).await;
+    *fixture.server.acknowledgement.lock().unwrap() = Some(json!({
+        "accepted":false,
+        "acknowledged_at":chrono::Utc::now().to_rfc3339()
+    }));
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let original = StateStore::open(&fixture.state)
+        .unwrap()
+        .data
+        .outbox
+        .clone();
+    assert_eq!(original.len(), 2);
+    assert_eq!(fixture.ordinary_admissions().len(), 1);
+    assert!(fixture.server.calls("/artifacts").is_empty());
+    assert!(fixture.actual_reports().is_empty());
+    *fixture.server.acknowledgement.lock().unwrap() = None;
+
+    // Previously, start() would have attempted evidence here before poll restored
+    // the ordinary admission for this already durable local completion.
+    let mut restarted = fixture.runner().await;
+    restarted.start().await.unwrap();
+    assert!(fixture.server.calls("/artifacts").is_empty());
+    assert!(fixture.actual_reports().is_empty());
+    assert_eq!(fixture.ordinary_admissions().len(), 1);
+    assert!(matches!(
+        restarted.once().await.unwrap(),
+        TickStatus::Deferred
+    ));
+    assert_eq!(fixture.ordinary_admissions().len(), 2);
+    assert!(fixture.actual_reports().is_empty());
+    drop(restarted);
+    // Re-acquire from the owned state after its admitted first transport retry
+    // becomes due. A native owner already open cannot see this fixture's disk
+    // timestamp update in memory; a fresh open reproduces reopen-after-kill.
+    fixture.due_original_outbox();
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let artifact_requests = fixture.server.calls("/artifacts");
+    assert_eq!(
+        artifact_requests.len(),
+        2,
+        "original body and one retry after due: {artifact_requests:?}"
+    );
+    assert_eq!(
+        artifact_requests,
+        [original[0].body.clone(), original[0].body.clone()]
+    );
+    assert_eq!(fixture.actual_reports(), [original[1].body.clone()]);
+    assert!(StateStore::open(&fixture.state)
+        .unwrap()
+        .data
+        .outbox
+        .is_empty());
+}
+
+#[tokio::test]
+async fn only_a_specific_unadmitted_receipt_is_retried_without_replacing_evidence() {
+    let fixture = Fixture::new(false).await;
+    fixture.server.delivery_attempts.store(1, Ordering::SeqCst);
+    *fixture.server.artifact_receipt.lock().unwrap() = Some(json!({
+        "error":{"code":"assignment_unadmitted","message":"validate the ordinary admission first"}
+    }));
+    let first_outcome = fixture.tick(fixture.original.clone()).await.unwrap();
+    assert!(
+        matches!(&first_outcome, TickStatus::Succeeded),
+        "{first_outcome:?}; outbox: {:?}",
+        StateStore::open(&fixture.state).unwrap().data.outbox
+    );
+    let original = StateStore::open(&fixture.state)
+        .unwrap()
+        .data
+        .outbox
+        .clone();
+    assert_eq!(original.len(), 2);
+    assert!(original
+        .iter()
+        .all(|item| item.next_attempt_at != "+999999999-12-31T23:59:59Z"));
+    assert!(fixture.server.calls("/artifacts").len() == 1);
+    assert!(fixture.actual_reports().is_empty());
+
+    *fixture.server.artifact_receipt.lock().unwrap() = None;
+    // Force the owned transport schedule in this unit fixture; production uses
+    // bounded backoff. No new Artifact/Effect identity is fabricated.
+    fixture.due_original_outbox();
+    let mut restarted = fixture.runner().await;
+    restarted.start().await.unwrap();
+    assert_eq!(fixture.server.calls("/artifacts").len(), 1);
+    assert!(matches!(
+        restarted.once().await.unwrap(),
+        TickStatus::Deferred
+    ));
+    assert_eq!(fixture.server.calls("/artifacts").len(), 2);
+    assert_eq!(fixture.server.calls("/artifacts")[1], original[0].body);
+    assert_eq!(fixture.actual_reports(), [original[1].body.clone()]);
+    assert!(StateStore::open(&fixture.state)
+        .unwrap()
+        .data
+        .outbox
+        .is_empty());
+}
+
+#[tokio::test]
+async fn inconsistent_or_stale_admission_never_turns_into_ordinary_delivery_retries() {
+    for code in [
+        "acknowledgement_inconsistent",
+        "outcome_unknown",
+        "stale_lease",
+    ] {
+        let fixture = Fixture::new(false).await;
+        fixture.server.delivery_attempts.store(1, Ordering::SeqCst);
+        *fixture.server.artifact_receipt.lock().unwrap() = Some(json!({
+            "error":{"code":code,"message":"controlled authority rejection, not a retryable missing admission"}
+        }));
+        assert!(
+            matches!(
+                fixture.tick(fixture.original.clone()).await.unwrap(),
+                TickStatus::Rejected
+            ),
+            "{code}"
+        );
+        let original = StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .clone();
+        assert_eq!(fixture.server.calls("/artifacts").len(), 1, "{code}");
+        assert!(fixture.actual_reports().is_empty(), "{code}");
+        // Once seen as a partial/older authority, the original bodies must stay
+        // quarantined. reset the fake receipt alone must not silently re-release.
+        *fixture.server.artifact_receipt.lock().unwrap() = None;
+        // Intentionally do not replace the HOLD schedule: doing so would bypass
+        // the safety property being checked, not simulate a valid new admission.
+        let mut restarted = fixture.runner().await;
+        restarted.start().await.unwrap();
+        assert!(matches!(
+            restarted.once().await.unwrap(),
+            TickStatus::Deferred
+        ));
+        let persisted = StateStore::open(&fixture.state).unwrap();
+        assert_eq!(persisted.data.outbox.len(), 2, "{code}");
+        for (previous, item) in original.iter().zip(&persisted.data.outbox) {
+            assert_eq!(item.body, previous.body, "{code}");
+            assert_eq!(item.next_attempt_at, "+999999999-12-31T23:59:59Z", "{code}");
+        }
+        assert_eq!(fixture.server.calls("/artifacts").len(), 1, "{code}");
+        assert!(fixture.actual_reports().is_empty(), "{code}");
+    }
 }
