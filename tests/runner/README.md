@@ -54,7 +54,7 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 
 第一次正常读取保留原Artifact及Report pending；随后原实现会仅凭同ID重发旧证据。当前修复要求先重新验证binding、Grant/root、Lease及完整输入，并由`StateStore::start`比对原始logical digest（ID、lease ID/epoch、grant digest、kind、path与content）。变更kind/content并附cancel flag、epoch改变、撤销Grant、非法Lease和缺失digest的负例均拒绝，**原Assignment/completion/outbox/cursor与effect文件数保持，根本不发新的ack/report/artifact或取消报告**。普通resolve后的正确packet只重放原outbox，不额外执行；已经取消的工作不会因新变体或正常replay再次制造cancel ACK/report。
 
-证据从首次真实执行、负例保留，到到期重放时逐一行比对原body、artifact/effect/request IDs。已为这个`completed_replay` **2/2**运行，且已验证移除了自有临时baseline worktree/target；`1d834eb`的临时离 线worktree中同一测试[真实RED](/tmp/loom-native-replay-red.log)。当前[Rust workspace执行](/tmp/loom-native-replay-rust-regression.log)按target汇总为**186通过/0失败/1 opt-in硬件probe忽略**（不把Node/Vue等其它套件混入Rust数量）。另外实际`node scripts/bare-integration.mjs`仍完成真实Concierge签署注册、注册Binding/Grant、原子文件写入、取消及重开；这不是真实中心发出恶意poll、OS crash或任意unknown/running等其它回放的证明，也不推导全局精确一次。
+证据从首次真实执行、负例保留，到到期重放时逐一行比对原body、artifact/effect/request IDs。上述两项完成回放已于前一增量单独通过；当前同一文件连同后续调度case共 **4/4**，临时baseline均已移除；且已验证移除了自有临时baseline worktree/target；`1d834eb`的临时离 线worktree中同一测试[真实RED](/tmp/loom-native-replay-red.log)。当前[Rust workspace执行](/tmp/loom-native-replay-rust-regression.log)按target汇总为**186通过/0失败/1 opt-in硬件probe忽略**（不把Node/Vue等其它套件混入Rust数量）。另外实际`node scripts/bare-integration.mjs`仍完成真实Concierge签署注册、注册Binding/Grant、原子文件写入、取消及重开；这不是真实中心发出恶意poll、OS crash或任意unknown/running等其它回放的证明，也不推导全局精确一次。
 
 入口文件为 [completed_replay.rs](../../crates/node/tests/completed_replay.rs)。所有生成的身份、目录及临时端口专属测试，没有使用现有DSH profile。
 
@@ -66,11 +66,19 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 
 ## Bare Rust：损坏调度时间与hold不可再误报已交付
 
-仍用 `cargo test --locked -p loom-node --test completed_replay -- --test-threads=1`，当前**3/3**。由真正本机读取实际生成Artifact/Report，在确认其持久pending后将两条`next_attempt_at`改成同一不可解析字符串。原代码只跳过无法parse的字符串，最终`TickStatus::Delivered`：见[pre-fix RED](/tmp/loom-invalid-schedule-red.log)。修复在**整个queue的任何投递尝试前**拒绝非哨兵的非法字符串，报告`invalid durable outbox schedule`；item/body/attempt/error及Assignment/completion/cursor均保持，没有新的Artifact/Report HTTP或file effect。坏项会让你明确核对并停止本次dispatch，而不是把它直接当作立即允许上传。
+仍用 `cargo test --locked -p loom-node --test completed_replay -- --test-threads=1`，同一文件全部case现**4/4**；以下是继完成回放后新增的非法调度与hold控制。由真正本机读取实际生成Artifact/Report，在确认其持久pending后将两条`next_attempt_at`改成同一不可解析字符串。原代码只跳过无法parse的字符串，最终`TickStatus::Delivered`：见[pre-fix RED](/tmp/loom-invalid-schedule-red.log)。修复在**整个queue的任何投递尝试前**拒绝非哨兵的非法字符串，报告`invalid durable outbox schedule`；item/body/attempt/error及Assignment/completion/cursor均保持，没有新的Artifact/Report HTTP或file effect。坏项会让你明确核对并停止本次dispatch，而不是把它直接当作立即允许上传。
 
 StateStore两个既有写入路径统一使用同一个未变serialized permanent-hold哨兵；它并非新权限位。真实`mark_delivery_error(false)`形成的hold保留原正文、错误和cursor，不向上传端点再次发送。60秒合法future也为Deferred。原有优先级保留：可重试失败→Deferred；本轮真正的不可重试拒绝→Rejected；仅剩future/hold而非空的queue →Deferred，只有空队列才Delivered。一个非法调度字符串可能阻止该轮其余投递，不宣称后续无阻塞自动修复。
 
-本变更只针对**字符串形式的非法调度值**；legacy decode中缺失或非字符串时间默认now的行为未改写，也未被宣称已完整验证。真实loopback执行/存储不冒充中央签发，真实Rust bare集成另行保留。当前[Cargo记录](/tmp/loom-outbox-schedule-rust.log)逐target汇总为**187通过/0失败/1 opt-in probe忽略**；Node39/Vue155 + `vue-tsc`均通过。private Node root与listener均为fixture并回收，无production Dsh Profile改动。
+下一段已继续明确处理缺失或非字符串字段的open-time拒绝；两类问题都不再隐式变为当前时间，但仍未宣称对任意其它损坏状态完成自动修复。真实loopback执行/存储不冒充中央签发，真实Rust bare集成另行保留。当前[Cargo记录](/tmp/loom-outbox-schedule-rust.log)逐target汇总为**187通过/0失败/1 opt-in probe忽略**；Node39/Vue155 + `vue-tsc`均通过。private Node root与listener均为fixture并回收，无production Dsh Profile改动。
+
+## Bare Rust：缺失/非字符串调度字段不再自动补now
+
+同一命令 `cargo test --locked -p loom-node --test completed_replay -- --test-threads=1`，整体现为**4/4**。从一次真正本机读取的两笔持久pending出发，逐一破坏一笔副本的`next_attempt_at`类型：设`null`、设JSON整数或删除它。原实现会把这些情形全部映射成当前UTC时间，随后正常open的flush将其写回；此前[RED](/tmp/loom-deadline-type-red.log)实际观测到了被替换的新时间，而不只是推测该分支可能危险。
+
+现在decode 明确要求 `outbox.next_attempt_at must be a persistent timestamp string`，缺失/非字符串返回错误，在StateStore构造/flush前停止，所以raw-file bytes逐例保持，新Artifact/Report调用均是**零新增**。错误不是自动修复；恢复原始JSON后才能成功重开，测试逐例这样做并确认原有的两笔pending继续可作历史表示。普通有效时间、已有quarantine、两类完成/取消replay均没有回归。
+
+Bare v1从第一版的编码就带这个时间字段，没有检测到支持的缺失期限旧格式。故这次**不是改变schema或利用一个真实中心发布异常数据**，而是让未知的本机恢复结构显式需修正。原始字段损坏可能使Node无法启动直到operator修正，不能用这点推断完整文件校验、其它客户端的时间策略或跨机器幂等。没有全局DSH profile变更。[当前Rust结果](/tmp/loom-deadline-structure-rust.log)为**188 passed / 0 failed / 1 opt-in probe ignored**；[实际Native Bare集成](/tmp/loom-deadline-structure-bare.log)仍PASS。
 
 ## 用户 UI 撤权 + 两次未领取空poll的补充证据
 

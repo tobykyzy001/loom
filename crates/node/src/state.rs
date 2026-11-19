@@ -350,8 +350,8 @@ fn decode_outbox(value: &Value) -> Result<OutboxItem> {
         attempts: value["attempts"].as_u64().unwrap_or(0),
         next_attempt_at: value["next_attempt_at"]
             .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            .context("outbox.next_attempt_at must be a persistent timestamp string")?
+            .to_owned(),
         last_error: value["last_error"].as_str().map(str::to_owned),
     })
 }

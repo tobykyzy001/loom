@@ -407,6 +407,68 @@ async fn native_completed_replay_checks_full_input_before_evidence_delivery() {
 }
 
 #[tokio::test]
+async fn non_string_or_missing_outbox_schedule_never_becomes_an_immediate_due() {
+    let fixture = Fixture::new(false).await;
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Succeeded
+    ));
+    let path = fixture.state.join("node-state.json");
+    let valid: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let artifact_attempts = fixture.server.calls("/artifacts").len();
+    let report_attempts = fixture.server.calls("/reports").len();
+
+    for invalid in [Some(Value::Null), Some(json!(17)), None] {
+        let mut stored = valid.clone();
+        if let Some(value) = invalid {
+            stored["outbox"][0]["next_attempt_at"] = value;
+        } else {
+            assert!(stored["outbox"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_attempt_at")
+                .is_some());
+        }
+        atomic_json(&path, &stored).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = match StateStore::open(&fixture.state) {
+            Ok(state) => panic!(
+                "an invalid schedule must not become the immediate deadline {}",
+                state.data.outbox[0].next_attempt_at
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("outbox.next_attempt_at must be a persistent timestamp string"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a rejected structural scheduling field must not be silently normalized on disk"
+        );
+        assert_eq!(
+            fixture.server.calls("/artifacts").len(),
+            artifact_attempts,
+            "an unreadable queue cannot send an Artifact merely because its deadline is now"
+        );
+        assert_eq!(
+            fixture.server.calls("/reports").len(),
+            report_attempts,
+            "an unreadable queue cannot send its Report either"
+        );
+        atomic_json(&path, &valid).unwrap();
+    }
+    assert_eq!(
+        StateStore::open(&fixture.state).unwrap().data.outbox.len(),
+        2,
+        "the original valid pending evidence remains openable after each negative fixture"
+    );
+}
+
+#[tokio::test]
 async fn invalid_durable_outbox_schedule_is_not_delivered() {
     let fixture = Fixture::new(false).await;
     assert!(matches!(
