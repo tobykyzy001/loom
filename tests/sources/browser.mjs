@@ -26,6 +26,12 @@ let server, context, preview
 const browserFailures = []
 const requests = []
 const completed = []
+const expectedNegativeResponses = []
+const expectedNegativeResponse = (response, status) => {
+  const url = new URL(response.url())
+  return expectedNegativeResponses.some(expected => expected.method === response.request().method()
+    && expected.path === url.pathname && expected.status === status)
+}
 const scalar = sql => {
   const db = new DatabaseSync(join(root, 'concierge', 'loom.sqlite3'), { readOnly: true })
   try { return Object.values(db.prepare(sql).get())[0] } finally { db.close() }
@@ -79,6 +85,14 @@ async function run() {
       const initialUnauthorized = completed.filter(response => response.path === '/api/v1/bootstrap' && response.method === 'GET')
       if (initialUnauthorized.length === 1 && initialUnauthorized[0].status === 401
         && requests.filter(request => request.path === '/api/v1/bootstrap' && request.method === 'GET').length === 1) return
+      const failedResource = /^Failed to load resource: the server responded with a status of (\d{3}) \(.+\)$/.exec(text)
+      const consoleUrl = new URL(message.location().url)
+      const consolePath = consoleUrl.pathname + consoleUrl.search
+      const expectedConsoleResponse = consoleUrl.origin === appOrigin && completed.find(response => response.path === consolePath
+        && response.status === Number(failedResource?.[1])
+        && expectedNegativeResponses.some(expected => expected.method === response.method
+          && expected.path === consolePath && expected.status === response.status))
+      if (failedResource && expectedConsoleResponse) return
       failure(`CONSOLE ${text.slice(0, 800)}`)
     }
   })
@@ -109,7 +123,8 @@ async function run() {
         if (requests.length > 30_000 || completed.length > 30_000) throw new Error('Unbounded browser request capture')
         if (status >= 400) {
           const expectsInitialAuthFailure = requests.filter(request => request.path === '/api/v1/bootstrap' && request.method === 'GET').length === 1
-          if (!(status === 401 && url.pathname === '/api/v1/bootstrap' && expectsInitialAuthFailure)) failure(`HTTP ${status} ${url.pathname}`)
+          if (!(status === 401 && url.pathname === '/api/v1/bootstrap' && expectsInitialAuthFailure)
+            && !expectedNegativeResponse(response, status)) failure(`HTTP ${status} ${url.pathname}`)
         }
       }
     } catch (error) { failure(error) }
@@ -712,9 +727,183 @@ async function run() {
   assert.equal((await events()).filter(event => event.content === thirdObjective)[0].task_ticket_id, null)
   await page.getByRole('button', { name: '返回检查', exact: true }).click()
   await page.getByRole('button', { name: '关闭 Source 面板', exact: true }).click()
+
+  // A fourth Source Ticket is prepared against a distinct, legitimate control-
+  // plane Grant. Revoke that exact Grant only after the actual approval modal is
+  // open: the deferred browser POST must recheck authority before Attempt zero.
+  console.error('SOURCE REVOKED GRANT APPROVAL stage')
+  // Use the same deterministic offline-placement fixture as the original third
+  // waiting Ticket; the real Node heartbeat below is its only restoration path.
+  assert.equal(mutate('UPDATE nodes SET status=? WHERE id=? AND installation_id=?', 'offline', runner.nodeId, runner.installationId).changes, 1)
+  const priorTicketIds = [ticketId, secondTicketId, thirdTicketId]
+  const beforeNoWorkTickets = new Map(await Promise.all(priorTicketIds.map(async id =>
+    [id, structuredClone(await admin.get(`/api/v1/tickets/${encodeURIComponent(id)}`))])))
+  const beforeNoWorkEvent = structuredClone((await events()).find(event => event.id === thirdEvent.id))
+  const preApprovalGrant = await admin.post('/api/v1/grants', {
+    project_id: projectId, project_binding_id: binding.id, node_id: runner.nodeId, worker_id: 'default', operations: ['read'] })
+  assert.notEqual(preApprovalGrant.grant.id, grant.grant.id)
+  assert.notEqual(preApprovalGrant.grant.id, replacementGrant.grant.id)
+  assert.equal(preApprovalGrant.grant.revoked_at, null)
+  assert.ok(preApprovalGrant.grant.operations.includes('read'))
+  assert.equal(captures('/api/v1/grants').length, 0, 'Only the independent admin fixture creates this Grant')
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.locator('.conversation-column').waitFor()
+  const fourthSourceObjective = ' The fourth Source approval must reject its newly revoked Grant before work。 '
+  const fourthSourceId = await recordMessage(page, fourthSourceObjective)
+  assert.equal(fourthSourceId, sourceId)
+  await prepareSourceWork(page, { ...scope, grantId: preApprovalGrant.grant.id, contains: fourthSourceObjective })
+  const fourthAccepted = await confirmSourceWork(page, { duplicate: false })
+  const fourthTicketId = fourthAccepted.ticket.id
+  assert.equal(fourthAccepted.duplicate, false)
+  assert.equal(fourthAccepted.task_created, true)
+  assert.equal(fourthAccepted.ticket.id, fourthTicketId)
+  assert.equal(fourthAccepted.ticket.status, 'waiting_approval')
+  assert.equal(fourthAccepted.ticket.attempt, 0)
+  const beforeNoWorkTicket = structuredClone(await admin.get(`/api/v1/tickets/${encodeURIComponent(fourthTicketId)}`))
+  assert.equal(beforeNoWorkTicket.project_id, projectId)
+  assert.equal(beforeNoWorkTicket.objective, fourthSourceObjective)
+  assert.equal(beforeNoWorkTicket.kind, 'read_summary')
+  assert.equal(beforeNoWorkTicket.relative_path, 'input.txt')
+  assert.equal(beforeNoWorkTicket.grant_id, preApprovalGrant.grant.id)
+  assert.equal(beforeNoWorkTicket.grant_digest, preApprovalGrant.grant.digest)
+  assert.notEqual(beforeNoWorkTicket.grant_id, thirdTicket.grant_id)
+  assert.equal(beforeNoWorkTicket.node_id, runner.nodeId)
+  assert.equal(beforeNoWorkTicket.installation_id, runner.installationId)
+  assert.equal(beforeNoWorkTicket.worker_id, 'default')
+  assert.equal(beforeNoWorkTicket.cancel_requested, false)
+  for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual(beforeNoWorkTicket[field], [])
+  const fourthHeartbeat = await runner.client.heartbeat({ capabilities: runner.capabilities, workers: [{ worker_id: 'default' }], inventory: { project_roots: { [projectId]: projectRoot } } })
+  assert.equal(fourthHeartbeat.accepted, true)
+  assert.equal(scalar(`SELECT status FROM nodes WHERE id='${runner.nodeId}' AND installation_id='${runner.installationId}'`), 'online')
+  assert.ok(Date.parse(scalar(`SELECT last_heartbeat FROM nodes WHERE id='${runner.nodeId}' AND installation_id='${runner.installationId}'`)) >= Date.parse(beforeNoWorkTicket.created_at))
+  assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(fourthTicketId)}`), beforeNoWorkTicket,
+    'A real heartbeat restores placement without approving or assigning the waiting Ticket')
+  const fourthEvent = structuredClone((await events()).find(event => event.id === fourthAccepted.source_event_id))
+  assert.equal(fourthEvent.content, fourthSourceObjective)
+  assert.equal(fourthEvent.ticket_id, null)
+  assert.equal(fourthEvent.task_ticket_id, fourthTicketId)
+  assert.equal(fourthEvent.creation_kind, 'explicit_task_created_after_intake')
+  assert.equal(fourthEvent.task_spec.ticket_id, fourthTicketId)
+  assert.equal(fourthEvent.task_spec.event_request_digest, fourthEvent.payload_digest)
+  assert.equal(fourthEvent.task_spec.project_id, projectId)
+  assert.equal(fourthEvent.task_spec.grant_id, preApprovalGrant.grant.id)
+  assert.equal(fourthEvent.task_spec.grant_digest, preApprovalGrant.grant.digest)
+  assert.equal(fourthEvent.task_spec.project_binding_id, binding.id)
+  assert.equal(fourthEvent.task_spec.root_scope, projectRoot)
+  assert.equal(fourthEvent.task_spec.node_id, runner.nodeId)
+  assert.equal(fourthEvent.task_spec.installation_id, runner.installationId)
+  assert.equal(fourthEvent.task_spec.worker_id, 'default')
+  assert.equal(fourthEvent.task_spec.kind, 'read_summary')
+  assert.equal(fourthEvent.task_spec.relative_path, 'input.txt')
+  assert.equal(fourthEvent.task_spec.digest, fourthAccepted.task_digest)
+  const fourthApprovalPath = `/api/v1/tickets/${fourthTicketId}/approval`
+  const fourthApprovalReason = 'Review the original bounded source reader and its current Grant.'
+  assert.equal(captures(fourthApprovalPath).length, 0)
+  if (await page.getByRole('button', { name: '关闭 Source 面板', exact: true }).count()) {
+    await page.getByRole('button', { name: '关闭 Source 面板', exact: true }).click()
+  }
+  await openSourcePanel(page)
+  await page.locator('.source-work-panel').getByRole('button', { name: '打开单 Source / thread', exact: true }).click()
+  const fourthHistoricalSource = page.locator('.source-event-card').filter({ hasText: fourthSourceObjective })
+  await fourthHistoricalSource.waitFor()
+  const openFourth = page.waitForResponse(response => new URL(response.url()).pathname === `/api/v1/tickets/${fourthTicketId}`
+    && response.request().method() === 'GET')
+  await fourthHistoricalSource.getByRole('button', { name: `打开独立任务：${fourthTicketId}`, exact: true }).click()
+  assert.equal((await openFourth).status(), 200)
+  await page.locator('.source-work-modal').waitFor({ state: 'hidden' })
+  const fourthDetail = page.locator('.ticket-detail')
+  await fourthDetail.locator('.ticket-id').getByText(fourthTicketId, { exact: false }).waitFor()
+  assert.equal(await fourthDetail.locator('.ticket-id').innerText(), `Ticket / ${fourthTicketId}`)
+  await fourthDetail.getByText('等待批准', { exact: true }).waitFor()
+  assert.equal(captures(fourthApprovalPath).length, 0, 'Historical navigation never approves by itself')
+  await fourthDetail.getByRole('button', { name: '检查并决定', exact: true }).click()
+  await page.locator('#approval-reason').fill(fourthApprovalReason)
+  await fourthDetail.getByRole('button', { name: '批准，仅限这一次', exact: true }).click()
+  await page.getByText('批准这次工作区操作？', { exact: true }).waitFor()
+  assert.equal(await page.locator('.confirm-modal').innerText().then(text => text.includes(fourthApprovalReason) && text.includes('input.txt')), true)
+  const revokePreApproval = await admin.post(`/api/v1/grants/${encodeURIComponent(preApprovalGrant.grant.id)}/revoke`, {})
+  assert.equal(revokePreApproval.revoked, true)
+  assert.equal(revokePreApproval.grant_id, preApprovalGrant.grant.id)
+  assert.equal(revokePreApproval.duplicate, false)
+  assert.equal(revokePreApproval.grant_version, 2)
+  const revokedPreApprovalGrant = (await admin.get('/api/v1/grants')).grants.find(row => row.id === preApprovalGrant.grant.id)
+  assert.equal(revokedPreApprovalGrant.digest, preApprovalGrant.grant.digest)
+  assert.ok(revokedPreApprovalGrant.revoked_at)
+  assert.equal(revokedPreApprovalGrant.version, 2)
+  const afterRevokeBeforeApproval = structuredClone(await admin.get(`/api/v1/tickets/${encodeURIComponent(fourthTicketId)}`))
+  assert.equal(afterRevokeBeforeApproval.status, 'waiting_approval')
+  assert.equal(afterRevokeBeforeApproval.attempt, 0)
+  assert.equal(afterRevokeBeforeApproval.cancel_requested, false)
+  for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual(afterRevokeBeforeApproval[field], [])
+  const approvalResponse = page.waitForResponse(response => new URL(response.url()).pathname === fourthApprovalPath
+    && response.request().method() === 'POST')
+  approvalResponse.catch(error => console.error('SOURCE REVOKED APPROVAL WAIT', error.message))
+  // Listener registration precedes event delivery; the actual response and its
+  // sole exact capture below still have to prove that this expected error came.
+  expectedNegativeResponses.push({ method: 'POST', path: fourthApprovalPath, status: 400 })
+  await page.getByRole('button', { name: '确认一次性批准', exact: true }).click()
+  const refusedApproval = await approvalResponse
+  const refusedApprovalStatus = refusedApproval.status()
+  assert.equal(refusedApprovalStatus, 400, `Revoked authority must reject the actual POST with its documented 400, not duplicate an unrelated failure: ${refusedApprovalStatus}`)
+  const refusedApprovalBody = await refusedApproval.json()
+  assert.equal(refusedApprovalBody.error.code, 'invalid_request')
+  assert.match(refusedApprovalBody.error.message, /Grant revoked/)
+  assert.equal(captures(fourthApprovalPath).length, 1, 'Exactly one unchanged actual approval POST reached the center')
+  const refusedApprovalRequest = captures(fourthApprovalPath)[0]
+  assert.deepEqual(refusedApprovalRequest.body, {
+    approval_id: refusedApprovalRequest.body.approval_id, decision: 'approve', reason: fourthApprovalReason })
+  assert.deepEqual(Object.keys(refusedApprovalRequest.body).sort(), ['approval_id', 'decision', 'reason'])
+  assert.match(refusedApprovalRequest.body.approval_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+  const approvalError = page.locator('.confirm-modal .form-error[role="alert"]')
+  await approvalError.waitFor()
+  assert.match(await approvalError.innerText(), /Grant revoked/)
+  assert.match(await page.locator('.confirm-modal').innerText(), /Grant revoked/, 'A failed POST must retain the real modal error rather than optimistic success')
+  assert.equal(await page.getByRole('button', { name: '返回检查', exact: true }).isVisible(), true)
+  await page.getByRole('button', { name: '确认一次性批准', exact: true }).waitFor({ state: 'visible' })
+  await page.waitForFunction(() => [...document.querySelectorAll('.confirm-modal button')].some(button => button.textContent?.trim() === '确认一次性批准' && !button.disabled))
+  const confirmedRevocationFailure = (await admin.get('/api/v1/grants')).grants.find(row => row.id === preApprovalGrant.grant.id)
+  assert.ok(confirmedRevocationFailure.revoked_at)
+  assert.equal(confirmedRevocationFailure.version, 2)
+  assert.equal(confirmedRevocationFailure.digest, preApprovalGrant.grant.digest)
+  assert.equal(captures(fourthApprovalPath).length, 1)
+  const approvalGrants = (await admin.get(`/api/v1/audit?ticket_id=${encodeURIComponent(fourthTicketId)}`)).audit.filter(entry => entry.action === 'task.approval_granted')
+  assert.equal(approvalGrants.length, 0)
+  const thirdApprovalGrantCount = (await admin.get(`/api/v1/audit?ticket_id=${encodeURIComponent(thirdTicketId)}`)).audit.filter(entry => entry.action === 'task.approval_granted').length
+  assert.equal(thirdApprovalGrantCount, 1, 'The historical successful approval remains exactly once')
+  const afterRefusalNoWork = await runner.pollAndRun()
+  assert.equal(afterRefusalNoWork.status, 'idle')
+  assert.equal(afterRefusalNoWork.assignmentId, undefined)
+  await runner.client.dispatchOutbox()
+  const refusedFourthTicket = structuredClone(await admin.get(`/api/v1/tickets/${encodeURIComponent(fourthTicketId)}`))
+  assert.deepEqual(refusedFourthTicket, afterRevokeBeforeApproval)
+  assert.equal(refusedFourthTicket.status, 'waiting_approval')
+  assert.equal(refusedFourthTicket.attempt, 0)
+  assert.equal(refusedFourthTicket.cancel_requested, false)
+  assert.equal(refusedFourthTicket.grant_id, preApprovalGrant.grant.id)
+  assert.equal(refusedFourthTicket.grant_digest, preApprovalGrant.grant.digest)
+  assert.equal(refusedFourthTicket.node_id, runner.nodeId)
+  assert.equal(refusedFourthTicket.installation_id, runner.installationId)
+  assert.equal(refusedFourthTicket.worker_id, 'default')
+  for (const field of ['assignments', 'reports', 'artifacts', 'effects']) assert.deepEqual(refusedFourthTicket[field], [])
+  const beforeCloseThirdApprovalPosts = captures(rejectPath).length
+  await page.getByRole('button', { name: '返回检查', exact: true }).click()
+  await page.locator('.confirm-modal').waitFor({ state: 'hidden' })
+  await fourthDetail.getByText('等待批准', { exact: true }).waitFor()
+  assert.equal(captures(fourthApprovalPath).length, 1)
+  assert.equal(captures(rejectPath).length, beforeCloseThirdApprovalPosts, 'Closing an error never replays another Ticket approval')
+  assert.equal((await events()).find(event => event.id === fourthEvent.id).task_ticket_id, fourthTicketId)
+  assert.deepEqual((await events()).find(event => event.id === fourthEvent.id).task_spec, fourthEvent.task_spec)
+  assert.deepEqual((await events()).find(event => event.id === thirdEvent.id), beforeNoWorkEvent)
+  for (const [id, before] of beforeNoWorkTickets) {
+    assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(id)}`), before,
+      `The independent Grant and rejected fourth approval cannot mutate completed Ticket ${id}`)
+  }
+  assert.deepEqual(await admin.get(`/api/v1/tickets/${encodeURIComponent(fourthTicketId)}`), refusedFourthTicket)
   assert.deepEqual(browserFailures, [])
-  assert.ok(completed.every(response => response.status < 400 || (response.status === 401 && response.path === '/api/v1/bootstrap')))
-  assert.equal(scalar('SELECT COUNT(*) FROM tickets'), 3)
+  assert.ok(completed.every(response => response.status < 400
+    || (response.status === 401 && response.path === '/api/v1/bootstrap')
+    || (response.method === 'POST' && response.path === fourthApprovalPath && response.status === refusedApprovalStatus)))
+  assert.equal(scalar('SELECT COUNT(*) FROM tickets'), 4)
   const finalDetails = []
   for (const id of [ticketId, secondTicketId, thirdTicketId]) {
     const detail = await admin.get(`/api/v1/tickets/${encodeURIComponent(id)}`)
@@ -732,8 +921,8 @@ async function run() {
   assert.equal(finalDetails.flatMap(detail => detail.reports).filter(report => report.state === 'succeeded').length, 3)
   assert.equal(scalar('SELECT COUNT(*) FROM artifacts'), 3)
   assert.equal(scalar('SELECT COUNT(*) FROM effects'), 3)
-  assert.equal(scalar('SELECT COUNT(*) FROM source_work_specs'), 3)
-  assert.equal((await events()).filter(event => event.creation_kind === 'explicit_task_created_after_intake').length, 3)
+  assert.equal(scalar('SELECT COUNT(*) FROM source_work_specs'), 4)
+  assert.equal((await events()).filter(event => event.creation_kind === 'explicit_task_created_after_intake').length, 4)
   assert.equal(captures('/api/v1/grants').length, 0, 'Source work must not create a Grant')
   assert.equal(captures('/api/v1/project-bindings').length, 0, 'Source work must not create/rebind a root')
   assert.equal((await admin.get('/api/v1/audit/verify')).valid, true)
@@ -758,7 +947,15 @@ async function run() {
     approval_source_authority_preserved_without_new_grant: true,
     approval_navigation_preserved_after_in_flight: approvalNavigationWasProjects,
     approval_keyboard_navigation_actual: true,
-    three_source_tasks_three_immutable_specs: true,
+    three_executed_source_tasks_preserved_by_fourth_waiting_ticket: true,
+    approval_confirmation_revoked_grant_rejected_before_first_execution: {
+      ticket_id: fourthTicketId, status: refusedFourthTicket.status, attempt: refusedFourthTicket.attempt,
+      grant_id: refusedFourthTicket.grant_id, grant_digest: refusedFourthTicket.grant_digest,
+      approval_http_status: refusedApprovalStatus, approval_request_count: captures(fourthApprovalPath).length,
+      assignments: refusedFourthTicket.assignments.length, reports: refusedFourthTicket.reports.length,
+      artifacts: refusedFourthTicket.artifacts.length, effects: refusedFourthTicket.effects.length,
+      cancel_requested: refusedFourthTicket.cancel_requested, approval_granted_audits: approvalGrants.length,
+      poll_status: afterRefusalNoWork.status, actual_modal_error_sequence: true },
     revoke_and_mutated_current_grant_no_new_job: true,
     narrow_viewport_real_column_no_overflow: true, screenshots: [join(root, 'source-work-desktop.png'), join(root, 'source-work-narrow.png')],
     not_claimed: ['physical mobile/browser lifecycle', 'actual IM/OAuth', 'Live LLM/intent inference', 'DSH code Agent',
