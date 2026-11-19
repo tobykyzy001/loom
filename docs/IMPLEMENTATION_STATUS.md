@@ -2,6 +2,16 @@
 
 Updated: 2026-11-19.
 
+## Authenticated heartbeat status validation now fails before storage mutation
+
+Previously the controller used `body["status"].as_str().unwrap_or("online")` without constraining the input. A registered installation with a legitimate transport credential could write unsupported strings, or non-string/null/array status fields, even though the string decoder falls back to a normal `online` default for those fields. This could update last-seen registration data and make an otherwise unknown status visible as a recent online snapshot.
+
+The actual mounted node handler now matches the raw input explicitly: missing status retains the default `online`; only the strings `online`, `busy`, `degraded` and `offline` are permitted. Invalid text or non-string values get `400 invalid_request` **before any registry update is executed**. Self-reported offline is still distinct from revocation, which remains the controller's `revoked_at` fact. No additional permission/Provider or management command is introduced here.
+
+A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored matching Node-token hash to prove bad states never alter the complete registration row/timestamp, while `online/busy/degraded/offline` still succeed. The real signed-node README driver then rotates through `revoked`, an unknown text token, `null` and `17` with this installation's **actual registered transport credential** (not an administrator fallback), checks the HTTP error and byte-for-byte unchanged public snapshot, and continues the existing stale/390px/revocation flow. `/tmp/loom-node-staleness-proof.json` now contains **six** PASS checks. Total of 143 previous tests is **144** plus the ordinary workspace integration tests; complete strict clippy, Rust tests and the 208-web baseline are passing.
+
+Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
+
 ## Vue keys preserve each independent Installation
 
 `DevicesView` previously keyed all rows for one Node ID merely by `node.id`, even though the registry deliberately permits several Installation IDs, workers and heartbeat histories for that Node ID. Each installation now has its own `nodeIdentityKey = (node_id ?? id)/installation_id`, plus an exact `data-installation-id` selector. Legacy/alias ID handling and source-presence semantics remain unchanged.

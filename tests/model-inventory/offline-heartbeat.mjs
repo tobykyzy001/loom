@@ -127,8 +127,27 @@ try {
   pass('same owned Edge profile reopens offline evidence at 390px without claiming mobile lifecycle')
   await context.close(); context = null
 
+  const malformedBefore = (await admin.get('/api/v1/nodes')).nodes[0]
+  for (const invalidStatus of ['revoked', 'not-a-presence-state', null, 17]) {
+    const body = {
+      protocol: 'loom.node.v1', node_id: identity.nodeId, installation_id: identity.installationId,
+      request_id: crypto.randomUUID(), status: invalidStatus,
+      capabilities: [], workers: [worker], inventory: {}, timestamp: new Date().toISOString(),
+    }
+    // Deliberately bypass the JS client enum, addressing the actual API with
+    // this enrolled Node's own credential rather than an admin fallback.
+    await admin.post('/api/v1/nodes/heartbeat', body, { token: identity.token }).then(
+      () => assert.fail('malformed heartbeat status must not be accepted'),
+      error => {
+        assert.equal(error.status, 400)
+        assert.equal(error.code, 'invalid_request')
+      },
+    )
+  }
+  assert.deepEqual((await admin.get('/api/v1/nodes')).nodes[0], malformedBefore)
+  pass('malformed status literals/non-scalars cannot refresh registration or overwrite data')
   // An authenticated management action uses the existing client identity;
-  // the following request independently uses this fixture's own Node token.
+  // the following request independently uses this fixture's actual Node token.
   const revocation = await fetch(`${server.baseUrl}/api/v1/nodes/${encodeURIComponent(identity.nodeId)}/revoke`, {
     method: 'POST', redirect: 'error',
     headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' },

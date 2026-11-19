@@ -3200,6 +3200,62 @@ mod tests {
         assert_eq!(value["needs_review"], false);
     }
 
+    #[tokio::test]
+    async fn malformed_heartbeat_status_cannot_refresh_or_overwrite_the_current_registration() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        const TOKEN: &str = "fixture-node-own-credential-12345";
+        store.conn().execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,revoked_at,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','fixture-public-key',?1,'online',NULL,'[]','[{\"worker_id\":\"default\",\"status\":\"online\"}]','{}',?2,?2)", [crate::store::hash(TOKEN), "2020-01-01T00:00:00Z".to_owned()]).unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        async fn post_status(app: &Router, status: Value) -> (StatusCode, Value) {
+            let response = app.clone().oneshot(
+                axum::extract::Request::builder().method("POST").uri("/api/v1/nodes/heartbeat")
+                    .header("authorization", "Bearer fixture-node-own-credential-12345")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({
+                        "protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation", "request_id":"heartbeat-fixture",
+                        "status":status, "capabilities":[], "workers":[], "inventory":{},
+                    })).unwrap())).unwrap(),
+            ).await.unwrap();
+            let status = response.status();
+            let body = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            (status, body)
+        }
+        let original = state.lock().unwrap().get("nodes", "node").unwrap().unwrap();
+        for invalid in [json!("revoked"), json!(null), json!(42), json!(["online"])] {
+            let (status, body) = post_status(&app, invalid).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "HTTP body must be rejected without mutation: {body}"
+            );
+            assert_eq!(body["error"]["code"], "invalid_request");
+            assert_eq!(
+                state.lock().unwrap().get("nodes", "node").unwrap(),
+                Some(original.clone())
+            );
+        }
+        for intended in ["online", "busy", "degraded", "offline"] {
+            let (status, body) = post_status(&app, json!(intended)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["accepted"], true);
+            assert_eq!(
+                state.lock().unwrap().get("nodes", "node").unwrap().unwrap()["status"],
+                intended
+            );
+        }
+    }
+
     fn git_fixture_available() -> bool {
         std::process::Command::new("git")
             .arg("--version")
@@ -4764,10 +4820,22 @@ pub(crate) async fn heartbeat(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let (node, installation) = node(&state, &headers, &body)?;
+    let status = match body.get("status") {
+        None => "online",
+        Some(Value::String(value))
+            if matches!(value.as_str(), "online" | "busy" | "degraded" | "offline") =>
+        {
+            value.as_str()
+        }
+        Some(_) => {
+            return Err(ApiError::bad(
+                "Heartbeat status must be the string online, busy, degraded, or offline",
+            ))
+        }
+    };
     let capacity = json!(body["capabilities"]);
     let workers = json!(body["workers"]);
     let inventory = body["inventory"].to_string();
-    let status = body["status"].as_str().unwrap_or("online");
     let store = state.lock()?;
     // A token authenticates an exact Node/Installation, not every row sharing
     // its Node ID. Never let another installation's heartbeat replace the

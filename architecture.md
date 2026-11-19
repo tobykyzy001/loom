@@ -188,6 +188,8 @@ Project 必须区分 **Canonical Remote、Working Tree、Generated Workspace、C
 Clone 是独立操作，知道 Git URL 不代表自动 Clone；凭据留在本机 Broker，本机绝对路径也不作为全局 Artifact URI。
 当前 Git 探测只读取获批项目根中的 Git 事实与 dirty state，剥离 URL 凭据，见[验证边界](tests/projects/README.md)。
 
+进入heartbeat更新之前，Node身份认证之外，只能接受 `online|busy|degraded|offline` 这些实际string状态，缺省按原语义视作online。显式null、非字符串、以及诸如`revoked`之类的伪造状态都返回invalid request，不能直接更新当前row/worker/inventory/时间；仅有合法身份不会使噪声自动进入在线历史。真正撤权仍由中心 `revoked_at` 事实驱动，不能用Node text来替代。
+
 `online/freshness` 是 Controller 在每次读取注册Node时，基于末次认证 heartbeat、撤销事实和当前时间计算的快照；`status`/last_heartbeat 是不可随意重写的原始历史及自报。Vue中的`nodeOnline`尊重这个显式`online=false`，不能因过去`status:'online'`而继续展示在线，也不得以其隐式撤销任何Grant。`revoked_at`必须与陈旧心跳分别表达，末次绝对时间保留；缺失online字段才由已有90秒启发式回退，未对网络/主机进行新探测。真实stale→card/顶栏/resume的proof见 [node presence](tests/model-inventory/README.md#actual-stale-heartbeat-presentation-and-exact-installation-boundary)。这类读取与物理设备离线/断网/多机交接不是同一契约，也不代替Host runtime耗电/重试。
 
 同一公共Node ID能够绑定多个Installation/Profile/Worker，所以设备卡片的VNode key并不能只用Node ID。`nodeIdentityKey`以 `node_id ?? id` 与`installation_id`合并提升真正的安装身份，DOM以`data-installation-id`定位；它不代表多安装共享调用凭据或合并namespace，原来的metadata/旧无Installation记录仍按原字段降级展示。各安装自己的presence/最后heartbeat因此不会借共同Node ID与其它安装互换。已有两次真实注册、只变B末次时间、同库/端口/token重开、新旧B/A bindings全程验收见 [installation driver](tests/browser/installation-ui.mjs)，这两者是logical installation而非新物理机器。
