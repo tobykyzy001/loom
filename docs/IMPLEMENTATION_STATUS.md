@@ -23,7 +23,9 @@ The previously NOT-RUN native descriptor read is now a real execution path, not 
 
 Run `node tests/models/bare-descriptor.mjs`: it builds and launches the actual `loom-node`, explicitly enrolls, applies an approved read Grant/binding, rejects wrong paths and separate invoke-only authorization, reads `model.json` and receives a server-accepted Artifact whose two hashes are checked, and then registers its proof as `registered` with `activation:false`. Duplicate-root input and the valid-but-too-large proof stay `reconciling`/`unknown` with no new Artifact. The same Concierge's subsequent native process restart creates no duplicate report/artifact, and the original fetched bytes/hash remain unchanged. The source project file itself is not modified by valid reading.
 
-Latest proof: `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-bare-descriptor-proof-iZgix1/result.json`, **7 PASS checks**, without tokens/private credentials and explicitly without live models, second machines or DSH Profile. The older TypeScript `rust_bare_executor_support: "NOT RUN"` refers to that script, not this new separately run Rust result.
+The follow-up driver now additionally creates a **real hardlink and then a real symbolic link** to identical bytes in that authorized fixture project, and has the actual bare binary handle each as a separate `model_descriptor`. Each returns unknown/reconciling with zero new Artifact. Aliases are deleted only at their exact owned path and replaced independently, so a missing model.json is not being used as the negative fixture. The original valid Artifact/bytes and both hashes remain unchanged. This confirms the Native nlink/path I/O guards through real assignments, not only direct helper tests.
+
+Latest proof: `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-bare-descriptor-proof-bHv9MW/result.json`, **9 PASS checks**, without tokens/private credentials and explicitly without live models, second machines or DSH Profile. The older TypeScript `rust_bare_executor_support: "NOT RUN"` refers to that script, not this new separately run Rust result.
 
 ## Repeated worker declarations are rejected in the real node heartbeat path
 

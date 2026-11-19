@@ -3,7 +3,7 @@ import { spawn, execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { prepareProject, startRustConcierge, testingRoot } from '../../scripts/fixtures/rust-server.mjs'
@@ -123,6 +123,28 @@ try {
   assert.equal(registered.model.source_ticket_id, ticket.id)
   assert.equal(registered.model.source_assignment_id, ticket.assignments[0].id)
   pass('the native proof is accepted by the existing model registry, registered without activation')
+
+  const sourceFile = join(project, 'model.json')
+  const linkedData = join(project, 'actual-descriptor.json')
+  for (const [name, makeLink] of [
+    ['hard link', () => link(linkedData, sourceFile)],
+    ['symbolic link', () => symlink(linkedData, sourceFile)],
+  ]) {
+    await writeFile(linkedData, sourceBefore, { mode: 0o600 })
+    // Only the exact alias inside this test-owned project, never an outside path.
+    await rm(sourceFile, { force: true })
+    await makeLink()
+    assert.deepEqual(await readFile(sourceFile), sourceBefore)
+    const ambiguous = await create()
+    await bare(state)
+    const result = await admin(`/tickets/${ambiguous.id}`)
+    assert.equal(result.status, 'reconciling', `${name} cannot become a normal descriptor source`)
+    assert.equal(result.artifacts.length, 0)
+    assert.equal(result.reports.at(-1).state, 'unknown')
+    await unlink(sourceFile)
+    assert.deepEqual(await readFile(linkedData), sourceBefore)
+    pass(`${name} to the identical JSON document stays unknown with no new descriptor Artifact`)
+  }
 
   await writeFile(join(project, 'model.json'), '{"schema":"loom.model-descriptor.v1","schema":"loom.model-descriptor.v1","provider":"fixture-local-text","revision":"v1","input_modalities":["text"],"local_only":true}\n', { mode: 0o600 })
   const malformed = await create()
