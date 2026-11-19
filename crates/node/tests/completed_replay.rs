@@ -31,6 +31,8 @@ struct TransportState {
     calls: Arc<Mutex<Vec<Call>>>,
     delivery_attempts: Arc<AtomicUsize>,
     acknowledgement: Arc<Mutex<Option<Value>>>,
+    artifact_receipt: Arc<Mutex<Option<Value>>>,
+    report_receipt: Arc<Mutex<Option<Value>>>,
 }
 
 struct Transport {
@@ -50,6 +52,8 @@ impl TransportState {
             calls: Arc::new(Mutex::new(Vec::new())),
             delivery_attempts: Arc::new(AtomicUsize::new(0)),
             acknowledgement: Arc::new(Mutex::new(None)),
+            artifact_receipt: Arc::new(Mutex::new(None)),
+            report_receipt: Arc::new(Mutex::new(None)),
         };
         let app = Router::new()
             .fallback(post(answer))
@@ -103,9 +107,7 @@ async fn answer(
             Json(json!({"assignment":state.packet.lock().unwrap().clone()})),
         );
     }
-    if path.ends_with("/artifacts") || path.ends_with("/reports") {
-        // First attempt leaves the original, real bare outbox pending. Any next
-        // delivery must still have exactly those original bodies/request IDs.
+    if path.ends_with("/artifacts") {
         if state.delivery_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -114,10 +116,30 @@ async fn answer(
                 ),
             );
         }
-        return (
-            StatusCode::OK,
-            Json(json!({"accepted":true,"duplicate":true})),
-        );
+        let receipt = state
+            .artifact_receipt
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| json!({"artifact_id":body["artifact_id"],"duplicate":true}));
+        return (StatusCode::OK, Json(receipt));
+    }
+    if path.ends_with("/reports") {
+        if state.delivery_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({"error":{"code":"owned_pending_fixture","message":"retain the first delivery in local outbox"}}),
+                ),
+            );
+        }
+        let receipt = state
+            .report_receipt
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| json!({"accepted":true,"duplicate":true}));
+        return (StatusCode::OK, Json(receipt));
     }
     if path.ends_with("/acknowledge") {
         let acknowledgement = state
@@ -436,6 +458,86 @@ async fn ordinary_admission_receipt_is_checked_before_delivery_and_retried_witho
             .calls("/acknowledge")
             .iter()
             .all(|body| body["assignment_id"] == ASSIGNMENT));
+    }
+}
+
+#[tokio::test]
+async fn delivery_receipts_preserve_original_queue_without_artifact_id_or_unused_report_success() {
+    for reject_report in [false, true] {
+        let fixture = Fixture::new(false).await;
+        fixture.server.delivery_attempts.store(1, Ordering::SeqCst);
+        if reject_report {
+            *fixture.server.report_receipt.lock().unwrap() = Some(json!({"accepted":false}));
+        } else {
+            *fixture.server.artifact_receipt.lock().unwrap() = Some(json!({
+                "artifact_id":"00000000-0000-0000-0000-000000000000", "duplicate":true
+            }));
+        }
+        let rejected = fixture.tick(fixture.original.clone()).await.unwrap();
+        assert!(
+            matches!(rejected, TickStatus::Rejected),
+            "{rejected:?}: {:?}",
+            StateStore::open(&fixture.state).unwrap().data.outbox
+        );
+        let retained = StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .clone();
+        let original = retained.clone();
+        if reject_report {
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].kind, "report");
+            assert_eq!(
+                retained[0].next_attempt_at,
+                "+999999999-12-31T23:59:59Z",
+                "a rejected delivery keeps the serialized hold sentinel, not an ordinary retry time"
+            );
+        } else {
+            assert_eq!(retained.len(), 2);
+            assert_eq!(
+                retained[0].next_attempt_at,
+                "+999999999-12-31T23:59:59Z",
+                "a rejected delivery keeps the serialized hold sentinel, not an ordinary retry time"
+            );
+            assert_eq!(retained[1].body, original[1].body);
+        }
+        assert_eq!(retained[0].body, original[0].body);
+        assert!(fixture
+            .server
+            .calls("/acknowledge")
+            .iter()
+            .all(|body| body["assignment_id"] == ASSIGNMENT));
+
+        if reject_report {
+            *fixture.server.report_receipt.lock().unwrap() = None;
+        } else {
+            *fixture.server.artifact_receipt.lock().unwrap() = None;
+        }
+        fixture.due_original_outbox();
+        assert!(matches!(
+            fixture.tick(fixture.original.clone()).await.unwrap(),
+            TickStatus::Deferred
+        ));
+        assert!(StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .is_empty());
+        for entry in &original {
+            let endpoint = if entry.kind == "artifact" {
+                "/artifacts"
+            } else {
+                "/reports"
+            };
+            assert!(!fixture.server.calls(endpoint).is_empty());
+            assert!(fixture
+                .server
+                .calls(endpoint)
+                .iter()
+                .all(|body| body == &entry.body));
+        }
+        assert_eq!(std::fs::read_dir(&fixture.artifacts).unwrap().count(), 2);
     }
 }
 

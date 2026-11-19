@@ -339,12 +339,16 @@ impl LocalNodeRunner {
         }
         self.state.data.last_assignment_id = Some(assignment.id.clone());
         self.state.flush()?;
-        self.dispatch_outbox().await?;
-        Ok(match outcome["state"].as_str().unwrap_or("unknown") {
-            "succeeded" if acknowledged => TickStatus::Succeeded,
-            "succeeded" => TickStatus::Deferred,
-            "cancelled" => TickStatus::Cancelled,
-            _ => TickStatus::Unknown,
+        let delivery = self.dispatch_outbox().await?;
+        Ok(if matches!(delivery, TickStatus::Rejected) {
+            TickStatus::Rejected
+        } else {
+            match outcome["state"].as_str().unwrap_or("unknown") {
+                "succeeded" if acknowledged => TickStatus::Succeeded,
+                "succeeded" => TickStatus::Deferred,
+                "cancelled" => TickStatus::Cancelled,
+                _ => TickStatus::Unknown,
+            }
         })
     }
 
@@ -434,6 +438,11 @@ impl LocalNodeRunner {
                     // not infinite resend. Keep evidence locally and let unrelated
                     // assignments make progress instead of poisoning the whole host.
                     permanently_rejected = true;
+                    // A failed artifact cannot let a report for the same assignment
+                    // jump over its provenance and pretend it was also accepted.
+                    // Independent assignments keep their own delivery path open.
+                    self.state
+                        .hold_dependent_reports(&item.body["assignment_id"])?;
                 }
             }
         }

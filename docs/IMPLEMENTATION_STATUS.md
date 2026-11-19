@@ -12,6 +12,18 @@ A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored 
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
 
+## Delivery receipts and artifact-dependent reports stay connected
+
+After fixing ordinary ACK response syntax, the Native `deliver` path itself still accepted arbitrary parseable HTTP responses and cleared outbox items. It now verifies a response's actual `artifact_id` equals the immutable ID being sent, and a Report response really has `accepted:true`; explicit error envelopes are also rejected. The server's creation and duplicate shapes are preserved; there is no fabricated timestamp/accepted field required for Artifacts.
+
+This uncovered a second-level result problem: the caller held a wrong response locally, but `once()` still returned `Succeeded` from the operation body. It now propagates a permanent delivery rejection as `TickStatus::Rejected` instead of silently discarding it. The existing success/cancel/deferred behavior otherwise remains unchanged.
+
+There is also a provenance rule at queueing time. A permanently failed Artifact does **not** allow a Report for the same assignment to bypass it and assert completion. The dispatcher now holds that dependent Report with the existing serialized hold sentinel, while leaving other, independent assignment work eligible. There are no database/schema or assignment/Grant identity conversions in this path.
+
+The focused native test has six cases/total after these changes. It covers wrong UUID and report non-acceptance, an explicit `Rejected` status, correct retention of the original Artifact+Report body (artifact case) versus the failed Report alone after the already valid Artifact was accepted, and serialized hold markers. It then restores the proper receipts and due schedule and proves exact original bodies are delivered with no further local effect. The fixture is consciously a controlled loopback, not a claim that Concierge itself accepted or lost a particular committed response. Normal `scripts/bare-integration.mjs` and the native Descriptor/Registry again pass with the verified identity against the real center.
+
+Remaining boundaries are still outside this increment: multi-process global exactly-once, all Socket statuses, arbitrary tool interruption, physical multi-Host, and ordinary phone OS lifecycle.
+
 ## Rust native ordinary acknowledgements validate their receipt before replay
 
 The Rust Bare runner previously treated any parseable HTTP success from ordinary `acknowledge_envelope` as an acknowledgement. But real Concierge ordinary admission requires `accepted:true` and a valid `acknowledged_at` backed by an assignment audit. A malformed `200` could therefore be treated locally as admission before artifact delivery.

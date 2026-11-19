@@ -142,6 +142,23 @@ impl StateStore {
         self.flush()
     }
 
+    pub fn hold_dependent_reports(&mut self, assignment_id: &Value) -> Result<()> {
+        let mut changed = false;
+        for item in &mut self.data.outbox {
+            if item.kind == "report"
+                && item.body["assignment_id"] == *assignment_id
+                && item.next_attempt_at != HOLD_SCHEDULE
+            {
+                item.next_attempt_at = HOLD_SCHEDULE.to_owned();
+                changed = true;
+            }
+        }
+        if changed {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn mark_delivery_error(
         &mut self,
         index: usize,

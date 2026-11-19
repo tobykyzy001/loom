@@ -189,8 +189,29 @@ impl NodeClient {
             "report" => "/api/v1/nodes/reports",
             _ => bail!("unsupported delivery kind"),
         };
-        self.request(path, body.clone(), Some(identity.token()?), 20)
-            .await
+        let response: Value = self
+            .request(path, body.clone(), Some(identity.token()?), 20)
+            .await?;
+        if response.get("error").is_some() {
+            bail!("coordinator returned an error envelope instead of a delivery receipt");
+        }
+        match kind {
+            "artifact" => {
+                let expected = body["artifact_id"]
+                    .as_str()
+                    .context("local artifact outbox is missing its immutable identity")?;
+                if response.get("artifact_id").and_then(Value::as_str) != Some(expected) {
+                    bail!("coordinator receipt does not match the delivered Artifact identity");
+                }
+            }
+            "report" => {
+                if response.get("accepted").and_then(Value::as_bool) != Some(true) {
+                    bail!("coordinator did not accept the Report");
+                }
+            }
+            _ => unreachable!("delivery kind was restricted above"),
+        }
+        Ok(response)
     }
 
     pub async fn acknowledge(
