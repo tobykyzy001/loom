@@ -848,8 +848,8 @@ mod tests {
         assert!(store.verify_audit().unwrap());
     }
 
-    #[test]
-    fn v15_upgrade_is_additive_and_preserves_old_authority_and_bytes() {
+    #[tokio::test]
+    async fn v15_upgrade_is_additive_and_preserves_old_authority_and_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_id = uuid::Uuid::new_v4().to_string();
         let bytes = b"existing immutable Artifact, not a new read projection";
@@ -905,6 +905,162 @@ mod tests {
         );
         assert!(reopened.verify_audit().unwrap());
         assert!(Store::open(tmp.path()).is_ok());
+
+        // Exercise the same public handlers used by real clients after the
+        // migration, instead of inferring that a Store::get is a safe API read.
+        // This is a real router and a real artifact file, not an SDK/Host claim.
+        let token = "legacy-client-token-for-real-router";
+        Store::open(tmp.path())
+            .unwrap()
+            .set_setting("client_token_hash", &hash(token))
+            .unwrap();
+        let state = std::sync::Arc::new(crate::api::State::open(tmp.path(), Some(token)).unwrap());
+        let router = crate::api::router(state.clone());
+        async fn read(
+            app: &axum::Router,
+            path: &str,
+            authorized: bool,
+        ) -> (axum::http::StatusCode, Value) {
+            let mut request = axum::extract::Request::builder().method("GET").uri(path);
+            if authorized {
+                request = request.header(
+                    "authorization",
+                    "Bearer legacy-client-token-for-real-router",
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        use base64::Engine as _;
+        use tower::ServiceExt;
+        for authorized in [false, true] {
+            let detail = read(&router, "/api/v1/tickets/ticket", authorized).await;
+            if authorized {
+                assert_eq!(detail.0, axum::http::StatusCode::OK, "{detail:?}");
+                let public_artifact = &detail.1["artifacts"][0];
+                assert_eq!(public_artifact["read_evidence"], Value::Null);
+                assert_eq!(public_artifact["code_evidence"], Value::Null);
+                assert!(public_artifact.get("read_evidence_json").is_none());
+                assert!(public_artifact.get("code_evidence_json").is_none());
+                let href =
+                    format!("/api/v1/tickets/ticket/artifacts/{artifact_id}?encoding=base64");
+                let downloaded = read(&router, &href, true).await;
+                assert_eq!(downloaded.0, axum::http::StatusCode::OK, "{downloaded:?}");
+                assert_eq!(downloaded.1["artifact"]["read_evidence"], Value::Null);
+                assert!(downloaded.1["artifact"].get("read_evidence_json").is_none());
+                assert_eq!(downloaded.1["size_bytes"], bytes.len());
+                assert_eq!(downloaded.1["encoding"], "base64");
+                assert_eq!(downloaded.1["truncated"], false);
+                assert_eq!(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(downloaded.1["content"].as_str().unwrap())
+                        .unwrap(),
+                    bytes
+                );
+            } else {
+                assert_eq!(detail.0, axum::http::StatusCode::UNAUTHORIZED, "{detail:?}");
+                assert_eq!(detail.1["error"]["code"], "unauthorized");
+                assert!(detail.1.get("content").is_none());
+                let href = format!("/api/v1/tickets/ticket/artifacts/{artifact_id}");
+                let unauthorized = read(&router, &href, false).await;
+                assert_eq!(
+                    unauthorized.0,
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "{unauthorized:?}"
+                );
+                assert!(unauthorized.1.get("content").is_none());
+            }
+        }
+
+        let original_row = state
+            .store
+            .lock()
+            .unwrap()
+            .get("artifacts", &artifact_id)
+            .unwrap()
+            .unwrap();
+        for invalid in ["[]", r#"{"schema":"not-a-reader-proof"}"#] {
+            state
+                .store
+                .lock()
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE artifacts SET read_evidence_json=?2 WHERE id=?1",
+                    rusqlite::params![artifact_id, invalid],
+                )
+                .unwrap();
+            for path in [
+                "/api/v1/tickets/ticket",
+                &format!("/api/v1/tickets/ticket/artifacts/{artifact_id}"),
+            ] {
+                let (status, body) = read(&router, path, true).await;
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+                assert_eq!(body["error"]["code"], "invalid_request");
+                assert!(body.get("content").is_none());
+                let text = body.to_string();
+                assert!(!text.contains("existing immutable Artifact"));
+                assert!(!text.contains("read_evidence_json"));
+                assert!(!text.contains("not-a-reader-proof"), "{text}");
+            }
+            fs::write(
+                tmp.path()
+                    .join("artifacts")
+                    .join(format!("{artifact_id}.artifact")),
+                bytes,
+            )
+            .unwrap();
+        }
+        state
+            .store
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE artifacts SET read_evidence_json=NULL WHERE id=?1",
+                [&artifact_id],
+            )
+            .unwrap();
+        let path = format!("/api/v1/tickets/ticket/artifacts/{artifact_id}");
+        let tampered_bytes = b"altering the real stored bytes does not earn new read evidence";
+        fs::write(
+            tmp.path()
+                .join("artifacts")
+                .join(format!("{artifact_id}.artifact")),
+            tampered_bytes,
+        )
+        .unwrap();
+        let (status, body) = read(&router, &path, true).await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "artifact_integrity", "{body}");
+        assert!(body.get("content").is_none());
+        assert!(!body.to_string().contains("existing immutable Artifact"));
+        fs::write(
+            tmp.path()
+                .join("artifacts")
+                .join(format!("{artifact_id}.artifact")),
+            bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .get("artifacts", &artifact_id)
+                .unwrap(),
+            Some(original_row)
+        );
+        assert!(state.store.lock().unwrap().verify_audit().unwrap());
+        assert_eq!(crate::sha256(bytes), artifact_digest);
     }
 
     #[test]

@@ -159,7 +159,7 @@
 - **无外部副作用的POST并不想当然跳过当前认证代际。** 专用 `requireCurrentCredential` 仅对已标明读取用途的POST检查token/epoch，不能改造旧写入的已接回收据。条件评估走 `run` 的真实401/Required流程，不能用自捕获异常另造旁路。此类评估仍须用户明确选择相同Node/installation/worker/root的现有read Grant，保留canonical root合法映射但不自动倒选。硬件显示按真实 `fact.source`，长标识由实际390px换行验收，所有“存在模型/支持图片/运行时已实测”的额外结论都必须明确禁止。
 - **Project Git事实是上次受控观察，不是目录授权或实时证明。** ProjectInventory需以白名单展示HEAD基线、真实form/dirty、来源和probed_at；工作的dirty也可以null表示未知，不可写为false；非Git documents不需要伪造HEAD，缺/坏inventory时probe不能改写已有观测。公共canonical_remote不是href，redaction与凭据类别状态独立，不把private git config/凭据字段或操作转换为远端可达或Grant。`probeProject(id)`有per-Project busy，必须在同ID/read_only_probe:true/完整公开inventory时才替换Registry item，401/epoch/unknown都不能删除原本的旧观测。真root、token、dataDir重开按完整 inventory校验，不要误开空SQLite 或把整Project与 inventory子对象含糊比较。真实正反向证据见 [tests/projects/README.md](tests/projects/README.md) 与 `/tmp/loom-project-facts-proof.json`。缺北结果也可能只是更精确未知，并非HTTP failure。
 
-### 5.6 Web、断连和 PWA 静态壳
+- **持久化迁移还需要真实公开读取证明。** 旧schema行能`Store::get`不等于客户端能安全读取：应分别验证detail与byte下载的Authorization、`read_evidence:null`及内部`_json`列不泄漏，旧bytes/Grant/digest/audit完整保留。真实测试表明invalid read projection实际返回400，字节不一致为409，不要先假设一律500。错误路径也可能经过raw row的FromSqlConversionFailure，且需要在`public_read_projection`与detail原始SQL读取边界同时剥除storage列名/内部错误文本，不能通过删字段名的泄漏断言来“解决”。原row/bytes/审计最后必须恢复同值校验。命令与完整范围见`cargo test -p loom-concierge store::tests::v15_upgrade_is_additive_and_preserves_old_authority_and_bytes -- --exact --nocapture`，它是源码迁移回归而不是Full host或Universal DLP证明。
 
 ### 5.6 Web、断连和 PWA 静态壳
 

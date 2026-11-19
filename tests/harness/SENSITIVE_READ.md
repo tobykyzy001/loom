@@ -42,7 +42,19 @@ The same driver then verifies:
 
 One independent review caught duplicate proof acceptance, a mixed read/code projection and an overly early Report sequence gap. All are now fenced: duplicate proof must match exactly; mixed code+read reads fail; Report Session host/protocol/Session must match and its `observed_seq` must be at least the ToolResult sequence. Rust handles DB strings as parsed internal objects, while external responses use explicit public names.
 
-## Explicitly still NOT RUN / not claimed
+## Schema 15 → 16 migration through the protected read endpoints
+
+`cargo test -p loom-concierge store::tests::v15_upgrade_is_additive_and_preserves_old_authority_and_bytes -- --exact --nocapture` adds a **route- and file-based** regression beyond checking a migrated Store row. It purposefully starts with schema 15's absent new proof column, existing project/grant/digest/Ticket, real artifact bytes and a historical audit, then reopens as schema 16.
+
+- The normal project's `Ticket detail` and actual base64 Artifact download have `read_evidence:null`; original byte contents and original row/hash/digest remain the same, and the internal `read_evidence_json`/`code_evidence_json` names do not enter public responses.
+- Requests with **no Authorization header** get a real 401 before Artifact access; they do not validate simply because an admin-token setting is present. `state::open` reuses that already-owned registration rather than replacing the client identity.
+- **Non-object read storage** (`[]` in the test) and an invalid object with a different schema return actual **400 `invalid_request`**. A real initial failure showed that the Type TEXT conversion error could echo the storage column name through the otherwise-correct rejection. The public detail/download projection now converts such record/data incompatibilities into a fixed, generic error instead of echoing internal fields. The test forbids the original Artifact text and raw `_json` name in the entire error body.
+- Mutating the file's bytes produces actual **409 `artifact_integrity`**, not a newly supplied read proof or a policy pass. Other missing-record/ticket ownership errors retain their distinct semantics.
+- Nullable legacy proof and original bytes are restored as test-owned fixtures. Final full row/SHA/Grant/audit comparison confirms that the failed reads and tamper did not silently rewrite the previous authority.
+
+This regression specifically demonstrates **old-record authorized reading and privacy-preserving error projection**. It is not a DSH installation/actuator test, another source-profile migration, mobile lifecycle, second Host or claim of full M0/M1 closure.
+
+
 
 - No general secret detector, arbitrary Host DLP or guarantee over all Worker Transcripts. The proof is specific to this exact read fixture. Ordinary DSH conversations retain their existing assistant Artifact delivery behavior; new unknown markers are not proof of read success.
 - No production Profile install/activation, host OS credential store, live provider/model calls, paid token cost, other Harness versions, or a claim that a controller observed the SDK directly instead of receiving a checked Node report.

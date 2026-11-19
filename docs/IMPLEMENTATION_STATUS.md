@@ -2,6 +2,18 @@
 
 Updated: 2026-11-19.
 
+## Migrated Artifact reads preserve evidence and enforce privacy even on errors
+
+Schema 15 -> 16 migration now has a **real router + real artifact byte proof**, not just a `Store::get` check. A genuine starting schema drops `read_evidence_json` and retains project/grant/Ticket/file/digest and historical audit, then reopens as schema 16.
+
+Authorized `Ticket detail` and base64 download expose only the legacy-null `read_evidence`, the actual original byte payload and matching hashes. Raw internal `read_evidence_json`/`code_evidence_json` do not enter normal payloads. Missing Authorization produces a real 401, not access because a client-token hash exists as a setting.
+
+A strict non-object projection and an invalid-schema proof yield actual 400 `invalid_request`, not unintended classes of success. Their initial failed error response could include the storage column name. Therefore public detail and artifact APIs use `public_read_projection` plus `read_projection_db_error` at the corresponding SQL conversion boundary to replace private/internal error text with a consistent, bounded public explanation. The test asserts no previous byte contents or internal `_json` names leak into the entire error body. Other not-found, scope and I/O semantics are not globally rewritten.
+
+Changing real byte contents remains an actual 409 `artifact_integrity`. The test restores the nullable old field and original bytes and checks the entire stored row and audit are unchanged. This closes an inherited artifact/projection error leakage edge, rather than inventing a mandatory Source Proof, Registry, external provider or full task rollout.
+
+See [migration protected read evidence](../tests/harness/SENSITIVE_READ.md#schema-15--16-migration-through-protected-read-endpoints). The command `cargo test -p loom-concierge store::tests::v15_upgrade_is_additive_and_preserves_old_authority_and_bytes -- --exact --nocapture`, complete workspace Rust tests and strict clippy are passing for this increment. It is not real DSH/second physical Host/mobile/LLM validation, nor completion of all M0/M1.
+
 ## Project facts are visible, explicitly refreshable observations
 
 The Projects page now carries the **actual project-local evidence** from the existing controller, not merely a bind button. It shows `form/working_tree|documents`, real controller probe timestamps, actual HEAD baseline (40/64 hexadecimal), dirty/unknown modification state, sanitized public canonical remote, redaction status, credential lookup and location classes. A repository with no HEAD or plain documents does not receive a fabricated SHA. `dirty:null` is permitted for working-tree unknown, and is never treated as clean. Unsafe/canonical redaction prevents raw Git config or a private remote from becoming a URL or a Grant.

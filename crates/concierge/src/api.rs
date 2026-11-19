@@ -5924,6 +5924,31 @@ fn artifact_file_io<T>(result: std::io::Result<T>) -> ApiResult<T> {
     })
 }
 
+fn read_projection_db_error(error: anyhow::Error) -> ApiError {
+    if matches!(
+        error.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::FromSqlConversionFailure(..))
+    ) {
+        // The column's internal representation cannot be interpreted for this
+        // public schema; don't echo its name or original SQL error.
+        ApiError::bad(
+            "Stored read evidence is invalid or incompatible; no reader proof was asserted.",
+        )
+    } else {
+        error.into()
+    }
+}
+
+fn public_read_projection(value: &Value) -> ApiResult<Option<Value>> {
+    crate::code_evidence::read_projection(value).map_err(|_| {
+        // Failed raw projection must not echo SQLite columns or private
+        // per-record error text into the protected client response.
+        ApiError::bad(
+            "Stored read evidence is invalid or incompatible; no reader proof was asserted.",
+        )
+    })
+}
+
 async fn artifact(
     AppState(state): AppState<Arc<State>>,
     axum::extract::Path((ticket, artifact)): axum::extract::Path<(String, String)>,
@@ -5946,7 +5971,8 @@ async fn artifact(
     };
     let store = state.lock()?;
     let mut a = store
-        .get("artifacts", &artifact)?
+        .get("artifacts", &artifact)
+        .map_err(read_projection_db_error)?
         .ok_or_else(|| ApiError::missing("Artifact unknown"))?;
     a["location"] = json!(format!("loom://artifact/{artifact}"));
     if a["ticket_id"] != ticket {
@@ -5956,7 +5982,7 @@ async fn artifact(
         ));
     }
     let public_evidence = crate::code_evidence::projection(&a)?;
-    let public_read = crate::code_evidence::read_projection(&a)?;
+    let public_read = public_read_projection(&a)?;
     if public_evidence.is_some() && public_read.is_some() {
         return Err(ApiError::conflict(
             "artifact_evidence_conflict",
@@ -6020,13 +6046,13 @@ async fn ticket(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
-    let mut detail = store.detail(&id)?;
+    let mut detail = store.detail(&id).map_err(read_projection_db_error)?;
     for artifact in detail["artifacts"].as_array_mut().into_iter().flatten() {
         let public_evidence = crate::code_evidence::projection(artifact)?;
         if let Some(storage_fields) = artifact.as_object_mut() {
             storage_fields.remove("code_evidence_json");
         }
-        let public_read = crate::code_evidence::read_projection(artifact)?;
+        let public_read = public_read_projection(artifact)?;
         if public_evidence.is_some() && public_read.is_some() {
             return Err(ApiError::conflict(
                 "artifact_evidence_conflict",

@@ -225,6 +225,8 @@ M0“受限输入到可信执行”又已有真实本机例子：`tests/harness/
 
 父子委派的真实M0小场景已经贯通到生产协作视图：`tests/harness/real-delegation.mjs --browser`在**rc.5同一隔离Profile**中，默认child协作只显示阶段，展开后取得经中心确认的parent Ticket/Artifact、不同parent/child Session，并让父Ticket按钮走现有认证`selectTask`回读，父子往返但不创造Grant。显式 `parent_session_ref`现由中心继续核对与原始producer/session/ticket/host/序列相符，旧缺省沿用真实source-record，不允许调用者借自报Session覆盖source lineage。驱动临时移走原有真实父Artifact，实际400拒绝后完整恢复原件SHA unchanged；缺byte vs伪造session分别验证，不把Group Name/原始message tag或http 200伪装成证明。1280/390（仅desktop viewport）、父子真实bytes、原Report/Effect/Message与同port/data dir/token的中心重开已PASS，无新 ToolCall/ToolResult/provider request。详见[DELEGATION生产协作及缺字节围栏](tests/harness/DELEGATION.md#production-collaboration-view-and-source-claim-integrity-latest)。汇总不再误输出server/admin/token；Stage范围仍非物理多机、全DAG或实际手机，不推广为全Harness意图理解。
 
+**M0旧记录的迁移后受保护读取小切口已实证**：旧v15project/grant/ticket原file/audit保留后开始迁移，detail/base64真实Router严格matchpublic `read_evidence:null`，不公开/storage_proof列或伪造新evidence。noAuth=401，非object和无效valid JSON/current collection的reader如询问Request=400；原启动路径中SQL列名能混进客户端错误，这一实际缺陷已在`public_read_projection`与`read_projection_db_error`共同收紧为通用、不会透露内部声明的公共错误，而schema+ownership/metadata现有语义未拆掉。真实改byte仍`409 artifact_integrity`。恢复nullable原列及文件后row/audit/digest保持相等，不索取newGrant，也没有把旧行的`null`转换成新写入授权。范围: 在本地真实protected HTTP + SQLite + byte tests中证明**升级读回与private错误投影**，而不是DSH Host install或第二Host手机环境/全部M0证据。详见 [SENSITIVE_READ迁移节](tests/harness/SENSITIVE_READ.md#schema-15--16-migration-through-protected-read-endpoints) 以及 `cargo test -p loom-concierge store::tests::v15_upgrade_is_additive_and_preserves_old_authority_and_bytes -- --exact --nocapture`。
+
 **进入 M1 的证据**
 
 至少两类真实任务完成端到端运行，并分别覆盖成功、失败、取消和重启。先根据实测确认最小领域模型，再冻结 M1 的 Registry Schema。

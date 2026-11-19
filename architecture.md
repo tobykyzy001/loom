@@ -268,6 +268,14 @@ Rollout 逐目标保存包版本、期望状态、安装 Grant、超时、重启
 
 本机现有 Bare / DSH bundle 证据仅覆盖明确的隔离场景，见 [BARE_PACKAGE](docs/BARE_PACKAGE.md) 与 [BUNDLE_LIFECYCLE](tests/harness/BUNDLE_LIFECYCLE.md)。
 
+### 读取投影作为真实私有实现，不把错误或内部列变成公开结构
+
+schema 16 升级后的旧记录保留原始 Grant/Ticket/Artifact SHA、原字节和原审计。`read_evidence:null` 仅表示旧行没有可继承的**新reader投影**，不复制新授权或重任务。
+
+对Ticket详情与Artifact下载，损坏/不兼容的reader记录经 `public_read_projection` 给出通用错误，不把/storage列名或私有_error text回显给客户端。相应的SQL行转换失败也不把 `_json`字段或原始存储错误吐出。缺少合法旧投影照旧返回null，拒绝既有grant时的authority未改变；实文件bytes与SHA不匹配仍然是 `artifact_integrity`，而不是一种新证据升级。无凭据继续401，不能把读错误写成任务的Unknown或新执行结果。
+
+新增迁移验证既有v15的project/grant/ticket/file/audit升级到16后的真实protected Axum detail与base64读取：无凭据返回401，非法`read_evidence_json`和JSON对象不当申明被400拒绝，非原生JSON/Schema处理不足不成为新Namespace对象。后续bytes变质由integrity gate409拒绝，原nullable字段/row/bytes恢复后仍可核。此为资源读取与隐私兼容缺陷修复，不是整体M0完成、全Host产品的版本迁移或新device/Profile验收。详见[迁移后真实读取](tests/harness/SENSITIVE_READ.md#schema-15--16-migration-through-the-protected-read-endpoints)。
+
 ## 9. 授权、调度与可靠性
 
 ### 9.1 Grant 与 Lease 分离
