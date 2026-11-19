@@ -12,7 +12,19 @@ A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored 
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
 
-## Vue keys preserve each independent Installation
+## Repeated worker declarations are rejected in the real node heartbeat path
+
+In addition to the enum fix, the mounted heartbeat handler previously copied `workers` from a Node without enforcing unique identities. A Node could submit several conflicting records with the same worker ID and let a later `.find()` choose one favourable declaration. This made ambiguous registration data look like a consistent worker/root/capability placement fact rather than requiring new task authority.
+
+`validate_heartbeat_workers` now requires an array of objects and a nonempty, ≤160-byte, control-free identity for every entry, using the already-existing `worker_id` or legacy `id` names. Duplicate identities, missing/null/scalar entries and disagreeing name aliases return bounded 400 errors before serializing or executing registry UPDATEs. **Empty arrays remain valid no-report declarations; two identical aliases do not change the accepted mapping.** The existing public inventory and its worker aliasing/permission boundaries are unchanged.
+
+The Concierge test submits online+offline duplicate IDs, a conflicting `id`/`worker_id`, null/missing identities and a non-object. All get real 400 errors compared against an exact unchanged registration row. A single `id:'default'` declaration then succeeds and projects through actual trusted inventory as worker_id `default`, online. The real publicly registered Node driver now repeats these worker conflicts, confirms every unchanged public snapshot, accepts a sole alias, and retains the correct subsequent Node heartbeat timestamp and revocation denial.
+
+`/tmp/loom-node-staleness-proof.json` is now **seven PASS checks** with no new registration permission or second physical host, and no interpreted timestamp aliases faked as distinct times. A legitimate alias heartbeat still advances its timestamp; after revocation the equivalent `+00:00`/`Z` representations are compared by time value, not by requiring identical text. Raw worker input and provenance get no new permission merely because the declarations were accepted.
+
+Full available Rust regressions (145 substantive concierge tests plus separate workspace checks) and strict clippy are passing, as are the 209 Web tests/production build. The one opt-in hardware-only probe remains explicitly skipped on non-opted hosts; there is no claim of all M1 environments or off-host worker execution.
+
+## Authenticated heartbeat status validation now fails before storage mutation
 
 `DevicesView` previously keyed all rows for one Node ID merely by `node.id`, even though the registry deliberately permits several Installation IDs, workers and heartbeat histories for that Node ID. Each installation now has its own `nodeIdentityKey = (node_id ?? id)/installation_id`, plus an exact `data-installation-id` selector. Legacy/alias ID handling and source-presence semantics remain unchanged.
 

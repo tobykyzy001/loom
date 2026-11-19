@@ -127,6 +127,35 @@ try {
   pass('same owned Edge profile reopens offline evidence at 390px without claiming mobile lifecycle')
   await context.close(); context = null
 
+  const workersBefore = (await admin.get('/api/v1/nodes')).nodes[0]
+  for (const workers of [[worker, { ...worker, status: 'offline' }], [{ ...worker, id: 'another_worker' }], [{}], 'not_an_array']) {
+    await admin.post('/api/v1/nodes/heartbeat', {
+      protocol: 'loom.node.v1', node_id: identity.nodeId, installation_id: identity.installationId,
+      request_id: crypto.randomUUID(), status: 'online', capabilities: [], workers, inventory: {},
+    }, { token: identity.token }).then(
+      () => assert.fail('duplicate/conflicting worker identity must not be accepted'),
+      error => { assert.equal(error.status, 400); assert.equal(error.code, 'invalid_request') },
+    )
+    assert.deepEqual((await admin.get('/api/v1/nodes')).nodes[0], workersBefore)
+  }
+  const alias = await admin.post('/api/v1/nodes/heartbeat', {
+    protocol: 'loom.node.v1', node_id: identity.nodeId, installation_id: identity.installationId,
+    request_id: crypto.randomUUID(), status: 'online', capabilities: [],
+    workers: [{ id: 'default', status: 'online', capabilities: [] }], inventory: {},
+  }, { token: identity.token })
+  assert.equal(alias.accepted, true)
+  const aliasView = await fetch(`${server.baseUrl}/api/v1/nodes/${encodeURIComponent(identity.nodeId)}/inventory?installation_id=${encodeURIComponent(identity.installationId)}`, {
+    headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+  }).then(async response => {
+    assert.equal(response.status, 200)
+    return response.json()
+  })
+  assert.equal(aliasView.workers.length, 1)
+  assert.equal(aliasView.workers[0].worker_id, 'default')
+  const latestValidHeartbeat = aliasView.last_heartbeat
+  assert.notEqual(latestValidHeartbeat, oldHeartbeat)
+  pass('duplicate or conflicting worker identities rejected without replacing the real worker; the legal id alias remains usable')
+
   const malformedBefore = (await admin.get('/api/v1/nodes')).nodes[0]
   for (const invalidStatus of ['revoked', 'not-a-presence-state', null, 17]) {
     const body = {
@@ -158,7 +187,7 @@ try {
   const revoked = await admin.get('/api/v1/nodes')
   assert.ok(revoked.nodes[0].revoked_at)
   assert.equal(revoked.nodes[0].online, false)
-  assert.equal(revoked.nodes[0].last_heartbeat, oldHeartbeat)
+  assert.equal(Date.parse(revoked.nodes[0].last_heartbeat), Date.parse(latestValidHeartbeat))
   await admin.post('/api/v1/nodes/heartbeat', {
     node_id: identity.nodeId, installation_id: identity.installationId,
     request_id: crypto.randomUUID(), protocol: 'loom.node.v1',

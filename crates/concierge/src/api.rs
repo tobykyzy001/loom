@@ -3256,6 +3256,76 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn duplicated_worker_input_cannot_override_a_registration_or_alias_another_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        const TOKEN: &str = "fixture-worker-credential-12345";
+        store.conn().execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,revoked_at,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','fixture-public-key',?1,'online',NULL,'[]','[{\"worker_id\":\"default\",\"status\":\"online\"}]','{}',?2,?2)", [crate::store::hash(TOKEN), "2020-01-01T00:00:00Z".to_owned()]).unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        async fn post_workers(app: &Router, workers: Value) -> (StatusCode, Value) {
+            let response = app.clone().oneshot(
+                axum::extract::Request::builder().method("POST").uri("/api/v1/nodes/heartbeat")
+                    .header("authorization", "Bearer fixture-worker-credential-12345")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({
+                        "protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation", "request_id":"worker-fixture",
+                        "status":"online", "capabilities":[], "workers":workers, "inventory":{},
+                    })).unwrap())).unwrap(),
+            ).await.unwrap();
+            let status = response.status();
+            let body = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            (status, body)
+        }
+        let original = state.lock().unwrap().get("nodes", "node").unwrap().unwrap();
+        for workers in [
+            json!([{"worker_id":"default","status":"online"},{"worker_id":"default","status":"offline"}]),
+            json!([{"worker_id":"default","id":"another-worker","status":"online"}]),
+            json!([{"worker_id":null}]),
+            json!([{"status":"online"}]),
+            json!(["not-an-object"]),
+        ] {
+            let (status, body) = post_workers(&app, workers).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "malformed worker input must be rejected: {body}"
+            );
+            assert_eq!(body["error"]["code"], "invalid_request");
+            assert_eq!(
+                state.lock().unwrap().get("nodes", "node").unwrap(),
+                Some(original.clone())
+            );
+        }
+        let (status, body) = post_workers(&app, json!([{"id":"default","status":"online","capabilities":[{"ticket_kind":"read_summary","permission":"read"}]}])).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["accepted"], true);
+        let lock = state.lock().unwrap();
+        let node = lock.get("nodes", "node").unwrap().unwrap();
+        let identity = crate::inventory::InstallationIdentity {
+            node_id: "node".into(),
+            installation_id: "installation".into(),
+        };
+        let view =
+            crate::inventory::trusted_node_view(&lock, &identity, Some(&node), chrono::Utc::now())
+                .unwrap();
+        assert_eq!(view.workers[0].worker_id, "default");
+        assert_eq!(
+            view.workers[0].reachability,
+            crate::inventory::Reachability::Online
+        );
+    }
+
     fn git_fixture_available() -> bool {
         std::process::Command::new("git")
             .arg("--version")
@@ -4814,6 +4884,47 @@ async fn model_inventory(
         )),
     }
 }
+fn validate_heartbeat_workers(body: &Value) -> ApiResult<()> {
+    let Some(workers) = body["workers"].as_array() else {
+        return Err(ApiError::bad("Heartbeat workers must be an array"));
+    };
+    let mut identities = std::collections::BTreeSet::new();
+    for worker in workers {
+        let Some(_) = worker.as_object() else {
+            return Err(ApiError::bad("Heartbeat workers must contain objects"));
+        };
+        if matches!(
+            (
+                worker.get("worker_id").and_then(Value::as_str),
+                worker.get("id").and_then(Value::as_str),
+            ),
+            (Some(explicit), Some(alias)) if explicit != alias
+        ) {
+            return Err(ApiError::bad(
+                "Worker id and worker_id must agree when both are present",
+            ));
+        }
+        let Some(id) = worker
+            .get("worker_id")
+            .or_else(|| worker.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| {
+                !id.trim().is_empty() && id.len() <= 160 && !id.chars().any(char::is_control)
+            })
+        else {
+            return Err(ApiError::bad(
+                "Heartbeat worker_id must be a nonempty bounded string",
+            ));
+        };
+        if !identities.insert(id) {
+            return Err(ApiError::bad(
+                "Heartbeat workers must not duplicate a worker identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn heartbeat(
     AppState(state): AppState<Arc<State>>,
     headers: HeaderMap,
@@ -4833,6 +4944,7 @@ pub(crate) async fn heartbeat(
             ))
         }
     };
+    validate_heartbeat_workers(&body)?;
     let capacity = json!(body["capabilities"]);
     let workers = json!(body["workers"]);
     let inventory = body["inventory"].to_string();
