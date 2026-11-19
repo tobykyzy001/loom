@@ -12,6 +12,16 @@ A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored 
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
 
+## Shared local Node state directory now has exclusive runner ownership
+
+A real pre-fix concurrency probe opened two Native runners with the same owned `state_dir`, `artifact_dir`, profile and original Assignment. Both independently passed the local Grant/lease checks and returned success, producing two actual file Artifacts. The existing `StateStore::start` single-active check was only comparing local JSON views after both had independently started, not enforcing single ownership of that directory.
+
+`LocalNodeRunner::open` now obtains an advisory lock on the canonical state directory **after** validating the project/state/artifact separation and before `Identity::open` or `StateStore::open`. The `_state_lock` file handle remains private for the whole runner lifetime, so a competing local runner returns a bounded ownership-conflict error before reading or generating execution state. The handle uses read+append semantics with `File::try_lock` and Unix mode 0600: no truncate-on-open, no marker identity and no new Grant. If unsupported locking or an I/O error occurs, startup fails rather than falsely authorizing two owners. Close/drop releases the advisory ownership for subsequent starts, which keep the usual current-input/grant/root/lease/digest checks and do not reexecute the completed file.
+
+The new focused case proves the first owner creates only one real artifact, the competing attempt rejects without changing the state history, and a fresh runner after drop returns Deferred through completed-evidence replay with still one artifact. All eight native tests in this family including existing malformed receipts, independent jobs and scheduling/interruption checks pass. The ordinary real controller and the native Descriptor Registry continue to pass. It is a local cooperating-runner ownership rule, not proof of global exactly-once, multi-Host state collision prevention, or a general anti-TOCTOU/OS lock promise. `bind` and every possible identity-writing entry point are outside this runner-lifecycle scope; different state directories are distinct considerations.
+
+The contract has a concrete toolchain requirement: `std::fs::File::try_lock` became stable in Rust **1.89**. The workspace MSRV was **explicitly raised from 1.75 to 1.89**, with current 1.99 observed in the complete regression and clippy results. No `unsafe` implementation, additional crate or schema migration was necessary.
+
 ## Delivery receipts and artifact-dependent reports stay connected
 
 After fixing ordinary ACK response syntax, the Native `deliver` path itself still accepted arbitrary parseable HTTP responses and cleared outbox items. It now verifies a response's actual `artifact_id` equals the immutable ID being sent, and a Report response really has `accepted:true`; explicit error envelopes are also rejected. The server's creation and duplicate shapes are preserved; there is no fabricated timestamp/accepted field required for Artifacts.

@@ -27,6 +27,9 @@ pub struct NodeOptions {
 }
 
 pub struct LocalNodeRunner {
+    // The OS releases this advisory lock on drop, even when the owner crashes.
+    // Opening the same owned state directory twice during this lifetime refuses.
+    _state_lock: std::fs::File,
     options: NodeOptions,
     client: NodeClient,
     identity: Identity,
@@ -47,6 +50,29 @@ pub enum TickStatus {
 }
 
 impl LocalNodeRunner {
+    fn acquire_state_lock(state_dir: &Path) -> Result<std::fs::File> {
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(state_dir.join("runner.lock"))
+            .context("cannot open the local Node ownership lock")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            lock.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        match lock.try_lock() {
+            Ok(()) => Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                bail!("another LocalNodeRunner already owns this node state directory")
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(error).context("cannot acquire the local node state ownership lock")
+            }
+        }
+    }
+
     pub fn open(options: NodeOptions) -> Result<Self> {
         if !(1..=15).contains(&options.wait_seconds) {
             bail!("poll wait must be within [1,15] seconds");
@@ -60,10 +86,12 @@ impl LocalNodeRunner {
         options
             .bindings
             .validate_separated_from(&state_dir, &artifact_dir)?;
+        let _state_lock = Self::acquire_state_lock(&state_dir)?;
         let identity = Identity::open(&state_dir)?;
         let state = StateStore::open(&state_dir)?;
         let client = NodeClient::new(&options.coordinator)?;
         Ok(Self {
+            _state_lock,
             options,
             client,
             identity,

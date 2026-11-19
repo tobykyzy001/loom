@@ -17,7 +17,7 @@ The runner builds `loom-node` from the checked-in Rust source and verifies the r
 The coordinator independently ran the completed script with exit **0** and 12 labeled checks. An observed run wrote `./package/manifest.json` and a private smoke report under its owned directory `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-bare-package-67X0Gt`.
 
 - Package: `loom.bare-host-package.v1`, `loom-node 0.1.0`.
-- Observed current host/toolchain: **macOS arm64**, a `Mach-O 64-bit executable arm64`, Rust `1.99.0 (b940084d7 2026-09-28)`.
+- Observed current host/toolchain: **macOS arm64**, a `Mach-O 64-bit executable arm64`, Rust `1.99.0 (b940084d7 2026-09-28)`. The workspace MSRV has now been explicitly raised to **1.89** for the real `std::fs::File::try_lock` ownership guard in `LocalNodeRunner::open`; this toolchain requirement must not be described as an untested compatibility claim on older compilers or other OS hosts.
 - Binary size: **21,778,296 bytes**; executable mode `0755` for this generated local candidate. Owned root/state/artifact/project fixture directories are checked `0700` on POSIX.
 - SHA-256 of the actual built and copied binary: `1c9dc260a2d689602a6e133b9017561d9b69c30136834e08f51aaa05de3542c5`. Copying preserved both size and bytes; the final package contains only `loom-node` and `manifest.json`.
 - Actual `otool -L` inspection observed the system `/usr/lib/libiconv.2.dylib`, `/usr/lib/libSystem.B.dylib` and CoreFoundation dependencies. These are facts for this candidate, not a cross-platform dependency guarantee.

@@ -260,7 +260,7 @@ impl Fixture {
         }
     }
 
-    async fn runner(&self) -> LocalNodeRunner {
+    async fn try_runner(&self) -> anyhow::Result<LocalNodeRunner> {
         LocalNodeRunner::open(NodeOptions {
             coordinator: self.coordinator.clone(),
             state_dir: self.state.clone(),
@@ -274,7 +274,10 @@ impl Fixture {
             wait_seconds: 1,
             enrollment_code: None,
         })
-        .unwrap()
+    }
+
+    async fn runner(&self) -> LocalNodeRunner {
+        self.try_runner().await.unwrap()
     }
 
     async fn tick(&self, packet: Value) -> anyhow::Result<TickStatus> {
@@ -600,6 +603,67 @@ async fn failed_artifact_holds_only_its_own_report_not_an_independent_assignment
     }
     assert_eq!(std::fs::read_dir(&fixture.artifacts).unwrap().count(), 4,
         "the independent assignment reads and publishes once; the failed assignment is not reexecuted");
+}
+
+#[tokio::test]
+async fn two_runners_sharing_a_node_state_directory_must_not_execute_the_same_assignment_twice() {
+    let fixture = Fixture::new(false).await;
+    fixture.server.delivery_attempts.store(1, Ordering::SeqCst);
+    let mut first = fixture.try_runner().await.unwrap();
+    let original_history = fixture.history();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::metadata(fixture.state.join("runner.lock"))
+            .unwrap()
+            .permissions();
+        assert_eq!(permissions.mode() & 0o777, 0o600);
+    }
+    let refusal = fixture
+        .try_runner()
+        .await
+        .err()
+        .expect("the competing owner must be refused")
+        .to_string();
+    assert!(
+        refusal.contains("already owns this node state directory"),
+        "simultaneous ownership must fail: {refusal}"
+    );
+    assert_eq!(fixture.history(), original_history);
+    assert!(fixture.server.calls("/artifacts").is_empty());
+    first.once().await.unwrap();
+    drop(first);
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let artifact_files = std::fs::read_dir(&fixture.artifacts)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "bin")
+        })
+        .count();
+    assert_eq!(artifact_files, 1);
+    let after_reopen = std::fs::read_dir(&fixture.artifacts)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "bin")
+        })
+        .count();
+    assert_eq!(
+        after_reopen, 1,
+        "released lock must allow evidence replay without another file effect"
+    );
 }
 
 #[tokio::test]
