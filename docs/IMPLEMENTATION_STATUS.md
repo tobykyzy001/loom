@@ -2,7 +2,15 @@
 
 Updated: 2026-11-19.
 
-## Device presence now honors the controller-computed staleness
+## Vue keys preserve each independent Installation
+
+`DevicesView` previously keyed all rows for one Node ID merely by `node.id`, even though the registry deliberately permits several Installation IDs, workers and heartbeat histories for that Node ID. Each installation now has its own `nodeIdentityKey = (node_id ?? id)/installation_id`, plus an exact `data-installation-id` selector. Legacy/alias ID handling and source-presence semantics remain unchanged.
+
+The existing real B/A production binding driver adds a presence sequence rather than a fake multi-host registry: two actual cryptographic registrations start fresh; only one specifically identified row's heartbeat is made older; the original worker/root/inventory and status records stay unchanged. Actual application restart preserves the same SQLite directory, token and port. A remains active while B is stale, the UI counts **one** online installation, and produces **no duplicate Vue-key warning**. A stale B still is not a revocation; the subsequent B confirmation, wrong A root/worker denial, admin Grant with exact B worker, and one-valid-Installation legacy payload all retain their previous behavior.
+
+Proof: [seven completed phases](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-pNBgte/result.json), with a raw shared Node ID, different Installation IDs, no duplicate Vue-key warning, and unchanged directional worker/bindings. This covers logical on-machine Installation identity keys and per-record presence. It is not an actual network failure, second physical Host, compose 1+3 test, per-Installation admin revoke protocol or universal M1 environment behavior. The new presence unit brings the Web suite to **209 passing tests**; production build and the previous full scenario still pass.
+
+## Device presence now honours the controller-computed staleness
 
 The former Devices page and topbar treated stored `status:'online'` as current online even when the controller's `/nodes` response had already computed `online:false` and `freshness:'stale_offline'`. Shared `nodeOnline` honors explicit backend presence and falls back to the existing 90-second client heuristic only for legacy results without `online`. `revoked_at` and `offline` always count as unavailable without weakly deriving a Grant or remote reachability. Busy/degraded activity is still distinct from heartbeat expiry; the raw timestamp is retained as historical evidence instead of a fake freshness/probe.
 

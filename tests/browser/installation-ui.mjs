@@ -25,7 +25,7 @@ assert.equal(await access(executable).then(() => true, () => false), true, `Stan
 await realpath(executable)
 const flags = new Set(process.argv.slice(2))
 assert.ok([...flags].every(flag => flag === '--headed'), 'Usage: node tests/browser/installation-ui.mjs [--headed]')
-const trackedSources = ['apps/web/src/components/ProjectBindingDialog.vue', 'apps/web/src/App.vue', 'apps/web/src/binding-input.ts']
+const trackedSources = ['apps/web/src/components/ProjectBindingDialog.vue', 'apps/web/src/App.vue', 'apps/web/src/binding-input.ts', 'apps/web/src/views/DevicesView.vue', 'apps/web/src/lib/format.ts']
 async function sourceHashes() {
   const hashes = {}
   for (const relative of trackedSources) {
@@ -238,6 +238,75 @@ try {
       if (url.origin === center.baseUrl && url.pathname === '/api/v1/project-bindings' && request.method() === 'POST') report.browser_requests.push({ request })
     })
     report.results.production_asset_loaded = true
+  })
+  await phase('independent-installation-presence-and-owned-refresh', async () => {
+    const { a, b } = report.results.fixture
+    assert.equal(typeof a.node_id, 'string')
+    assert.equal(typeof b.installation_id, 'string')
+    assert.ok(b.node_id.length > 0)
+    assert.ok(b.installation_id.length > 0)
+    const duplicateKeys = []
+    page.on('console', message => {
+      if (message.text().includes('Duplicate keys')) duplicateKeys.push(message.text())
+    })
+    await page.locator('.main-nav').getByRole('button', { name: '设备', exact: true }).click()
+    await pollBoolean(() => document.querySelector('.summary-number strong')?.textContent?.trim() === '2', 'two fresh/consented identity installations')
+    const dataDir = center.dataDir, address = center.baseUrl, clientToken = center.clientToken
+    const immutableBefore = db(connection => connection.prepare('SELECT id,installation_id,status,revoked_at,workers,inventory,capabilities,registered_at FROM nodes ORDER BY installation_id').all())
+    assert.equal(immutableBefore.length, 2)
+    assert.equal(a.node_id, b.node_id)
+    assert.equal(typeof a.node_id, 'string')
+    assert.equal(typeof b.installation_id, 'string')
+    assert.ok(b.node_id.length > 0)
+    assert.ok(b.installation_id.length > 0)
+    await center.stop(); center = null
+    const control = new DatabaseSync(join(dataDir, 'loom.sqlite3'))
+    const staleTimestamp = '2000-01-01T00:00:00Z'
+    try {
+      control.exec('BEGIN IMMEDIATE')
+      const result = control.prepare('UPDATE nodes SET last_heartbeat=?1 WHERE id=?2 AND installation_id=?3 AND revoked_at IS NULL').run(staleTimestamp, b.node_id, b.installation_id)
+      assert.equal(result.changes, 1)
+      control.exec('COMMIT')
+    } catch (error) {
+      try { control.exec('ROLLBACK') } catch {}
+      throw error
+    } finally { control.close() }
+    center = await startRustConcierge({ root: join(root, 'server'), dataDir, baseUrl: address,
+      env: { ...process.env, LOOM_CLIENT_TOKEN: clientToken, LOOM_SERVER_CMD: `${process.execPath} ${join(root, 'serve.mjs')}` } })
+    assert.equal(center.dataDir, dataDir)
+    assert.equal(center.clientToken, clientToken)
+    const view = (await admin.get('/api/v1/nodes')).nodes
+    const freshA = view.find(node => node.installation_id === a.installation_id)
+    const staleB = view.find(node => node.installation_id === b.installation_id)
+    assert.equal(freshA.online, true)
+    assert.equal(staleB.online, false)
+    assert.equal(staleB.freshness, 'stale_offline')
+    assert.equal(staleB.status, 'online')
+    assert.equal(staleB.revoked_at, null)
+    assert.equal(staleB.last_heartbeat, staleTimestamp)
+    assert.deepEqual(db(connection => connection.prepare('SELECT id,installation_id,status,revoked_at,workers,inventory,capabilities,registered_at FROM nodes ORDER BY installation_id').all()), immutableBefore)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.locator('.loom-app').waitFor()
+    await page.locator('.main-nav').getByRole('button', { name: '设备', exact: true }).click()
+    await pollBoolean(() => document.querySelector('.summary-number strong')?.textContent?.trim() === '1', 'one fresh and one stale installation, not one missing ticket')
+    const cardA = page.locator(`.node-item[data-installation-id="${a.installation_id}"]`)
+    const cardB = page.locator(`.node-item[data-installation-id="${b.installation_id}"]`)
+    await cardA.locator('[data-device-presence="active"]').waitFor()
+    await cardB.locator('[data-device-presence="offline"]').waitFor()
+    assert.equal(await cardA.locator('[data-device-presence="active"]').count(), 1)
+    assert.ok((await cardB.innerText()).includes('心跳陈旧'))
+    assert.ok((await cardB.innerText()).includes('2000'))
+    assert.ok((await cardB.innerText()).includes('这是末次心跳快照'))
+    assert.ok((await page.locator('body').innerText()).includes('节点在线'))
+    assert.ok(!(await cardB.innerText()).includes('确认绑定'), 'stale presence is not a new permission flow')
+    assert.deepEqual(duplicateKeys, [], 'two Installation records must not create duplicate Vue keys')
+    await page.screenshot({ path: join(evidence, 'independent-installation-presence.png'), fullPage: true })
+    report.results.installation_presence = {
+      shared_node_id: a.node_id === b.node_id, pair_keys_distinct: true, duplicate_key_warnings: duplicateKeys,
+      active_installation_preserved: true, other_installation_stale: true, original_worker_inventory_preserved: true,
+      original_status_not_silently_revoked: true, online_count_from_real_controller: 1,
+      same_data_dir_and_token_reopen: true, physical_second_host: false,
+    }
   })
   await phase('explicit-tuple-selection-narrow-DOM-and-real-B-confirmation', async () => {
     const { project_id, a, b } = { project_id: report.project_id, ...report.results.fixture }

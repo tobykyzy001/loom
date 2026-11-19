@@ -55,6 +55,10 @@ export function heartbeatStale(value?: string): boolean {
   return !value || new Date(value).getTime() < Date.now() - 90_000
 }
 
+export function nodeIdentityKey(node: Pick<LoomNode, 'id' | 'node_id' | 'installation_id'>): string {
+  return `${node.node_id ?? node.id}/${node.installation_id ?? ''}`
+}
+
 export function nodeOnline(node: Pick<LoomNode, 'status' | 'online' | 'last_heartbeat' | 'last_seen_at' | 'revoked_at'>): boolean {
   if (node.revoked_at || node.status === 'offline') return false
   // The controller has already applied revocation and its heartbeat TTL. An

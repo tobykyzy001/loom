@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import DevicesView from '../src/views/DevicesView.vue'
-import { heartbeatStale, nodeOnline } from '../src/lib/format'
+import { heartbeatStale, nodeIdentityKey, nodeOnline } from '../src/lib/format'
 import type { LoomNode } from '../src/api/types'
 
 const node = (values: Partial<LoomNode> = {}): LoomNode => ({
@@ -26,6 +26,22 @@ describe('controller-backed device presence', () => {
     expect(heartbeatStale('2050-01-01T00:00:00+00:00')).toBe(false)
     expect(heartbeatStale()).toBe(true)
     expect(heartbeatStale('corrupt-time')).toBe(false)
+  })
+
+  it('keeps card identity for separate installations sharing one Node ID', async () => {
+    const shared = { id: 'a'.repeat(64), node_id: 'b'.repeat(64) }
+    expect(nodeIdentityKey({ id: shared.id, installation_id: 'A' })).toBe(`${shared.id}/A`)
+    expect(nodeIdentityKey({ ...shared, installation_id: 'B' })).toBe(`${shared.node_id}/B`)
+    expect(nodeIdentityKey({ id: shared.id, node_id: shared.node_id })).toBe(`${shared.node_id}/`)
+    const before = await renderToString(createSSRApp(DevicesView, { nodes: [
+      node({ id: shared.id, installation_id: 'A', online: true, status: 'busy' }),
+      node({ id: shared.id, installation_id: 'B', online: false, freshness: 'stale_offline', last_heartbeat: '2000-01-01T00:00:00Z' }),
+    ] }))
+    expect(before).toContain('data-installation-id="A"')
+    expect(before).toContain('data-installation-id="B"')
+    expect(before).toContain('data-device-presence="active"')
+    expect(before).toContain('data-device-presence="offline"')
+    expect(before).toMatch(/class="summary-number"[^>]*><strong[^>]*>1<\/strong>/)
   })
 
   it('renders the authoritative stale card with zero online count and its original heartbeat, not current-online claims', async () => {

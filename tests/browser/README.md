@@ -48,6 +48,10 @@ Loom child 来清理。标准 Playwright path 不执行这段支线。
 - 选择A碰到B的项目root时得到实际403 `binding_not_declared_by_host`，错误文案可见，原A表单保留，原有binding/audit数量不变，不自动改为B。选择在A失效后只剩B时的legacy路径，实际POST没有`installation_id`字段，返回与DB都是B。这里的SQL撤销仅为私有negative fixture，不增加按Installation撤权的管理API。
 - 任何Task执行都不是这一driver的内容；Ticket/Assignment/Report/Artifact/Effect数量均为0。Ticket持有、 stale-selected刷新/撤销及真实Agent取消不在这次Web场景测试中。
 
+新增的`independent-installation-presence-and-owned-refresh`先通过两个真实Heartbeat到达在线，再停止中心，且只将B的末次heartbeat改为固定旧RFC3339。A/B状态、Worker、inventory、root/capabilities等其余字段经SQLite逐行对照保持，B并未撤销或换取Grant。按原dataDir/token/端口重启后，实际API是A在线、B`online:false`且`stale_offline`，设备页得到恰恰**1**个active Installation，两个`data-installation-id`卡分别状态正确。`nodeIdentityKey`现在由`node_id ?? id`与完整`installation_id`组成，不再把Node ID中的每一个安装强行共用一条VNode key；实际Edge没有duplicate-key warning，旧timestamp、末次time/source仍保留。陈旧B不是自动revoked/自动失去后面的binding能力，原B/反例A/legacy-check仍全部按原context通过。
+
+这段完整生产结果[比之前的结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-pNBgte/result.json)含七阶段PASS以及该presence proof。这里证明的是**同Node ID的多个安装各自拥有identity / pulse / worker边界**，而不是另一台物理设备、真实断网或1+3多机测试。
+
 纯函数与SSR另有本地UI case，不能替代这段运行。旧的pointer阻塞复现见[HpSR2h](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-HpSR2h/result.json)；子任务通过之外，主Agent还用相同源码和driver独立重跑，最终[kJL3dd result](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-kJL3dd/result.json)为七阶段PASS，driver SHA `4111f8310041d217656ba73f4e579dc842caa94c770a6a18a404163a97bb8045`，proof SHA `66f38e09a01cc2cc022a653869236760301366d2598e4e4881108b5ebb013c82`。构建前后三个主要是Vue文件SHA相同；owned context/center停止，临时Node密钥、项目、browser profile实际删除，无凭据进入proof。
 
 ## M0同源PWA静态壳的online / offline / online实测

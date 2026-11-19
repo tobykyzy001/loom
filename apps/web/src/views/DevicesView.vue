@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import type { Grant, LoomNode, Project } from '../api/types'
 import type { ImageEvaluationState } from '../lib/imageAvailability'
 import ImageAvailabilityAssessment from '../components/ImageAvailabilityAssessment.vue'
-import { capabilityName, formatTime, heartbeatStale, nodeOnline } from '../lib/format'
+import { capabilityName, formatTime, heartbeatStale, nodeIdentityKey, nodeOnline } from '../lib/format'
 import AppIcon from '../components/AppIcon.vue'
 import ModelInventorySection from '../components/ModelInventorySection.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -91,7 +91,7 @@ defineExpose({ setEnrollment })
       <p v-if="copyError" class="form-error" role="alert">无法自动复制。请选中配对码并手动复制。</p>
       <EmptyState v-if="!loading && !nodes.length" icon="devices" title="还没有已注册的设备" description="请安装并主动注册 Local Node。配对码不等于任务权限，也不会自动安装任何插件。" />
       <div v-else-if="nodes.length" class="node-list">
-        <article v-for="node in nodes" :key="node.id" class="node-item">
+        <article v-for="node in nodes" :key="nodeIdentityKey(node)" :data-installation-id="node.installation_id" class="node-item">
           <span class="node-avatar" :class="{ offline: !nodeOnline(node) }"><AppIcon name="devices" :size="24" /></span>
           <div class="node-body">
             <div class="node-heading">
