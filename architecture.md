@@ -5,44 +5,37 @@
 
 本文保存 Loom 的长期架构约束、领域边界和不应随实现进度遗忘的设计判断。产品取舍见 [vision.md](vision.md)，分阶段验证见 [roadmap.md](roadmap.md)。
 
-## 1. 核心不变量
+## 1. 核心不变量：分开建模，不等于彼此无关
 
-```text
-Agent ≠ Host
-Worker ≠ Agent
-Project ≠ Chat
-Discovery ≠ Permission
-Capability ≠ Grant
-Assignment ≠ Ticket
-Delivered ≠ Read
-Unknown Outcome ≠ Failed
-Collapsed Transcript ≠ Deleted Transcript
-Visible Transcript ≠ Authorized Resource Access
-Observed Habit ≠ Confirmed Preference
-Saved Skill ≠ Standing Grant
-Mobile Client ≠ Always-on Host
-Device Reachable ≠ Device Trusted
+这里的 `≠` 读作“**不是同一个概念，不能相互替代**”，不表示两者没有关系。
+两侧通常有关联，但关联必须显式建立；不能由一方的存在自动推断另一方。
+
+- **身份与授权**：Agent ≠ Host；Worker ≠ Agent；Project ≠ Chat；Discovery ≠ Permission；Capability ≠ Grant。
+- **工作与状态**：Assignment ≠ Ticket；Delivered ≠ Read；Unknown Outcome ≠ Failed。
+- **展示与记录**：Collapsed Transcript ≠ Deleted Transcript；Visible Transcript ≠ Authorized Resource Access。
+- **学习与设备**：Observed Habit ≠ Confirmed Preference；Saved Skill ≠ Standing Grant；Mobile Client ≠ Always-on Host；Device Reachable ≠ Device Trusted。
+
+![对象与授权链](docs/architecture/01-invariants.png)
+
+还需要始终保持：**中心是唯一任务权威；执行与数据留在各 Host。**
+控制流经过协调器，大 Artifact 尽量直达；只共享路由、授权和必要工作简报。
+模型可以提出需求，代码执行 Policy；界面展示、记录保存和资源访问分别判断。
+手机或 IM 的自然语言不是系统授权，敏感操作需要明确摘要、近期设备确认，必要时使用平台强认证。
+没有合适的执行环境就排队或询问，不虚构工作已经完成。
+
+## 2. 参考方案与 Loom 的选型
+
+参考：[deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。
+它是研究原型；本文只采用适合 Loom 目标的控制面划分，不把公开设想当作已实现能力，也不评价参考方案本身的架构对错。
+
+```mermaid
+flowchart LR
+    A[Trigger<br/>事件] --> B[Eval / Decision<br/>理解与决策]
+    B --> C[Mandate / Grant<br/>授权]
+    C --> D[Ticket<br/>持久工作]
+    D --> E[Assignment<br/>一次分派]
+    E --> F[Report<br/>结构化结果]
 ```
-
-- 控制面有唯一任务权威；执行环境和数据保持分布。
-- 只共享路由、授权和必要工作简报，不共享全量记忆。
-- 控制流经过协调器，大数据流尽量直达。
-- 手机、IM 中的自然语言不是天然的系统授权；移动端敏感操作使用有明确操作摘要的显式、近期设备确认，必要时采用平台强认证，不能用长期记住的手机 Login 取代 Grant。
-- 模型可以声明任务需要某种能力，但不能自行扩大权限。
-- 没有合适的执行环境就排队或询问，不虚构已经完成的工作。
-- 界面是否展示过程，与系统是否记录过程、用户是否有权访问过程，是三个不同问题。
-
-## 2. 从 dsh-superagent 借鉴什么
-
-参考：[deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。公开仓库是研究原型，不能将文章中的所有设想都视为已实现能力。
-
-最值得借鉴的是控制面的四分法：
-
-```text
-Trigger → Eval / Decision → Mandate + Ticket → Assignment → Report
-```
-
-它把事件、授权、持久工作和具体执行分开，而非只给单会话加多个子 Agent。
 
 ### 2.1 保留的设计
 
@@ -57,98 +50,268 @@ Trigger → Eval / Decision → Mandate + Ticket → Assignment → Report
 | Structured Report / Attention | Worker 提交结构化状态、结果和人工问题，不靠自由文本猜状态 |
 | Quiet by default | 只在有结果、需要决策、受阻或有价值进展时打扰用户 |
 
-### 2.2 不直接照搬的部分
+### 2.2 针对 Loom 目标作出的不同选择
 
-- **Ticket ≠ 本机 DSH Session + 本机绝对目录**：中心只保存逻辑 ProjectRef 和 Placement，Host 在实际执行时绑定本地 Workspace。
-- **不承诺直接迁移 Session**：跨机迁移的是 Task、Grant、必要 Input、报告、Git 引用及 Artifact。
-- **不让第二个 LLM 充当资源调度器**：Resource Scheduler 使用可认证的库存与确定性约束。
-- **不把进程级命令 Shim 当隔离**：公司/个人 Worker 同机时，权限由 Host 强制执行，必要时使用独立 OS 用户或容器。
-- **不把身份映射写进提示词**：跨端用户身份使用经过验证的 Principal 与 Device Link。
-- **不把已有 Effects 当作跨机 exactly-once**：增加 Lease、fencing、unknown outcome 和确定性对账。
-- **将 GitHub PR 生命周期移出通用核心**：通用任务以 Result、Review 和 Artifact 表示交付；PR 终态属于 GitHub 适配器。
-- **SourceKind 与 SourceInstance 分离**：每种入口可以有多个独立来源，各自有身份、游标、Policy 和命名空间。
+以下都是**针对 Loom 目标的选型适配**：不是哪一方架构有误，也不是对参考方案作全面评价。
+这里比较的是 Session、资源调度、隔离和身份等机制；部署位置与模型选择则根据任务、资源、隐私和成本独立决定。
+
+| 选择 | 与 Loom 目标的适配原因 |
+| --- | --- |
+| Ticket 不绑定本机 DSH Session 或绝对目录 | 中心保存逻辑 ProjectRef / Placement，由 Host 在执行时绑定 Workspace，才能跨环境恢复 |
+| 迁移工作上下文，不承诺直接迁移 Session | 跨机传递 Task、Grant、必要 Input、报告、Git 引用和 Artifact，不假设各 Host 的内部 Session 可互换 |
+| Resource Scheduler 不交给另一个 LLM | 调度需要可认证库存、权限和确定性约束；模型可以辅助解释，不能凭自述拍板 |
+| 不把进程命令 Shim 当隔离 | 公司 / 个人 Worker 同机时由 Host 执行权限，必要时使用独立 OS 用户或容器 |
+| 身份不写进提示词映射 | 跨端身份使用已验证的 Principal 与 Device Link，不由模型推断 |
+| 不把已有 Effects 当跨机 exactly-once | 使用 Lease、fencing、unknown outcome 和确定性对账处理重复投递与失联 |
+| GitHub PR 生命周期留在适配器 | 通用核心只表达 Result、Review、Artifact；PR 终态是 GitHub 的领域规则 |
+| SourceKind 与 SourceInstance 分离 | 同类入口可以有多个独立来源，各自拥有身份、游标、Policy 和命名空间 |
 
 参考文档：[Domain](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/001-domain.md) · [Authorization](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/002-authorization.md) · [Execution](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/003-execution.md) · [Architecture](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/007-architecture.md)。
 
 ## 3. 目标架构
 
-```text
-                   Phone / Web / IM / Other Sources
-                                  │
-                            Loom Concierge
-                                  │
-       ┌──────────────────────────┼───────────────────────────┐
-       │                          │                           │
- Identity / Policy           Ticket + Grant           Resource Registry
- Router / Eval          Assignment + Placement       Project / Model Index
- Effects / Outbox        Lease + Reconciliation       Artifact Index
- Conversation Views         Task / Message Graph           Audit Index
-       │                          │                           │
-       └──────────────────────────┼───────────────────────────┘
-                                  │
-                     Authenticated Node Control Plane
-                                  │
-           ┌──────────────────────┼──────────────────────┐
-           │                      │                      │
-       DSH Desktop A           DSH GPU Host B         Bare Linux C
-       DSH Loom Plugin         DSH Loom Plugin       Rust Host Agent
-       Local Project           Local Model Worker    API / CLI Worker
-       Local Context           Local Models          Local Checkout
-           │                      │                      │
-           └──────────────────────┼──────────────────────┘
-                                  │
-                   Task Reports / Grants / Artifact Refs
+![控制面与执行面](docs/architecture/02-system.png)
+
+中心负责身份、授权、持久工作和恢复；Local Node 负责执行环境与本机副作用。
+节点主动注册，但注册不等于授权。中心不绕过 Local Node 直接操纵远程 Harness，也不汇聚完整 Worker Transcript。
+
+| 关注点 | 中心 Concierge | Local Node / Host Agent |
+| --- | --- | --- |
+| 主要对象 | Ticket、Grant、Lease、Assignment、Report、索引 | Session、Workspace、Worker、Artifact bytes、Effect Ledger |
+| 决策 | Policy、Placement、配额、调度和恢复 | 本机能力探测、执行、心跳、停止与对账 |
+| 数据 | 必要消息、Shared Brief、引用与审计 | 原始上下文、私有文件、Secret 和本地运行事实 |
+
+Local Node 分为两种部署形态，使用同一版本化 Node 协议：
+
+- **DSH Loom Plugin**：在 DSH 进程内复用 Agent / Session，提供注册、事件、Grant、心跳、ArtifactRef 和对账；DSH 主机不必再装独立 Rust Agent。
+- **Bare Rust Host Agent**：在没有 DSH 的桌面或 Linux 服务器上，通过 Native API / MCP / CLI 管理 Worker 和本机资源。
+
+同一节点声明的模型 HTTP 服务属于它的 Runtime，不必另装 Agent。
+Owner、Device Link、Node Identity、Profile Identity 和 Workspace Scope 分别映射，同机不等于同身份或同授权。
+
+### 3.1 设备角色
+
+| 平台 | Client | Host 首版定位 |
+| --- | --- | --- |
+| macOS / Linux / Windows | Web / Desktop Shell | 有 DSH 时使用 Loom 插件；裸机使用 Rust Host Agent，逐步验证后台服务与开机恢复 |
+| iOS / Android | Web / PWA，必要时薄原生壳 | 查看、审批和 Artifact 访问；不是默认可靠的长驻 Host |
+| NAS / 服务器 Linux | Web | 资源和权限满足时可作为 Host |
+
+移动设备受锁屏、进程终止、网络迁移和电池策略影响，不自动拥有稳定 Lease，也不靠保活轮询伪装长期执行能力。
+
+### 3.2 四种决策职责
+
+![四类决策职责](docs/architecture/03-routing.png)
+
+| 组件 | 决定什么 | 不做什么 |
+| --- | --- | --- |
+| Router / Eval | 是否做、做什么、请求何种 Grant | 不直接执行副作用 |
+| Project Scheduler | DAG、依赖、优先级、输入输出和项目阶段 | 不凭空创造资源或权限 |
+| Resource Scheduler | 根据 Host、模型、位置、权限和负载作出 Placement | 不由另一个 LLM 凭自报能力拍板 |
+| Host Agent | 本机启动、授权、监控、恢复、对账和上报 | 不成为第二个跨机任务权威 |
+
+中心初期采用单写者与事务化存储。库存状态是资源事实，不是行动 Grant；Worker 自称“可以跑”也不是最终资源事实。
+
+### 3.3 如何阅读当前实现
+
+![任务生命周期](docs/architecture/08-task-lifecycle.png)
+
+持久 Ticket 及其授权、执行 Assignment、Report 与 Effect/Artifact 各自保留身份。图中对象按关联排列，**不表示必须先获得 Grant 才能创建 Ticket**；Source 可先形成等待审批的 Ticket，审批与 Assignment 分别核验当前 Grant。
+每个对象只负责一个事实；核心对象定义收在[附录 A](#附录实现约束与验证记录)。
+
+当前实现围绕**受认证 Source、受限任务、真实 Node 与可核验 Artifact**逐步增长，不代表长期设计中的全部能力都已交付。
+每项能力都要同时说明范围、授权前提、外部效果、失败 / Unknown 处置、恢复证据以及尚未覆盖的平台。
+实现约束与验证记录统一收入附录；当前开发状态以 [IMPLEMENTATION_STATUS](docs/IMPLEMENTATION_STATUS.md)、[BASELINE](BASELINE.md) 和 [roadmap](roadmap.md) 为准。
+
+## 4. 会话可见性与审计
+
+### 4.1 默认简洁，过程可展开
+
+| 视图 | 回答的问题 |
+| --- | --- |
+| Conversation | 用户提出什么、确认什么，最终结果是什么 |
+| Activity | 任务在哪、处于什么阶段、当前阻塞是什么 |
+| Collaboration | 谁在协作、为何委派、交接了什么、结论是什么 |
+| Worker detail | 哪次 Assignment 使用了哪个 Session、工具、产物和报告 |
+
+界面支持全局偏好与单任务覆盖：默认折叠、始终展开、只看关键协作或隐藏过程。
+**折叠、保留和权限是三件事**：偏好不改变保存的数据；展开、搜索、复制、导出和跨 Worker 引用仍需鉴权。
+
+- 不把所有 Agent / Worker 消息塞进主聊天流，也不把原始 Transcript 当作状态唯一来源。
+- MessageRef 记录发送者、接收者、任务关联、来源、可见性和敏感级别；结构化 Report / Effect / Artifact 独立保存。
+- 外部 Harness 的内部 Session 通过 Adapter 映射，不要求统一存储格式；读不到完整 Transcript 时明确缺口，不伪造记录。
+- 用户可以隐藏或删除自己的过程展示，但这不意味着可以删除尚未完成的 Grant、Effect 和必要审计。
+
+### 4.2 存储与性能边界
+
+中心初期不汇聚全部原始 Worker Transcript，只保存主对话和关键协作消息、有界 Shared Brief、Host 侧受控引用，以及索引、可见性、摘要与审计元数据。
+用户展开细节时按需从有权限的 Host 获取；Host 离线就显示“暂不可用”，不把摘要冒充完整原文。
+
+## 5. 记忆、上下文与归档
+
+### 5.1 记忆分层
+
+| 层 | 内容 | 默认行为 |
+| --- | --- | --- |
+| Concierge Memory | 用户偏好、Agent / Host 索引、授权关系、活跃项目索引 | 长期保存，路由时按需使用 |
+| Agent / Worker Memory | 各角色长期规则、项目经验和局部上下文 | 留在所属 Worker，不默认共享 |
+| Task Working Memory | 当前约束、阶段状态、错误、局部决策 | 只交给相关任务和后续 Worker |
+| Shared Brief | Worker 提交给协调器的结论、证据、阻塞与 Artifact 引用 | 有界、结构化、与权限分开 |
+| Cold Archive | 原始会话、日志、旧资料、生成参数和历史版本 | 不主动注入，按需检索和恢复 |
+
+活跃任务约束优先；稳定偏好和长期安全规则不因时间自动过期；被替代的信息标为历史版本。
+原始过程进入冷档案，重复中间过程可以淘汰，但未完成承诺、Grant 和审计事实不能由模型自行清理。
+记忆可见性不等于资源访问权限，会话折叠也不是记忆清理指令。
+
+### 5.2 从观察到确认
+
+![记忆与技能审核](docs/architecture/04-memory.png)
+
+用户明确说“记住”可以保存显式 Memory；自动观察只能形成 HabitObservation / Candidate。
+候选要保留来源、作用域和版本，支持预览、编辑、接受、拒绝、稍后处理、暂停建议与遗忘。
+
+- **Memory** 表达偏好和已确认经验；**Skill** 表达可复用的方法，含适用条件、必要输入、步骤、验证、Artifact、来源和版本。
+- 接受时可限定全局、项目、Worker 或 Host 作用域，默认最小可用范围；持续操作不能只埋在 Memory。
+- Skill 保存后仍需真实测试或样例回放才能标为已验证；保存不等于执行，运行所需的资源、模型和副作用权限逐次由 Grant 决定。
+- 新的明确指令优先于旧习惯；冲突必须询问，不能因“用户经常批准”推断永久授权。
+- 拒绝可以降低提醒频率，但不被重新解释为另一项长期偏好；候选与审核有审计，普通日志不因此无限期保留。
+
+## 6. Resource、Project 与 Model Registry
+
+### 6.1 资源事实与项目位置
+
+Host 自报硬件、目录、Worker 和在线状态；Controller 可以实测服务与队列；用户声明隐私和无人值守政策；历史记录提供冷启动与耗时。
+四类来源分别标记，未知、离线、超时、不支持、拒绝和缺失不能合并成一个“可用 / 不可用”。
+
+Project 必须区分 **Canonical Remote、Working Tree、Generated Workspace、Credential Location**。
+优先复用已授权工作树；保留未提交修改；并行修改优先使用独立 Worktree。
+Clone 是独立操作，知道 Git URL 不代表自动 Clone；凭据留在本机 Broker，本机绝对路径也不作为全局 Artifact URI。
+当前 Git 探测只读取获批项目根中的 Git 事实与 dirty state，剥离 URL 凭据，见[验证边界](tests/projects/README.md)。
+
+### 6.2 模型生命周期
+
+```mermaid
+flowchart LR
+    A[Register<br/>登记身份与版本] --> B[Approve<br/>批准范围]
+    B --> C[Place / Load<br/>本机放置与加载]
+    C --> D[Invoke<br/>独立授权调用]
+    A --> E[Retire<br/>退役但保留历史]
+    C --> E
 ```
 
-Host 数量、设备类型、模型能力和任务组合均由用户环境决定，不复制说明性场景中的固定机器名称。
+Registry 管模型元数据、适用环境、可用范围和放置计划；Host 管实际权重、加载和调用。
+私有模型可以声明 `no-copy`、`local-only` 或 Host 专用；下载、上传、迁移与调用分别授权。
+权重不进入提示词或普通事件记录，结果保留模型、LoRA、参数、Revision 和执行环境。
 
-设备角色分开建模：
+## 7. 技术栈与 Harness 接入
 
-| 平台 | Client | Host Agent 首版定位 |
+![首版部署结构](docs/architecture/05-deployment.png)
+
+- **Rust**：Concierge、Bare Host Agent、Registry、Policy、Lease、任务状态机和持久化应用层；共享核心模型，但不把私有 Rust ABI 当公共协议。
+- **Vue 3 + TypeScript**：共享 Web / PWA 领域界面；桌面优先 Tauri，移动端先 PWA，需要系统能力时再使用薄壳。
+- **多语言边界**：DSH 插件保持 TypeScript / JavaScript；已有模型服务和工具保持原语言，通过版本化 HTTP、MCP 或受限本地 RPC 通信。
+
+首个开发基线是 macOS 单用户任务闭环，再逐个验证 Windows / Linux Host；同一套领域模型不等于相同 DOM 和权限可以原样跨平台运行。
+Rust 的选择价值在单二进制、资源和本机策略执行，不消除 OS 差异；具体 crate 由原型选型确定。
+
+### 7.1 Adapter 按能力选择
+
+| 接入方式 | 使用条件 | 部署位置 |
 | --- | --- | --- |
-| macOS / Linux / Windows | Web / Desktop Shell | 已装 DSH 时以其 Loom 插件作为节点；裸机使用轻量 Rust Host Agent，逐步验证后台服务与开机恢复 |
-| iOS / Android | Web / PWA，必要时薄原生壳 | 用户入口、审批、任务与 Artifact 查看；不是默认可靠的长驻 Host |
-| NAS / 服务器 Linux | Web | 在资源和权限满足时可作为 Host |
+| Native API Adapter | 已有任务、输入、取消和状态查询 API | Host Agent 旁的独立进程 |
+| MCP / Tool Adapter | 标准工具或配置连接已覆盖必要行为 | Host 本地服务或 Harness 配置 |
+| CLI / Process Adapter | 只能可靠启动和观测进程，且产物边界可确定 | Host Agent 的受管子进程 |
+| Host Runtime Plugin | 确需 Session 事件、细粒度取消和进程内状态 | 对应 Harness 进程 |
+| Runtime Connector | LLM、ComfyUI 或专用 Worker | 与 Harness Adapter 分离 |
 
-移动设备受系统后台限制、锁屏、应用切换、网络迁移和电池策略影响，不自动拥有稳定 Lease，也不以持续轮询或 PWA 保活伪装长期执行能力。其能否作为有限、专有的 Worker，必须独立能力和政策验证。
+Adapter 显式声明 `register / submit / interrupt / resume / events / artifacts / transcript` 等能力，未支持项显示缺口。
+DSH 的 MCP 只提供工具接入，不能代替 Assignment、取消、Lease 与恢复语义；DSH 插件复用宿主可恢复的 Session，不制造私有缓存权威。
 
-### 3.1 Concierge 中心
+### 7.2 主动注册与中心权威
 
-负责：
+```mermaid
+flowchart LR
+    A[安装与配置中心地址] --> B[节点密钥与签名挑战]
+    B --> C[配对码 / 预置身份 / 管理员批准]
+    C --> D[注册与最小节点凭据]
+    D --> E[心跳与 Inventory]
+    E --> F[逐 Assignment 的 Grant + Lease]
+    F --> G[执行、报告与对账]
+```
 
-- 统一聊天入口与用户身份；
-- 意图判断、Policy Gate、Source 与回复 Channel；
-- Ticket、Grant、Assignment 与结构化 Report；
-- Project、Model、Worker、Host 和 Artifact 索引；
-- Placement、Lease、资源配额与任务 DAG；
-- 持久 Effect、恢复、对账及超时；
-- 主 Agent 的路由记忆，不汇聚完整 Worker Transcript。
+节点主动出站连接中心，中心与节点相互认证；不要求中心直连 Harness 管理端口。
+连接、注册和能力声明不自动产生 Membership、目录访问或任务 Grant。
+DSH 的多个 Profile / Agent 可以是独立 Worker 命名空间，中心保留跨机任务权威；断线、Token 撤销和协议不兼容时，节点不盲目清空或重做。
 
-推荐初期采用中心单写者与事务化存储，不为了“去中心化”引入多主写入。
+## 8. 选择性分发与安装
 
-### 3.2 Local Node / Host Agent 职责
+![安装不等于授权](docs/architecture/06-installation.png)
 
-每个被纳管的执行环境具有 Local Node 身份，负责：
+用户可在管理设备构建或下载受批准包，再向选定 Host 创建 Rollout：选择目标、审批包和版本、传输、兼容检查、授权、安装、激活、健康检查与报告。
+失败进入显式回滚或 Needs Person，不能把 Unknown 当成失败后盲目重装。
 
-- 设备、硬件、服务和 Worker 注册；
-- GPU、显存、队列、负载、模型的本地探测；
-- 本机 Project 路径与 Workspace Grant；
-- 本机 Harness / Worker 执行；
-- Secret Broker 和实际权限执行；
-- Lease 心跳、停止与过期；
-- 本机 Effect Ledger 和副作用对账；
-- Artifact 内容存储与受控传输。
+新 Host 可手动安装，或经用户明确授权的 Ansible / SSH / MDM Bootstrap 纳入。
+免密只说明已有运维授权，聊天 Grant 不变成远程 Shell / sudo 权限；只允许固定、已审计、有版本的 Installer。
+已有 DSH 的 Host 安装插件，无 DSH 的 Host 安装 Bare Agent；注册以后仍需配对和逐任务 Grant。
 
-中心不绕过 Local Node 的边界直接操纵其他机器的 Harness 内部服务，也不假定每台机器模型目录相同。Local Node 的主要包装有两种：
+### 8.1 包与权限
 
-| 部署形态 | 实现与职责 |
-| --- | --- |
-| **DSH Loom Plugin** | 在 DSH 进程内实现 Local Node：节点注册、Profile / Workspace 标签、SessionRef、事件流、本地 Grant、心跳、ArtifactRef 和效果对账；复用已有 DSH Agent / Session，不要求独立 Rust Host Agent。 |
-| **Bare Rust Host Agent** | 在没有 DSH 的桌面或 Linux 服务器提供相同 Node 协议，通过 Native API / MCP / CLI 管理 Worker 和本机资源。 |
+Package Manifest 至少包含不可变版本、摘要、签名、组件类型、OS / arch、宿主版本、依赖、所需权限、声明副作用、默认禁用状态和健康 / 回滚要求。
+Rollout 逐目标保存包版本、期望状态、安装 Grant、超时、重启许可和回滚版本。
 
-两种 Node 都主动向中心注册；只有中心签发 Assignment / Lease 后，节点才执行相应副作用。同一节点上直接启动的模型 HTTP 服务属于该节点声明的 Runtime，并不要求再部署一个 Rust Agent；其本地 Secret、文件与监听地址由所属节点控制。DSH Plugin 是一等节点而非仅为补充 MCP 能力的薄插件。
+- 管理机拥有凭据，不代表可把凭据复制到所有 Host 或交给模型；私有模型、Memory、完整会话不随安装包扩散。
+- 跨用户、公司 / 个人 Worker 和不信任网络不默认共享 Rollout；安装包的自述不能决定可信性。
+- 签名包、版本锁定、逐 Node 批准、健康检查和旧版保留是基础要求；普通聊天不触发跨不受信网络安装。
+- 包按 `darwin-arm64`、`linux-x64`、`windows-x64` 等 Target 构建，示例不等于已支持；交叉构建和签名由受控 CI / Build Host 完成。
+- Windows 服务、macOS LaunchAgent、Linux 用户服务、ACL 与系统凭据库分别适配；Host 更新与中心迁移不绑成一个不可恢复步骤。
+- Web / PWA 静态壳与业务权限分开更新；桌面和系统签名包不静默更新。iOS / Android 不接收通用 Worker 包，也不因页面曾打开就具备后台执行能力。
 
-节点可以访问自身 DSH 内部能力，不代表中心自动信任其自报权限。Owner、Device Link、Node Identity、Profile Identity 和 Workspace Scope 分开映射，避免把整台机器或任意 DSH Profile 混为同一主体。
+本机现有 Bare / DSH bundle 证据仅覆盖明确的隔离场景，见 [BARE_PACKAGE](docs/BARE_PACKAGE.md) 与 [BUNDLE_LIFECYCLE](tests/harness/BUNDLE_LIFECYCLE.md)。
+
+## 9. 授权、调度与可靠性
+
+### 9.1 Grant 与 Lease 分离
+
+| 对象 | 回答的问题 | 变化的影响 |
+| --- | --- | --- |
+| Grant | 用户允许哪项工作用哪些资源和操作 | 撤权阻止新执行，使旧 Lease 失效并 fencing 后续写入 |
+| Lease | 协调器允许哪个 Host 在什么时段执行哪个 Assignment | 忙碌、离线或过期是执行资格变化，不扩大用户授权 |
+
+Grant 和 Lease 分别版本化。Assignment 至少关联 Ticket、Grant digest、Placement、Project / revision、Lease epoch、attempt、deadline 与 reconciliation。
+ACK 表示准入，不是 Report、完成或取消完成；换机是新 Assignment / Attempt，不延续旧机器的本地 Session 假设。
+
+### 9.2 Effect 与 Unknown Outcome
+
+![副作用与未知结果](docs/architecture/07-recovery.png)
+
+跨机采用 **at-least-once + 对账**，不承诺无法证明的 exactly-once。
+不可合并的副作用有不可变 `effect_id`、输入摘要、执行 Host 和证据。断线后先查 Host Ledger 或权威远端：Git 查 ref / commit，文件查原子替换与 hash，外部平台查幂等键，生成任务查任务 ID 和 Artifact。
+无法证明结果的敏感效果先对账并询问用户，不盲目重跑。
+
+- 无符合 Host 就排队或询问；Host / Worker 失联与 Ticket 终态分开。
+- 公共 Retry 只用于明确 `failed` 且无停止意图的 Ticket；Unknown / Reconciling 先核对现场。
+- 人工审批记录决定、理由、原有 Grant / Source、实际 Assignment / Lease 与审计；接受回执不是永久幂等授权。
+- 停止是持久意图，自动恢复不能覆盖；Watchdog 检查进展、Lease 与副作用，不只检查进程是否活着。
+
+## 10. 用户交互与 Worker 放置
+
+保持单联系人体验，同时提供 Chat、Activity、Collaboration、Fleet、Project / Artifact、Memory / Access 六种视图。
+用户不必每次选机器，但新 Agent / Worker、新项目或敏感目录、本地模型、多机成本差异和长期无人值守任务需要明确选择。
+
+常规任务沿用已保存的默认规则，冲突、成本或权限变化时重新询问。
+移动端展示、审批和回到历史 Ticket 不等于后台 Host 能力；任何支持声明仍以目标平台上的真实验证为准。
+
+---
+
+## 附录：实现约束与验证记录
+
+以下为现有受限实现的精确约束、事务边界和验证证据，不是“所有能力均已完成”的声明。
+附录保留了原文的标题编号，便于已有链接与开发记录追溯；阅读当前架构时以主文为准。
+
+<details>
+<summary><strong>0. 协议对象与边界补充</strong></summary>
+
+## 原 3.2 Bare 重放与精确 Installation
 
 **Bare Rust 完成证据的重放不能只认Assignment ID。** 已有completion/未决outbox只可在poll中的packet重新通过显式ProjectBinding、Grant/binding/lease/root及完整Assignment decoder检查后使用。`StateStore::start()`再把当前输入与历史immutable logical digest（ID、lease ID/epoch、grant digest、kind、relative path及content）比对。它负责重放同一个工作输入，不是把动态lease timing写进digest，或以新Grant/epoch重贴旧Execution的证据标签。精确匹配已有完成时保留原outbox request/effect/artifact标识，不再次执行，也不因再见到取消帧而生成新报告。输入不匹配、完整decode失败或completion缺digest都fail closed；不能用通用reject路径覆盖原Assignment/completion和未完成证据。该约束可经 `cargo test -p loom-node --test completed_replay` 复核。测试用真实原生源文件读取及持久化、受控制的loopback协议transport，明确不把Synthetic poll/Grant说成Concierge签发；普通真实Concierge/Bare签署、读写、取消和重开须再以原生集成验证。这里不推导全局Exactly-once、OS进程崩溃回放或其它Harness的权限。
 
@@ -156,29 +319,74 @@ Host 数量、设备类型、模型能力和任务组合均由用户环境决定
 
 **ProjectBinding必须归到精确、可用的 `(Node ID, Installation ID)`，不能只按Node ID取第一条记录。** `POST /project-bindings` 只有在单个未撤销Installation时才可省略`installation_id`保 留旧调用；多个可用安装而缺少选择返回409 `exact_installation_required`。可选参数是非空、非空白、≤160 UTF-8字节的字符串；`null`/数字等400，不存在的Node或指定Installation 404，选中已撤销记录403。选择之后仍要求该**选定记录**的未撤销状态、worker声明和实际project-root自报一致，绝不按哪个root碰巧相符来推断身份。单Installation的旧绑定/读写路径不变。这里的“可用”仅未撤销，不等于 已证明设备在线与硬件事实。注册和heartbeat自报不自动赋予管理权限，真正管理凭据仍必填，Node token不能替代。
 
-`project_bindings` INSERT 与 **`project.binding.approved`** 审计现由同一Store锁下、`BEGIN IMMEDIATE` 事务中原子提交，包含原有binding ID和root digest的证据链；二者未共同成功便不作为accepted Binding返回，也不留下单独的autocommit Binding。保留现有 hash-chain格式而非新增Grant / Ticket / Assignment或另设每Installation撤销API。单进程单写者事务不推导全局exactly-once、重复请求别名、跨进程权限共识，也不替代后续Grant/Task的独立权限与执行验证。真实负 例和恢复入口见 `node tests/runner/installation-binding.mjs` 和同文件的持久trigger handler回归。当前Vue绑定对话框只传`node_id`，尚未为多active安装提供可选Installation UI，因此合法的二选 择将来仍需另一处用户入口增量，不能宣称已完整交付，但后端现在必须明确停 止歧义授权。
+`project_bindings` INSERT 与 **`project.binding.approved`** 审计现由同一Store锁下、`BEGIN IMMEDIATE` 事务中原子提交，包含原有binding ID和root digest的证据链；二者未共同成功便不作为accepted Binding返回，也不留下单独的autocommit Binding。保留现有 hash-chain格式而非新增Grant / Ticket / Assignment或另设每Installation撤销API。单进程单写者事务不推导全局exactly-once、重复请求别名、跨进程权限共识，也不替代后续Grant/Task的独立权限与执行验证。真实负 例和恢复入口见 `node tests/runner/installation-binding.mjs` 和同文件的持久trigger handler回归。真实Vue绑定对话框已提供精确Installation选择，并通过确认后的实际payload提交；当前不再只传Node ID。它仍不是逐Installation管理撤销API、第二物理Host或生产DSH Profile验收。
 
-### 3.3 Router、Project Scheduler、Resource Scheduler
+## 原 6.1–6.3 Resource / Project 声明示例
 
-三者不应混为一个路由 LLM：
-
-```text
-Router / Eval
-  → 决定：是否做、做什么、依据与 Grant
-
-Project Scheduler
-  → 决定：任务 DAG、依赖、优先级、项目阶段及输入输出关系
-
-Resource Scheduler
-  → 决定：Host 能力、模型、位置、权限、负载与 Placement
-
-Host Agent
-  → 执行：本机启动、授权、监控、恢复、对账及上报
+```yaml
+host: gpu-example
+online: true
+hardware:
+  gpu: Example GPU
+  vram_total: 12 GiB
+  vram_free: 9.4 GiB
+services:
+  - kind: comfyui
+    endpoint: http://127.0.0.1:8188
+models:
+  - ref: example-model-revision
+    kind: lora
+    placement: local-only
+policy:
+  public_upload: deny
+  external_model_download: ask
 ```
 
-库存状态是资源事实，不是行动 Grant。
+字段值仅为 Schema 示例，不代表用户必须拥有 GPU、ComfyUI 或本地模型。Worker 自己宣称“可以跑”不是最终资源事实。
+能力未知也是有效结果：没有运行环境或读不到 Host 时，必须区分未安装、不支持、未实测、离线、缺少授权，不能输出静态“可用能力”清单。
 
-### 3.4 核心领域对象
+```yaml
+project: example-project
+locations:
+  working_tree:
+    host: trusted-host
+    path: /work/ExampleProject
+canonical_source:
+  type: git
+  remote: git@github.com:me/ExampleProject.git
+  branch: develop
+contents:
+  docs: docs/
+  references: assets/references/
+permissions:
+  read: granted
+  write: ask
+```
+
+HTTPS remote 的 username/password/token userinfo 会被剥离，query/fragment 不进入 Inventory；不安全 scheme 只显示 `unsupported_or_redacted` 或空值。即使可以观察远端地址，仍不等于宿主持有凭据或远端可达。
+中心可以看到模型元数据，不等于可把权重复制到另一个环境；权重不进入提示词或普通事件记录。
+
+## 原 7.4、9.2 协议边界
+
+控制包、Host 包、DSH Loom Plugin、Harness Adapter 和 Runtime Connector 是独立部署单元。Host Agent、插件与 API Connector 使用带版本的消息 Envelope，不共享数据库或进程内对象；一台机器上 Harness 1 的插件不能当作 Harness 2 的 Adapter。
+
+```text
+assignment_id / ticket_id / grant_digest
+host_selector / selected_host_id / worker_id
+project_ref / revision / workspace_hint
+required_resources / resource_snapshot
+lease_epoch / heartbeat / expires_at
+budget / deadline
+attempt / cancellation_state
+report / reconciliation_state
+```
+
+</details>
+
+<details>
+<summary><strong>A. 资源、Source 与受限任务实现</strong></summary>
+
+### 3.0 核心领域对象
 
 | 对象 | 含义与关键边界 |
 | --- | --- |
@@ -260,6 +468,8 @@ Source Ticket 的 digest、duplicate和历史身份与原 intake `ticket_id` 分
 - 编辑本身出错、malformed ToolResult或已写后校验失败，只是 `unknown/reconciliation`，不能宣称tool_rejection/零副作用或相反宣称已验证成功。即便参与过Process要而可能已部分完成文件效果，也没有fresh已核验Effect证明。只有实际序列、当前Assignment、真实Session、binding、root、真实文件及hash全部一致且当前fixture enabled时才交付这些artifact。
 - reused external/shared Session、任意 provider/model、任意commands禁止在此首片执行。Code tools恢复**只读历史Ticket/mapping与artifact**，而不是恢复一个先前能变砖源文件的Agent。其它类型任务的既有 resume机制不受影响。
 
+**真实编辑后工具错误也已实证保持 Unknown：** 固定 fixture 在真实原子替换/字节核验后有意让原注册 edit tool fail，并由真实 SDK 给出 `isError:true` 的 ToolResult。随后确定性 Adapter 实际抛错，形成 `turn/end(kind=error)`；这不是 `aborted,user`、Grant撤销或某个工具名被当作成功证据。测试 fixture 需要保留原始 Loom user 的 `source.kind='loom'` 来识别已有 opt-in marker，而不能让 SDK 附加的 `source.kind='runtime-context'` snapshot替换掉这个任务意图。它不增加全局flag、工具权限、私有Session事件或新文件类型。该真实案例**只有一个 `dsh-turn-<assignment>` unknown Effect，零code/verification Artifact、零confirmed source Effect**，保留实际变更的Source bytes与`unknown/reconciling`，不包装成 tool_rejection、无效果、成功或者已测试退出码。`cancel_requested=false`，当前write Grant和Node/Installation/Worker/Binding/root不变；公共 `/retry`返回**400 `invalid_request`**且不新建Assignment。实际同身份center/Host重开使原Assignment、Report/Effect IDs、database/source bytes、局部completion/outbox/deliveries与provider request history保持一致，而**没有新的Source/Verify ToolCall、新模型请求或新Artifact**。这项仅证明普通工具/adapter错误已成为日程待对账记录，不会把物理写入等同為中心已确认 Effect。详见 [CODE_TASK](tests/harness/CODE_TASK.md)和[主会话独立proof](/tmp/loom-real-code-tool-error-parent.json)。
+
 **编辑完成后的受限用户中止：**
 - 显式取消样例让真正的 `loom_fixture_verify.execute` 在启动固定 `node --test` 之前暂停；此前的真实 `loom_fixture_code_edit` 必须已经完成。单一 verification ToolCall 可以处于这个等待点，但其 ABORTED 传输结果不是一份完成的测试；如果有真实的 completed verification，则不能倒装为未测试的中止。
 - 对应当前 Assignment 的 `agent.cancel({kind:'user'})` 产生真实 SDK tool AbortSignal，并观察后于编辑结果的 `turn/end(aborted,user)`。适配器自己的 bounded gate 只释放控制等待，不能证明中止；agent、center stop intent 和实际 acknowledgement 是三个不同事实，`cancel_requested` 并不直接等于 ack。实际 `cancel_acknowledged` 只在 center 已有停止意图且 Report 显式为 true 时存盘。
@@ -274,7 +484,7 @@ Source Ticket 的 digest、duplicate和历史身份与原 intake `ticket_id` 分
 - Node必须证明这是原先已启动的原作业，而不能由 old session/durable history反推或重新开工。它比较durable/executing/incoming的原有Ticket/Grant ID、digest、内容/path/node/epoch等不可变输入，只对当前Grant view作受控豁免；require原Assignment Promise，以及 dispatcher live executing 或同Assignment的adapter `request_started`+运行中 bound Agent+原waiter+sessionOwner。**缺失外层active flag代入 时必须同时具备上述所有生命身份，不只是存在 session_id或Promise**。原frame的header与原version仍严格匹配，只有当前Grant version optional递增被视作可撤状态。
 - Node在完成authority=false的本地撤权注解持久化后才发起原生cancel；`revocationStops`在本进程按Assignment 去重，取消后仍由原生产operation产出报告和Artifacts、交付outbox。真原生原因保持 SDK支持的`user`；撤权上下文另记录，不伪造DSH不存在的原因类型 `revoked`，也不发起`cancelRequested` Ack。Release后重开如果没有live执行上下文，仅保留历史拒斥/还原，不产生第二次 stop或新Agent。Grant.current metadata不取代原先被确认的一次任务洽谈。
 - old Artifact与Report在撤权后**留在本地隔离outbox**而非被当作可继续发表的新效果：实测该source-diff上传返回409 `outcome_unknown`，原Report因引用未接受的旧 Artifact返回403 `artifact_lineage`。撤权Ticket没有新增中央Report/Artifact/Effect，也不能套用只有明确用户停止意图与实际ack的 `cancelled_change` 窄例外。特留的本地源代码字节及来源证据不被伪称零效果、自动回滚、已完成测试或中央对账成功；原确认finished历史仍可按 authorization 读取。
-- 真正SDK aborted/user信号守 在固定测试子进程前；没有验证Artifact或新测试退出码。之后driver自己调用fixed node test只确认保留的实际代码功能，不是声称原Agent测试已执行。旧 revoked Ticket自动retry失败、以撤销Grant另建Task也被拒，center/Host重开仍没有新的工具停止或代码调用。框架的总数仅为4 Tickets/5 Assignments/4 Reports/7 Artifacts/4 confirmed中央effects，**第四票的本地证据不在中心**。实际driver无需artificial Grant或native `revoked` cause，M0其余阶段对应普通取消和View Process 语义不变。
+- 真正SDK aborted/user信号守 在固定测试子进程前；没有验证Artifact或新测试退出码。之后driver自己调用fixed node test只确认保留的实际代码功能，不是声称原Agent测试已执行。旧 revoked Ticket自动retry失败、以撤销Grant另建Task也被拒，center/Host重开仍没有新的工具停止或代码调用。当前完整driver保留**5 Tickets/6 Assignments/5 Reports/7 Artifacts/5 Effects（四个confirmed、一个上述ordinary-tool-error unknown）**；**撤权票的本地证据不在中心，新增对应1票1Assignment，但不新增中央Report/Artifact/Effect**。实际driver无需artificial Grant或native `revoked` cause，M0其余阶段对应普通取消和View Process 语义不变。
 
 它的证明价值是一个真实的M0小规模编程样例，有实际源码变更和测试证据，不是生产 generic code editor、生产 LLM coding质量、通用 Worktree策略或 M3 Stage、Reviewer pipeline。doc详见 [tests/harness/CODE_TASK.md](tests/harness/CODE_TASK.md)。
 
@@ -403,18 +613,14 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 
 `--browser`实际验证明示的replay请求与后续human审批，还包括真实worker与Source/Output SHA；390px没有溢出的关键UUID信息，不等于移动真机或多平台验收。当前仍无通用技能runtime、记忆跳跃获授权、分布式技能分发或持久的Skill执行引擎，不能把其视为M5全部完成。
 
-## 4. 会话可见性与审计架构
+</details>
 
-### 4.1 默认简洁，过程可展开
+<details>
+<summary><strong>B. 偏好、快照与离线静态壳</strong></summary>
 
-用户面对一个稳定联系人，但一个 Ticket 可以产生多个 Agent / Worker ConversationSegment。UI 至少区分：
+### 原 4.2 展示与协议补充
 
-- **Conversation**：用户提出的需求、必要确认和最终结果；
-- **Activity**：任务阶段、执行位置、关键状态与阻塞；
-- **Collaboration**：Agent / Worker 之间的消息、委派、回复和共享简报；
-- **Worker detail**：某次 Assignment 的执行 Session、工具调用摘要、产物和报告。
-
-界面提供全局偏好与单次任务覆盖设置：默认折叠、始终展开、只看关键协作或完全隐藏过程。偏好不得改变已保存数据，也不得绕过访问权限。
+工具调用默认展示摘要，原始参数和输出按权限与敏感级别访问；不得因“可展开”暴露 Secret、私有模型权重或越权项目内容。折叠或隐藏只改变视图；保留、归档与删除独立控制。
 
 ### 4.1.1 当前实现的全局默认与单任务覆盖
 
@@ -455,53 +661,17 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 
 这整体仍只是**先前联网安装过同一Origin静态壳之后的回访**，不是第一次从未安装时的离线发现，更不是整个手机OS生命周期，离线Task持久缓存、后台执行、离线审批或任意Host能力。controller或`update()`的出现也不能代替发布bucket逐项读回。当前已完成原候选安装、受控跨版本升级及保留、独立合同测试和Rust同源进程重开，但**这个Node静态loopback场景不是Rust部署证明，更没有Task/Grant/Artifact/Effect/API/凭据的持久授权**。任何同version公共body变化都必须使用新namespace，不能解释为静默混写。这一新模式没有打开额 外服务或更改Grant/Lease/数据结构。另独立执行的[Rust同源回放结果](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-shell-proof-5J63Yx/result.json)仍校验当前静态源的真实业务读取恢复与同profile完整进程关闭/离线重开（实际PID 24335→24394），临时Owned profiles只在完成验证后删除。
 
-### 4.2 展示与协议边界
+</details>
 
-- 不把所有 Agent / Worker 之间消息转发到用户主聊天流。
-- 不把原始 Transcript 当作结构化状态的唯一来源；消息展示与 Report / Effect / Artifact 记录分别建模。
-- 消息需有稳定 ID、Ticket / Assignment 关联、发送者与接收者、时间或顺序信息、来源和可见性策略。
-- 展开视图至少要能回答：谁在协作、为何委派、交接了什么、达成了什么结论、哪里需要用户。
-- 工具调用可默认展示摘要，原始参数和输出按权限与敏感级别访问；不得因“可展开”而暴露 Secret、私有模型权重或越权项目内容。
-- 外部 Harness 的内部 Session 通过 Adapter 映射为 ConversationSegment / MessageRef，不要求统一其内部存储格式。
-- 不支持读取完整 Transcript 的 Harness，应明确标记可见性缺口，不得伪造完整交流记录。
-- 折叠或隐藏只改变视图；保留、归档与删除策略独立控制。
-- 用户可隐藏或删除自己的过程展示，不代表系统可以删除尚未完成的 Grant、Effect 和必要审计事实。
-- 消息导出、复制、检索和跨 Worker 引用必须重新检查可见性与 Grant。
+<details>
+<summary><strong>C. Memory / Candidate 的来源、编辑与审计</strong></summary>
 
-### 4.3 存储与性能边界
+### 原 5.2–5.3 保留与人工确认规则
 
-初期不要求把全部原始 Worker Transcript 汇聚到中心。中心可以保存：
-
-- 用户主对话和关键协作消息；
-- 有界 Shared Brief；
-- 指向 Host 侧原始 Transcript 的受控引用；
-- 消息索引、可见性、摘要和审计元数据。
-
-用户展开细节时，可以按需从有权限的 Host 获取。离线 Host 的不可读取记录应显示“暂不可用”，不能把摘要冒充完整原文。
-
-## 5. 记忆、上下文与归档
-
-### 5.1 记忆分层
-
-| 层 | 内容 | 默认行为 |
-| --- | --- | --- |
-| Concierge Memory | 用户偏好、Agent / Host 索引、授权关系、活跃项目索引 | 长期保存，路由时按需使用 |
-| Agent / Worker Memory | 各角色长期规则、项目经验和局部上下文 | 留在所属 Worker，不默认共享 |
-| Task Working Memory | 当前约束、阶段状态、错误、局部决策 | 只交给相关任务和后续 Worker |
-| Shared Brief | Worker 提交给协调器的结论、证据、阻塞与 Artifact 引用 | 有界、结构化、与权限分开 |
-| Cold Archive | 原始会话、日志、旧资料、生成参数和历史版本 | 不主动注入，按需检索和恢复 |
-
-### 5.2 记忆保留规则
-
-- 当前活跃任务的约束优先保留；
-- 用户确认的稳定偏好和长期安全规则不会因时间自动过期；
-- 被替代的信息标记为历史版本，不当作当前事实；
-- 原始过程与老日志进入冷档案，不反复占用 Token；
-- 重复、无效中间过程可以淘汰；
-- 未完成的承诺、Grant 和审计事实不能由模型自行清理；
-- 长期记忆的自动整理支持预览、纠错和恢复。
-
-记忆可见性不等于资源访问权限。即使某 Worker 看到项目引用，也不自动取得该项目的读取权。会话折叠偏好是展示设置，不是记忆清理指令。
+长期记忆的自动整理支持预览、纠错和恢复。稳定习惯须累计足够的独立证据，才在合适时机集中提议，避免每次会话都追问。候选可预览、编辑、接受、拒绝、稍后处理、暂停建议或永久遗忘。
+Memory 表达偏好、事实与已确认经验，例如报告语言和指定 Worker；Skill 表达可复用的方法。不确定的选择不固化为 Skill，Secret、完整私有会话或不必要原文必须排除或引用化。
+候选保留来源 Ticket / ConversationRef、次数、首次与最近观察时间、作用域与摘要；证据因隐私设置不可用时标记“依据不足”。
+用户可删除用于学习的历史记录，删除是否撤回派生 Memory / Skill 必须显式选择；候选及其接受、修改、拒绝和停用有审计，但普通日志不因此无限期保留。
 
 显式 `Remember` 允许不引用任何历史 Ticket。若调用方主动提供 `source_ticket_id`，中心必须查询到相应 Ticket；若同时指定了项目，该项目也必须与来源所属项目相同。因此，项目 Memory 不能把另一个项目的 Ticket 当作自己的原始出处，非文本或未知引用也不能悄悄降级为“无来源”。持久化与 `memory.explicit_saved` 审计使用同一个已核验的ID。来源关联只描述记忆出处，不重新打开Ticket、证明原任务完成、验证偏好已经被习惯学习识别，或产生新的Grant。
 
@@ -514,42 +684,11 @@ Review时客户端`replay_verified:true`不构成证据。完整原source/新rep
 前端以开始编辑的候选version发请求，只有权威的候选和资源读取回传当前版本后才关闭草稿。刷新或编辑失败时保留草稿与可见错误，不用自己的本地字数或未验证快照声称已保存。此文字保存与另一明确的accept操作独立；编辑本身不创建Memory/link/Grant/Ticket/Artifact/Effect，用户随后仍需单独确认，accept才由原投影和校验过的来源创建exact-linked派生Memory。此能力不包括把候选scope转到别的project/User/Host、语义去重、自动习惯/secret判定或冲突消解；accepted之后Memory自身的显式改scope/编辑走原有Memory操作，不能借用candidate编辑偷偷替换它。
 
 候选关联Memory删除走的是既有的 exact-link 撤回事务，**不能同样再写一条普通删除**来伪造第二笔事实。原候选仍只回到pending，来源Ticket/Grant/Artifact/源代码不变；下一次接受再按已验证引用创建新ID。后续真正编辑已存在的Memory复用其原有变更层与审计，source本身不被客户端PATCH重写。具备显式操作的审计并不等于已经实现通用 transcript 历史重放、模型自动归纳或用户/Worker协作冲突消解。
-### 5.3 从使用习惯形成 Memory / Skill 建议
 
-采用“观察 → 提议 → 审核 → 保存 → 验证 / 撤回”的生命周期：
+</details>
 
-```text
-Explicit Remember ───────────────────────┐
-                                        ↓
-Conversation → HabitObservation → Candidate → User Review → Memory / Skill
-                       │                        ├→ Reject
-                       └→ Expire / Forget       └→ Edit → Save
-```
-
-**显式记住与自动建议分开：**
-
-- 用户明确说“记住我偏好……”时，可以直接保存为明确的 Memory，但敏感信息、权限和无限期后台行为仍需单独确认；
-- 系统观察到稳定习惯时，只创建临时 HabitObservation，不直接写成长期事实；
-- 多次出现且足够一致时，生成 MemoryCandidate 或 SkillCandidate，在合适时机集中提出，避免每次会话都追问；
-- 用户可预览、编辑、接受、拒绝、稍后处理、暂停此类建议或永久遗忘；
-- 接受 Memory / Skill 时可以限定全局、当前项目、某 Worker 或某 Host 作用域，默认最小可用范围。
-
-**Memory 与 Skill 的边界：**
-
-- Memory 表达偏好、事实和过去确认过的经验，例如“报告默认使用中文”“此项目优先使用指定 Worker”；
-- Skill 表达可复用的任务方法，至少包括名称、适用条件、必要输入、步骤、验证方式、预期 Artifact、来源和版本；
-- 持续性操作步骤不应只埋在 Memory；不确定是否稳定的选择不应固化成 Skill；
-- Skill 保存后仍需经过测试或样例回放才能标为已验证，运行时的资源、路径、模型和副作用权限逐次由 Grant 决定；
-- 工作流中包含 Secret、完整私有会话或不必要的原文时，候选必须排除或引用化，不能复制进 Skill 正文。
-
-**来源、冲突与保留：**
-
-- 候选保留来源 Ticket / ConversationRef、出现次数、首次与最近观察时间、作用域及摘要；出于隐私设置的证据不可用时，显示“依据不足”，不得编造出处；
-- 用户可以查看候选依据，也可以删除用于学习的历史记录；删除后是否撤销派生 Memory / Skill 应给出明确选择；
-- 新的明确指令优先于旧习惯，候选与已有规则冲突时必须询问，不得静默覆盖；
-- 不能仅凭“用户经常批准”推断出永久授权；Grant、Policy 和审计事实绝不能由习惯学习自动扩大；
-- 被拒绝的建议应降低同类提醒频率，用户可选择“不再建议”；拒绝本身不得被模型重新解释为一个新的长期偏好；
-- 候选及其接受、修改、拒绝、停用均有审计记录，但普通操作日志不应因此无期限保留。
+<details>
+<summary><strong>D. 当前候选与回放验证</strong></summary>
 
 当前受限候选来源与派生内容实现（不等于自动习惯学习已完成）：`POST /candidates` 只接受调用方明确选择的真实项目内 Ticket 引用，不扫描对话或自动归纳工作流。Memory候选最多绑定32个去重且真实存在的同项目Ticket。相同Ticket重复提交不增加次数；Memory候选须有三次**不同的有效来源引用**才会待审阅，不能覆盖旧source_refs或用过期次数冒充新晋升。内容是 `loom.memory-candidate.v1`，其最少来源要求不允许借空引用套用旧无来源候选兼容例外；无效来源不显示为legacy。
 
@@ -557,169 +696,11 @@ Conversation → HabitObservation → Candidate → User Review → Memory / Ski
 
 Skill走的是另一条已有真实证据路径：一次明确Source Ticket调用只能发起候选或返回相同候选，不把同一个POST调用重复算作新的观察。真正接受仍需另外的普通 `read_summary` 回放产生独立Ticket/Assignment/Artifact，并与原真实字节、SHA相同，不能导出或激活任意工作流。该受控回放不是因为存在候选列表或前端 `replay_verified` 标志就能激活的权限。受限观察/审阅测试、[版本迁移与未覆盖内容](tests/observations/README.md)是本轮实际边界；自动习惯摘要、语义时间线、冲突和跨用户分享仍按前述产品设计等待真实实现。
 
-## 6. Resource、Project 与 Model Registry
+</details>
 
-### 6.1 Host / Worker 能力声明
+<details>
+<summary><strong>E. 注册、ACK、事件与传输实现</strong></summary>
 
-```yaml
-host: gpu-example
-online: true
-hardware:
-  gpu: Example GPU
-  vram_total: 12 GiB
-  vram_free: 9.4 GiB
-services:
-  - kind: comfyui
-    endpoint: http://127.0.0.1:8188
-models:
-  - ref: example-model-revision
-    kind: lora
-    placement: local-only
-policy:
-  public_upload: deny
-  external_model_download: ask
-```
-
-字段值仅为 Schema 示例，不代表用户必须拥有 GPU、ComfyUI 或本地模型。
-
-信息来源：
-
-- Host 自报硬件、目录、Worker 和在线状态；
-- Controller 实测模型健康、显存、队列、服务与延迟；
-- 用户声明生产用途、隐私范围、是否允许无人值守；
-- 历史记录提供冷启动时间、成功率和任务耗时。
-
-Worker 自己宣称“可以跑”不是最终资源事实。
-
-**能力未知也是一种有效探测结果。** 没有本地图像生成能力、没有兼容运行时或无法读取某台 Host 时，系统必须返回未安装、不支持、未实测、离线或缺少授权等明确状态，而不是输出静态“可用能力”清单。
-
-### 6.2 Project 位置模型
-
-必须区分：
-
-1. **Canonical Remote**：GitHub / GitLab 等权威远端；
-2. **Working Tree**：某台机器上正在修改的工作树；
-3. **Generated Workspace**：某次任务创建的 Worktree、分支或临时目录；
-4. **Credential Location**：允许 Clone、Pull 或 Push 的凭据位置。
-
-```yaml
-project: example-project
-locations:
-  working_tree:
-    host: trusted-host
-    path: /work/ExampleProject
-canonical_source:
-  type: git
-  remote: git@github.com:me/ExampleProject.git
-  branch: develop
-contents:
-  docs: docs/
-  references: assets/references/
-permissions:
-  read: granted
-  write: ask
-```
-
-行为要求：
-
-- 优先复用已授权的本地工作树，避免重复 Clone；
-- 检测到未提交修改时保留并明确说明；
-- 并行代码修改优先使用独立 Worktree；
-- Clone 是独立操作，不是“知道有 Git URL”就自动执行；
-- Git 或登录凭据留在本机 Broker，不进入模型上下文；
-- 不把某机器的本地绝对路径当作全局 Artifact URI。
-
-当前本机 Git 探测只读取已批准项目根中的 Git 事实与 dirty state；不能把它隐式扩展成 Clone/Fetch/联网或访问凭据。HTTPS remote 的 username/password/token userinfo 会被剥离，query/fragment 不进入 Inventory；不安全 scheme 只显示 `unsupported_or_redacted` 或空值。即使可以观察远端地址，仍不等于宿主持有凭据或远端可达。测试实际验证此清洗与入库，见 [tests/projects/README.md](tests/projects/README.md)。
-
-### 6.3 模型的注册、批准与放置
-
-Model Registry 管模型的身份、版本、适用环境、可用范围和放置计划；Host 管实际存放、加载与调用。
-
-```text
-Register → Approve → Place / Load → Invoke → Retire
-```
-
-- 私有模型可以声明 `no-copy`、`local-only` 或指定 Host 专用；
-- 中心可以看到模型元数据，不等于可把权重复制到另一个环境；
-- 外部下载、公开上传、模型迁移分别有权限；
-- 权重不进入提示词或普通事件记录；
-- 任务结果记录模型、LoRA、参数、Revision 和执行环境。
-
-## 7. 首版技术栈与 Harness 接入
-
-### 7.1 首版实现语言与多端结构
-
-首版采用 **Rust 核心 + TypeScript / Vue 薄客户端**：
-
-- Concierge、Host Agent、Registry、Policy、Lease、任务状态机和持久化应用层使用 Rust；
-- 共享协议与核心数据模型放在一个 Rust workspace，减少控制面与 Host 的定义漂移；
-- 默认 Web / Desktop / Mobile UI 使用 Vue 3 + TypeScript；Rust 核心与 Web 前端通过版本化 API 通信；
-- 桌面壳优先采用 Tauri，以复用 Web UI 并调用受控的 Rust 本机能力；Tauri 的桌面集成不自动证明 iOS / Android 后台能力；
-- 移动端基础采用响应式 PWA，先验证近距离网络通信、通知与强认证；需要应用商店、后台推送和系统能力时再包装为 Tauri Mobile 或薄原生壳；
-- 共享 Vue 领域组件按需要保留平台适配层，不承诺“同一套 DOM 和所有权限在五个平台原样运行”。
-
-首个开发基线仍是 macOS 上的单用户任务闭环，随后逐个验证 Windows / Linux Host，而不是核心写完就宣称全平台支持。移动浏览器和桌面壳的会话恢复从 M0 开始验证。
-
-**Rust 的核心价值**是 Host Agent 的单二进制部署、资源占用、进程与文件边界，以及被多个桌面平台共享的策略执行逻辑；不是消除所有平台差异。SQLite 事务驱动、Tokio async runtime、HTTP/WebSocket/SSE API、操作系统 Keychain / Credential Manager / Secret Service 适配等具体 crate 通过 M0 Prototype 选型。
-
-**跨语言不是异常路径**：DSH Loom Plugin 保留 TypeScript / JavaScript；已有 Harness、LLM、ComfyUI 或 Python 助手保留原语言，通过版本化 HTTP、MCP 或受限本地 RPC 通信。核心禁止把 Rust struct、内存指针或私有 FFI ABI 当成公共 Harness 协议。
-
-```text
-Vue 3 + TypeScript
-  ├─ Web / PWA（桌面与移动浏览器）
-  └─ Tauri Shell（桌面优先；移动按需）
-                │ Versioned Client API + Strong Device Authentication
-                ▼
-Rust Concierge / Control Plane
-  ├─ Persistent State / Policy / Lease / Artifact / Registry
-  └─ Outbound, Authenticated Node Registration
-       ├─ DSH TypeScript Loom Plugin（Local Node，首选 DSH 接入）
-       ├─ Bare Rust Host Agent（无 DSH 的设备）
-       └─ Runtime Connector：API / MCP / CLI / Python
-```
-
-### 7.2 不为每种 Harness 强制开发插件
-
-DSH 通过专用 Loom 插件接入；其他 Harness 各自需要 Adapter 实例，但不等于每种都需要安装进 Harness 的插件：
-
-| 接入方式 | 使用条件 | 主要部署位置 |
-| --- | --- | --- |
-| Native API Adapter | 已有任务、输入、取消和状态查询 API | Host Agent 旁的独立进程 |
-| MCP / Tool Adapter | 标准工具或配置连接已覆盖必要行为 | Host 本地服务或 Harness 配置 |
-| CLI / Process Adapter | 只能可靠启动和观测进程，且产物边界可确定 | Host Agent 的受管子进程 |
-| Host Runtime Plugin | DSH 的正式本地节点，或其他 Harness 确实需要的 Session 事件、细粒度取消和进程内状态 | 各 Harness 自己的进程 |
-
-| Harness / 服务 | 首版策略 |
-| --- | --- |
-| DSH | 专用 TypeScript Loom 插件作为 Local Node，主动注册中心；任务、SessionRef、事件、Artifact 和本地权限直接适配，MCP 只作为辅助工具通道 |
-| Bare Host | 轻量 Rust Host Agent 提供同一 Node 协议，供无 DSH 的桌面 / Linux 服务器使用 |
-| 其他 Harness | 优先 Native API / MCP，其次 CLI；确需同节点内部状态再增加专用插件。不复制 DSH 独有实现，也不因接入了名称而承诺 Session 级能力 |
-| LLM / 图像等模型服务 | 直接使用已有 HTTP / API Connectors，不默认编写 DSH 或模型服务插件 |
-| ComfyUI | API-first 的模型 Worker Connector，而非通用 Harness 插件 |
-
-DSH 的 MCP 配置只提供工具接入；它本身不能证明完整的 Assignment、取消、Lease 和恢复语义。DSH 插件需要采用其版本兼容的会话机制：不私造不可重开的 Session Event，不把插件缓存当作唯一事实。配置通过宿主支持的编辑器持久化，Token 等 Secret 放入宿主 Credential Store / 本机 Broker，不手写用户 Profile 文件。具体接口按对接时的 DSH 版本验证。
-
-Adapter 通过 Node / Adapter Capability Declaration 告诉中心它支持哪些操作，例如 `register / submit / interrupt / resume / events / artifacts / transcript`。未支持的能力必须在 UI 显示缺口，不得用状态轮询伪造完整会话。
-
-### 7.3 主动注册与中心权威
-
-```text
-Install Plugin / Bare Agent
-  → Configure Trusted Concierge Address
-  → Generate Node Keypair + Device / Profile Identity
-  → Outbound HTTPS / WebSocket Hello + Signed Challenge
-  → Short Enrollment Code or Pre-provisioned Certificate
-  → Center Binds Node + Owner (first enrollment requires explicit trust)
-  → Node Receives Node-scoped Capability / Policy
-  → Periodic Inventory / Heartbeat
-  → Per-Assignment Grant + Lease
-  → Execute → Report → Reconcile
-```
-
-- 节点启动后**主动**连接中心，不要求中心直连各 DSH 的管理端口；NAT / 防火墙后的节点可以出站长连接。
-- 主动注册只代表可发现或已认证节点，**注册本身不是任务 Grant、目录访问或无条件 Membership**。首次加入需一次性配对码、预注册设备身份或管理员批准；凭据自动取得不等于信任自动扩张。
-- 节点配置中心地址和最小凭据；中心对节点进行身份挑战。节点也必须验证中心 TLS / 签名身份，不能只因内网 IP 就上传私密库存。
-- 节点保存可重放的 Outbox 和幂等上报；协议版本不兼容、中心离线、Token 撤销时明示状态，不盲目清空任务或重复副作用。
 - **首次enrollment的code、identity-bound challenge、Node/credential和注册审计必须在同一个 `BEGIN IMMEDIATE` SQLite事务中成交。** 原Node/Installation先按锁定的同一Store Connection读取，revoked身份、不匹配公钥、无旧token或错token不能被新code绕过。对未注册身份，在事务内条件保留一项未过期、未消耗的code；再读取精确Node/Installation/public key与nonce、验证freshness和Ed25519 challenge签名，条件消耗该nonce并写入Node、token hash和`node.registered`。只有全部生效才commit并返回token；无效签名、错误/过期challenge、写坏或audit故障都应回滚整个事务，不可把合法code烧掉或留下半边注册。此处恢复允许同一个**未被接受**的code配一个新的正确签名，而不是重放已消费的原始proof。已注册的同public-key rotation仍要求原token与新合法challenge，不额 外使用enrollment code；被撤销身份不能借新code复活。此保证只限当前Rust中心单process单写者配合Immediate事务，不把HTTP lost response、任意并发、远程网络或所有副作用推断为全局exactly-once，也不会由此创建Grant或执行Ticket。
 - **TypeScript LocalNode 与 vendored dispatcher 使用持久 assignment 作入场围栏，而不是跨为空白的进程内 grant 缓存。** 非取消执行先验证 Node/Grant/ProjectBinding 与本地 root，再保存可信 assignment、检查 input digest 和活跃作业的同一工作输入。path/content、worker、Grant digest 等改变不能借同一 Assignment ID 偷换工作。当前 Controller 在每轮 poll 重新生成 `status/purpose/operation/resource/grants/grant_status` 等观察字段，它们不是不可变的工作输入；`lease_expires_at` 是当前时间窗而非工作内容， Grant 当前 `revoked_at/expires_at` 由最新有效性检查而不是已保存工作快照决定。
 - 本地持久 `rejections` 只是拒绝与核销尝试的账本，按 assignment/epoch/grant digest 出牌；**拒绝核销既不是 Grant，也不是 Ticket/Report 的终态**。匹配已接收 Assignment 的取消仍可处理，未知/旧 epoch/换摘要的取消不能 abort agent 或改写历史。撤销当前 Grant 阻止新执行，但不等于抹去旧作业的停止意图或已经产生的效果。`once()` 保留 logical input digest，DSH Result 的 artifact/Effect 归一化必须在持久完成提交内部完成。
@@ -737,49 +718,15 @@ Install Plugin / Bare Agent
 - 同一 DSH 的多个 Profile / Agent 可以作为独立 Worker / Tenant 命名空间。Profile 的隔离级别要如实声明，不能把安装在同一 DSH 实例的公司 / 个人工作身份混为同一 Worker。
 - 中心保留 Ticket、Grant、Lease、调度和恢复权威；插件可保留本地 Effect Ledger、会话日志和必要缓存，但不成为独立跨机任务权威。
 
-### 7.4 组件、包和权限边界
+</details>
 
-```text
-Loom Control Package
-  └─ Concierge / Policy / Registry / Scheduler
+<details>
+<summary><strong>F. 安装计划与平台证据</strong></summary>
 
-Host Agent Package
-  └─ Host enrollment / local execution / Local Broker
+### 原 8.1–8.4 分发与权限补充
 
-DSH Loom Plugin Package（DSH Host 首选）
-  └─ Local Node / DSH Session / Registration / Local Grant / ArtifactRef
-
-Harness Adapter Package（其他 Harness，按能力选择一个或多个）
-  └─ API / MCP / CLI / Runtime Plugin Connector
-
-Runtime Connector Package
-  └─ LLM / ComfyUI / 专用 Worker，与 Harness Adapter 分离
-```
-
-协议应尽量采用带版本的消息 Envelope，而非共享数据库或进程内对象。Host Agent、插件和 API Connector 是独立部署单元；一台机器上的 Harness 1 插件不应被错误当成 Harness 2 的适配器。
-
-## 8. 组网内选择性分发与安装
-
-### 8.1 支持“装一次，选择一组机器部署”
-
-用户可以在一台管理设备上构建、导入或下载经过批准的安装包，然后向组网内的部分 Host 创建 Rollout。中心负责计划和审计，已有节点或受权 Bootstrap Installer 在目标机执行安装与激活：
-
-```text
-Discover Hosts → Select Targets → Approve Package and Version
-  → Stage / Transfer → Local Compatibility Check → User / Policy Approval
-  → Install → Activate → Health Check → Report
-                                       └→ Rollback / Needs Person
-```
-
-这不是无差别广播安装，也不是将某个 Harness 的当前安装目录整体同步到其他机器。相同版本可以复用下载内容，但每台 Host 都独立校验、安装、激活和报告。
-
-**引导与后续分发分开**：新机器可以通过手动安装，或经用户明确授权的 Ansible / SSH / MDM Bootstrap Installer 纳入 Loom。裸 Linux / Windows / macOS 安装 Rust Host Agent；已有 DSH 的机器安装或配置 DSH Loom Plugin，不重复安装独立 Agent。节点注册成功后，后续更新可以走自身 Node 通道或同一受控 Bootstrap 通道。
-
-**免密 SSH 可以消除交互登录，不会消除安装授权。** Bootstrap 有独立目标清单、身份、有限操作和审计；复用运维已有的 SSH Key / Agent / 管理证书是允许的，但不得把普通聊天 Grant 当作开机或 sudo 权限。不能把一键安装包包装成任意远程命令执行。
-
-### 8.2 包与安装计划
-
-Package Manifest 至少声明：
+Rollout 不是无差别广播，也不是把 Harness 安装目录整体同步到其他机器。包体不经聊天 Router，各 Host 独立校验、安装、激活和报告，不兼容目标明确跳过。
+新机器完成 Bootstrap 后可通过 Node 通道或同一受控 Bootstrap 通道更新。运维可以自带 SSH Config / Ansible Inventory / Playbook，但 Loom 不静默扫描或接管整个网段。
 
 ```text
 package_id / immutable_version / artifact_digest / source / signature
@@ -790,33 +737,13 @@ install_requires: service_restart | harness_restart | dependency | none
 permissions_requested / declared_effects / default_disabled
 ```
 
-Rollout Plan 至少包含：目标 Node / Worker、包版本、期望状态、逐项安装 Grant、超时、是否允许重启、健康检查和回滚版本。Bootstrap Plan 另外声明连接方式、目标凭据引用、是否允许 sudo、配对方式、安装范围和卸载 / 回滚策略。
+Rollout 记录目标 Node / Worker、版本、期望状态、逐项 Grant、超时、重启许可、健康检查与回滚。Bootstrap 另声明连接、凭据引用、sudo、配对、安装范围和卸载 / 回滚。
+安装 Host Agent 或 Adapter 不等于获得目录、模型、外发或 Worker 权限。远程 sudo、防火墙、系统服务、卸载和重启单独确认。
+撤销分发与撤销 Grant 不同：停用程序、禁止新安装或卸载，不能假定网络包已从所有介质擦除，也不能清除必要的审计。
 
 **当前实现只证明了合成 Inventory 的计划与人工观察**：`loom.install-plan.v1` 使用固定的、已实测 Bare 候选描述符与显式 `fixture-*` 目标，服务生成的 `plan_digest` 与每个目标的 `current_operation_id` 约束审批操作。SQLite schema 8 仅追加计划和目标 JSON/时间戳；每个 fixture 观察带有当前 `operation_id` 与人工 `manual_synthetic_inventory_report` 标记，回滚保留父 apply/自身 op 的关系。这不是主机报告、Grant、配对或 Artifact，也不是已安装、可启动的主机身份。背景枚举和回环使用静态清单，`LOOM_INSTALL_SIMULATION=synthetic_inventory` 是仅供测试的 explicit process opt-in，未启用默认501，client不可自行宣称拥有一个有效 fixture service。未知状态保持未知，不可换结果盲目 rollout/rollback，也不由 UI直接反写为健康。合成的健康失败记录不会自动抹除原证据或生成第二张工单。真正的宿主安装、真实效果entry和可追溯session必须另作明确对接，不能靠视口/模拟观察升格。
 
 真实 `node tests/install/plan.mjs` 的HTTP、回滚/未知与controller重启，以及`node tests/install/browser.mjs`的实际创建确认和审批、失败与父关联回滚、Unknown和窄屏已形成一处基础证据。此前UI只检查所有历史 observation便阻止下一次合法回滚的错误，已限定为当前operation ID校验。合成观察可以见证历史 apply 和新的 rollback 两类独立操作，但不会互相篡改或者授予真实执行权。范围、迁移和证据见 [tests/install/README.md](tests/install/README.md)。
-
-运维可以自带 SSH Config 或 Ansible Inventory / Playbook 选择目标，但 Loom 不能静默扫描并接管整个网段。Ansible 或其他安装器应作为外部工具 Adapter 生成审计结果，不依赖模型临时拼出的脚本。
-
-中心先把可信包放入可寻址 Store；Host 在线时拉取或经 LAN 点对点获取。包体不经聊天 Router，不重复传大文件。不同 OS / arch 选择对应产物，不兼容的设备明确跳过。
-
-### 8.3 权限与安全规则
-
-- **Built ≠ Installed ≠ Activated ≠ Registered ≠ Granted**：构建、下载、安装、启用、注册和任务权限是独立动作。
-- 管理端有某个凭据，不代表该凭据可以进入所有目标 Host 或交付给模型。Secret、API Key、SSH Key 和 Harness Profile 默认留在执行安装的运维环境或目标本机，由 Broker 绑定或单独录入。免密 SSH 仅让安装器证明既有运维授权，不授予 Loom 任意的后续访问权限。
-- 不因安装了 Host Agent 或 Adapter 就获得项目目录、模型、外发和 Worker 执行权限。
-- 代码包与 Harness 插件可分发；本地模型、私有 LoRA、Memory 和完整会话不默认分发，仍受 `local-only / no-copy` 与 Policy 限制。
-- 跨用户、跨公司 / 个人 Worker、跨不信任网络不得默认接收同一 Rollout。
-- 严格执行的包激活规则以版本化 Policy 判断；不能让安装包内的说明或模型自行声明可信。
-- 安装 / 激活 / 重启各自是可对账 Effect 或受控本机操作。超时后进入 Unknown，不假装成功也不无条件重装。
-- 首版支持签名包、版本锁定、逐 Node 批准、健康检查和保留上一个可用版本；仅运行固定、已审计、有版本的安装 Playbook / Installer，不执行模型临时生成或任意网络 Shell 安装脚本。
-- Bootstrap 完成只说明已安装；节点仍须配对并主动注册。远程安装结果不等于 Node 在线、不等于 Harness 可用、不等于已获任务 Grant。
-- 远程 sudo、修改防火墙 / 系统服务、卸载和重启均单独确认；优先用户级安装，减少系统级权限。
-- 撤销分发与撤销 Grant 不同：可以禁止新安装、停用 Adapter、卸载程序，但不能假定网络包已从所有介质擦除。停用不得清除仍有用的审计证据。
-
-### 8.4 首版范围
-
-先支持可信单用户 LAN 中已有节点的选择性更新，以及通过明确授权的 Ansible / SSH 对目标机器引导 Rust Host Agent 或 DSH Loom Plugin。节点随后主动注册并领取最小权限。跨 Harness 插件因宿主版本差异单独打包。持续自动更新、任意第三方插件、跨不受信网络的普通聊天触发安装暂不进入首版承诺。
 
 ### 8.5 平台包矩阵与客户端更新
 
@@ -832,14 +759,10 @@ Package Manifest 按构建 Target 区分 Rust Host 二进制、Harness 插件、
 - iOS / Android 客户端首版主要访问已有 Concierge，不接收通用 Harness 和任意 Worker 包。Apple / Google 的签名、发布、推送和后台模式限制不能由本地安装机制绕过。
 - 无 Rust Host 的移动端不能冒充满足任务 Placement；在移动浏览器里保留操作记录与审批能力，不代表用户离开页面后仍能继续后台执行。
 
-## 9. 授权、调度与可靠性
+</details>
 
-### 9.1 Grant 与 Lease 分离
-
-- **Grant**：用户允许哪项任务使用哪些资源、目录、模型、操作及数据。
-- **Lease**：协调器允许某 Host 在某时段执行某 Assignment。
-
-二者分别版本化：用户禁止外发是 Policy，GPU 从忙碌变空闲是 Resource State。资源变化不能扩大 Grant；Policy 撤销后新执行必须停止，旧 Lease 失效，旧 Agent 的后续写入需被 fencing。
+<details>
+<summary><strong>G. 撤权、ACK、审批与重试实现</strong></summary>
 
 **当前用户的撤权界面也分离以下事实**：撤销一条精确 Grant 由认证后的浏览器用户确认并调用现有 `/grants/{id}/revoke`，不与停止 Task/取消一个 Node 混用。它保存新 `revoked_at`、递增 Grant 版本并使原有 Lease 失效，保留原始票据、digest、历史报告与对账证据；不会删除 Ticket 或生产过的 Artifact。
 对于中心已签发、但 Node 尚未 acknowledged/admit 的普通 Assignment，之后的正常和再次 poll 都不能派发该已撤 Grant 的执行。这个 Assignment 可以已经变为 `reconciling`，但它并没有因此成为已取消、成功或失败，也不等于 `cancel_requested` 或 Node acknowledgement。零执行、零新报告/Artifact/Effect 和目标文件未产生必须分开验证，而不是仅由按钮消失推断。这种Case不同于已被宿主领取后进行中的受限 edit-file 撤权停止和本地证据隔离。
@@ -868,39 +791,6 @@ bundle的`NodeState`对缺少文件的初始状态执行`structuredClone(EMPTY)`
 
 同一Synthetic `coordinator-admission` 既有driver的一个混淆亦被修正：其normal ACK 本来就应先于operation被保存，因此拥有合法ACK receipt不等于durable结果已经上传。现在同时要求此ACK的accepted/timestamp/ticket/epoch与cancel flags正确，且在完整unknown/normalize之前严格保持**0份Artifact或Report delivery**；不把准入包成最终结果，更不把Synthetic driver冒充SDK宿主。
 
-### 9.2 Assignment 的建议字段
-
-```text
-assignment_id / ticket_id / grant_digest
-host_selector / selected_host_id / worker_id
-project_ref / revision / workspace_hint
-required_resources / resource_snapshot
-lease_epoch / heartbeat / expires_at
-budget / deadline
-attempt / cancellation_state
-report / reconciliation_state
-```
-
-一次换机是新 Assignment 或明确 Attempt，不延续原机器的本地会话假设。
-
-### 9.3 Effect 与 Unknown Outcome
-
-跨机采用 **at-least-once + 对账**，不承诺无法证明的 exactly-once：
-
-```text
-queued → leased → confirmed
-              └→ unknown → reconciling → confirmed | needs_person
-```
-
-每个不可合并副作用有不可变 `effect_id`、输入哈希、执行 Host 和证据。断线或崩溃后，先查 Host Ledger 或权威远端：
-
-- Git：核对 ref / commit；
-- 外部平台：利用幂等键或记录标记；
-- 本地文件：临时文件 + 原子替换 + 哈希日志；
-- 模型生成：记录任务 ID、输入摘要、产物哈希和生成状态。
-
-无法证明是否成功的敏感效果，询问用户而非盲目重跑。模型“先检查一下再决定”可辅助恢复，但不能代替确定性证据。
-
 **审批理由必须与首签身份和实际审计一起成立。** `POST /tickets/{id}/approval` 现要求 `decision=approve|reject`、有界 `approval_id` 及**非空、trim后、UTF-8最多1000字节**的 `reason`。Vue只在仍选中同一张真正 `waiting_approval` 且无停止意图的Ticket时提交，并在表单事先说明理由会以可读文字持久化、不能填Secret；外部凭据或子进程secret不因此进入Prompt。随后填写另一明确决定不是自动学习习惯，也不为了审批ID而去创建审批Granted对象。
 
 Concierge在现有Store锁及 `BEGIN IMMEDIATE` 事务中重新读取实际Ticket/frozen Source Spec、Grant、Binding、root、Node及Worker/心跳状态，核对而至首次Attempt，不代替之前看到的旧modal。带人工理由的 `approve_ticket` 才走严格Source授权校验；原库内部 `retry_after_approval` 仅保留generic兼容性，不是HTTP绕开理由的备用通道。批准时，Ticket从0→1、真实Assignment/Lease、原Grant/digest/物理Node/worker/`assignment.retried` 和 **`task.approval_granted`**（reason、approval_id、实际的Assignment ID、Lease ID、epoch、原始Grant/digest与`grant_created:false`）在同一个事务提交。拒绝只写**`task.approval_rejected`**（真实reason/ID）并保持`waiting_approval`、空Assignment、无Report/Artifact/Effect、无stop intent；它是有记录的暂缓，不是取消或失败。原关联仍可能由用户再次显式检查后作另一个新的决定，不会因旧拒绝而自动执行或把approval_id当作可无限使用的授权。
@@ -921,48 +811,13 @@ COMMIT只在字段校验、状态/权限、插入及audit均成功后发生，�
 
 当前这类验收会准确顺序验证：真正失读并形成failed历史，用户打开重试确认，随后通过真实授权服务撤销该票的原Grant（独立测试中新授予并撤销的Grant，不是复活旧撤权凭证），最后确认。要求看到真实400与grant-revoked错误、可返回检查、原历史ID集合恰好多一条failed Ticket、无新Assignment/Artifact/Effect、处理后原轮询也不执行，并校验Audit chain和权限页已撤销状态。该测试不能拿快照prior meta服务当作权限 proof，也不要求在失去许可后对任何框架自动重试或强制伪造关闭对话框。详情仍然从授权详情接口逐项读取，不能只按摘要清单想当然存在历史。
 
-### 9.4 调度失败与离线
+</details>
 
-- 无符合 Host：排队、等待指定设备上线，或向用户提供替代方案；
-- Host 离线：Task 保留，不能伪装为执行失败或成功；
-- Worker 失联：Assignment 失联，与 Ticket 状态分别处理；
-- 重试：先处理 Unknown Outcome，防止重复副作用；
-- 通知可以广播预热，真正的副作用必须获得中心 Lease；
+<details>
+<summary><strong>H. 历史 Source 导航验证</strong></summary>
+
 - **历史Source任务回访必须让用户真正回到可操作的Ticket。** 对 SourceWorkPanel 中已持久 `task_ticket_id` 的 `open-ticket`，Vue在数据链一致之外还必须先关闭该Source modal，再选择这张Ticket；单纯后台拿到这张Ticket并不叫用户看到了它。不能为了这个读取动作再创建Ticket、Grant或发送approval，也不能把没有持久关联的legacy intake `ticket_id` 当成同等关系。创建刚完成的自动跳转与历史事件返回共用同一 close-then-select helper，任意读取失败则由当前Ticket的标准错误呈现/重读入口处理，而不是藏在同一浮层下。
 
 该边界已经用真实Edge重现并核实修复：先创建**第三张仍为waiting_approval**的Source Work，显式关闭并重开同一历史thread，再点精确的“打开独立任务”。未修补时正确GET 200之后Source modal仍连续可见而超时；修复后当模态关闭，ID正确，**检查并决定按钮的真实 DOM hit-test 命中**才可继续用户自己的拒绝/批准与真实heartbeat、Artifact流程。导航本身既不创建Ticket也不发送approval。该行为只代表Source→可执行任务回访完整了，不是M0移动端生命周期、多人联合审核或完整M0/多宿主已完成的另一种声称。详证见[当前历史Source回归](/tmp/loom-source-navigation-final-JIhpMF/result.json)及[同源实现说明](tests/sources/README.md)。
 
-多机暂不采用无中心争抢任务，避免双写和权限不明确。
-
-### 9.5 Host 与外部 Watchdog
-
-- Host Watchdog：检查进程、资源、Lease、任务、磁盘与对账；
-- Independent Watchdog：在另一设备或独立 Profile 检查协调器；
-- 仅重启可解决的运行故障；配置错误、无权限和持续偏离目标须报告；
-- 手动停止是尊重的持久意图，不应被自动恢复覆盖；
-- 检查进展而非仅检查进程是否活着。
-
-## 10. 用户交互与 Worker 放置
-
-保持单联系人的体验，但用以下视图提供可控性：
-
-- **Chat**：需求、确认、关键决策和最终结果；过程消息默认不占满主时间线；
-- **Activity**：任务在哪个 Host / Worker、当前阶段和阻塞；
-- **Collaboration**：可展开、可过滤的 Agent / Worker 交流、委派和共享简报；
-- **Fleet**：设备、Worker、模型、能力和在线状态；
-- **Project / Artifact**：项目来源、版本、产物及生成谱系；
-- **Memory / Access**：工作记忆摘要、Memory / Skill 建议、权限、撤回和审计。
-
-用户不必每次选机器，但首次创建以下边界时应提供选择：
-
-- 新 Agent / Worker；
-- 新项目或敏感资料目录；
-- 本地专有模型；
-- 多机都满足且长期成本、权限或体验有明显差别；
-- 长期无人值守或高成本任务。
-
-例：
-
-> 某个长期项目 Worker 要放在哪台机器？是复用已有项目环境，还是更适合模型推理的另一台设备？
-
-保存用户的默认规则，后续常规任务自动执行，冲突或成本变化时再询问。会话展开/折叠也属于可保存的默认规则，但单任务覆盖不改变长期偏好。
+</details>
