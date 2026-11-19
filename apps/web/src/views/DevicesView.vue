@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import type { Grant, LoomNode, Project } from '../api/types'
 import type { ImageEvaluationState } from '../lib/imageAvailability'
 import ImageAvailabilityAssessment from '../components/ImageAvailabilityAssessment.vue'
-import { capabilityName, formatTime, heartbeatStale, nodeConnected } from '../lib/format'
+import { capabilityName, formatTime, heartbeatStale, nodeOnline } from '../lib/format'
 import AppIcon from '../components/AppIcon.vue'
 import ModelInventorySection from '../components/ModelInventorySection.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -42,7 +42,9 @@ function factStatus(node: LoomNode, resource: string): string {
   const warnings = inventory?.issues?.filter(issue => issue.resource?.startsWith(resource) || issue.resource === 'workers').map(issue => issue.code) ?? []
   return [...new Set([confidence === 'unknown' ? '未知' : confidence, ...warnings])].join(' / ')
 }
-const onlineCount = (nodes: Nodes) => nodes.filter(node => nodeConnected(node.status) && !heartbeatStale(node.last_heartbeat ?? node.last_seen_at)).length
+const onlineCount = (nodes: Nodes) => nodes.filter(nodeOnline).length
+const revoked = (node: LoomNode) => Boolean(node.revoked_at)
+const hasFreshSnapshot = (node: LoomNode) => nodeOnline(node)
 async function copyCode() {
   copyError.value = false
   try {
@@ -90,15 +92,17 @@ defineExpose({ setEnrollment })
       <EmptyState v-if="!loading && !nodes.length" icon="devices" title="还没有已注册的设备" description="请安装并主动注册 Local Node。配对码不等于任务权限，也不会自动安装任何插件。" />
       <div v-else-if="nodes.length" class="node-list">
         <article v-for="node in nodes" :key="node.id" class="node-item">
-          <span class="node-avatar" :class="{ offline: !nodeConnected(node.status) }"><AppIcon name="devices" :size="24" /></span>
+          <span class="node-avatar" :class="{ offline: !nodeOnline(node) }"><AppIcon name="devices" :size="24" /></span>
           <div class="node-body">
             <div class="node-heading">
               <h3>{{ node.name || node.id }}</h3>
-              <span class="status-badge" :class="nodeConnected(node.status) ? (node.status === 'degraded' ? 'waiting' : 'active') : 'neutral'"><span class="status-dot" />{{ nodeConnected(node.status) ? (node.status === 'busy' ? '忙碌' : node.status === 'degraded' ? '降级' : '在线') : '离线' }}</span>
-              <span v-if="nodeConnected(node.status) && heartbeatStale(node.last_heartbeat ?? node.last_seen_at)" class="status-badge waiting">心跳陈旧</span>
+              <span class="status-badge" :class="revoked(node) || !hasFreshSnapshot(node) ? 'neutral' : node.status === 'degraded' ? 'waiting' : 'active'" :data-device-presence="revoked(node) ? 'revoked' : hasFreshSnapshot(node) ? 'active' : 'offline'"><span class="status-dot" />{{ revoked(node) ? '已撤销' : nodeOnline(node) ? (node.status === 'busy' ? '忙碌' : node.status === 'degraded' ? '降级' : '在线') : '离线' }}</span>
+              <span v-if="!revoked(node) && !nodeOnline(node) && (node.freshness === 'stale_offline' || heartbeatStale(node.last_heartbeat ?? node.last_seen_at))" class="status-badge waiting" title="中心已超过新鲜阈值未收到有效心跳；节点和物理网络的实际状态没有被另行测得。">心跳陈旧</span>
             </div>
             <span class="mono muted">{{ node.id }}</span>
             <div class="node-meta"><span><AppIcon name="clock" :size="14" />最后心跳 {{ formatTime(node.last_heartbeat ?? node.last_seen_at, true) }}</span><span v-if="node.installation_id">安装 {{ node.installation_id.slice(0, 14) }}</span></div>
+            <p v-if="!hasFreshSnapshot(node) && !revoked(node)" class="muted small node-presence-note">这是末次心跳快照。中心没有新的有效心跳，不能把旧状态宣称为在线；也不是实际设备或网络状态的新测量。</p>
+            <p v-if="revoked(node)" class="muted small node-presence-note">该安装身份已撤销；仅保留历史心跳时间，不会因此恢复任务授权。</p>
             <div v-if="node.capabilities?.length" class="capability-list"><span v-for="capability in node.capabilities" :key="capabilityName(capability)">{{ capabilityName(capability) }}</span></div><p v-else class="muted small">未声明可用能力。不能按在线状态假定任务可执行。</p>
           </div>
           <div class="node-facts"><span>系统 · {{ factValue(node, 'hardware.os') }}</span><span>架构 · {{ factValue(node, 'hardware.arch') }}</span><span>内存 · {{ factValue(node, 'hardware.memory_bytes') }}</span><span>模型适配 · {{ factValue(node, 'model.adapter') }}</span></div>

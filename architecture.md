@@ -188,6 +188,8 @@ Project 必须区分 **Canonical Remote、Working Tree、Generated Workspace、C
 Clone 是独立操作，知道 Git URL 不代表自动 Clone；凭据留在本机 Broker，本机绝对路径也不作为全局 Artifact URI。
 当前 Git 探测只读取获批项目根中的 Git 事实与 dirty state，剥离 URL 凭据，见[验证边界](tests/projects/README.md)。
 
+`online/freshness` 是 Controller 在每次读取注册Node时，基于末次认证 heartbeat、撤销事实和当前时间计算的快照；`status`/last_heartbeat 是不可随意重写的原始历史及自报。Vue中的`nodeOnline`尊重这个显式`online=false`，不能因过去`status:'online'`而继续展示在线，也不得以其隐式撤销任何Grant。`revoked_at`必须与陈旧心跳分别表达，末次绝对时间保留；缺失online字段才由已有90秒启发式回退，未对网络/主机进行新探测。真实stale→card/顶栏/resume的proof见 [node presence](tests/model-inventory/README.md#actual-stale-heartbeat-presentation-and-exact-installation-boundary)。这类读取与物理设备离线/断网/多机交接不是同一契约，也不代替Host runtime耗电/重试。
+
 ### 6.2 模型生命周期
 
 ```mermaid

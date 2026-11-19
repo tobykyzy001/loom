@@ -1,4 +1,4 @@
-import type { TicketStatus } from '../api/types'
+import type { LoomNode, TicketStatus } from '../api/types'
 
 export const statusLabels: Record<TicketStatus, string> = {
   pending: '待执行',
@@ -53,6 +53,15 @@ export function capabilityName(capability: string | Record<string, unknown>): st
 
 export function heartbeatStale(value?: string): boolean {
   return !value || new Date(value).getTime() < Date.now() - 90_000
+}
+
+export function nodeOnline(node: Pick<LoomNode, 'status' | 'online' | 'last_heartbeat' | 'last_seen_at' | 'revoked_at'>): boolean {
+  if (node.revoked_at || node.status === 'offline') return false
+  // The controller has already applied revocation and its heartbeat TTL. An
+  // explicit false is stale evidence, not an absent backward-compatibility field.
+  return typeof node.online === 'boolean'
+    ? node.online
+    : nodeConnected(node.status) && !heartbeatStale(node.last_heartbeat ?? node.last_seen_at)
 }
 
 export function reportStatusLabel(status: string): string {

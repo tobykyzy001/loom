@@ -30,6 +30,24 @@ The negative unit test guard (`node --test plugins/dsh-loom/test/model-inventory
 
 Helper documentation and raw shape: [`plugins/dsh-loom/MODEL_INVENTORY.md`](../../plugins/dsh-loom/MODEL_INVENTORY.md). The latest completed result is in that temporary run's `<root>/private/model-inventory-result.json`; a compile failure before launching DSH is **NOT RUN**, not PASS.
 
+## Actual stale heartbeat presentation and exact installation boundary
+
+Run `pnpm --dir apps/web build && node tests/model-inventory/offline-heartbeat.mjs`.
+
+A previous-online installation that stops heartbeat used to remain visually online because the web card and topbar treated self-reported `status: 'online'` as the current presence. `nodeOnline` now uses the controller-derived `online` whenever it is present; absence (offline/revocation/stale/missing time) contributes zero to the active count. If older/cached responses omit that field, the existing last-heartbeat and 90-second client staleness behavior remains a fallback. It does **not** manufacture a new connection measurement. `revoked_at` is explicitly distinct and never a revival.
+
+The proof operates only on an owned isolated Root:
+
+1. creates real Ed25519 identity + a signed single-use enrollment, declares `read_summary` capability only (not a Grant), has a normal authenticated heartbeat `online:true`, and verifies ordinary no-header reads are 401;
+2. **stops the Concierge and heartbeat**, then modifies only this fixture's `last_heartbeat` to a fixed older RFC3339 timestamp. It leaves its original `status:'online'`, revocation, worker, inventory and registration intact, with transaction rollback and no other unknown record lookup. No actual user database/remote or edited DSH Profile is involved. `grants/tickets/assignments/artifacts` stay zero;
+3. reopens the **same** SQLite dataDir, client token and loopback address, and gets truly `online:false`, `freshness:'stale_offline'`, `source:'host_heartbeat'` with the older absolute timestamp;
+4. opens the built Vue in real Edge with the test token, verifying **offline card, zero active count, topbar offline, stale hint and original last heartbeat**—not a faked response. It resumes the same owned browser Profile at 390px, rechecks the saved credentials with a real protected read, and still observes no horizontal overflow or current-online assertion. A 390px desktop viewport is not a physical phone test;
+5. performs a separately authenticated management `POST /nodes/{id}/revoke`, then issues an ordinary Node-protocol heartbeat using exactly the issued Node transport credential. Current code rejects it with actual `401 unauthorized`, so revoke is not confused with heartbeat aging. This is not a new general-purpose revoke helper or an implicit admin-token fallback into the Node transport.
+
+Report: `/tmp/loom-node-staleness-proof.json`. The five checks include only public identifiers/timestamps and assertion names, never the actual client/node token, private key, full server object or auth payload. Anonymous-first login and admin-vs-Node credentials are kept distinct. Cleanup closes the owned preview/browser/controller and verifies the test-owned root before removing it; `LOOM_TEST_KEEP_EVIDENCE=1` deliberately retains its test artifacts for inspection.
+
+This covers **one host's heartbeat projection and real desktop GUI**, including the former stale-node online-count bug. It is not a simulated physical network outage, a second physical Host, a mobile lifecycle, a real DSH-model/Remote Registry test or full M1 acceptance.
+
 ## Current trusted local hardware condition report
 
 **Verified end to end (current macOS, one physical machine).** Run:

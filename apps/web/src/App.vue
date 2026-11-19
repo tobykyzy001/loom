@@ -25,7 +25,7 @@ import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
 import { useWorkspace, refresh, reconnect, navigate, readPreferences, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, downloadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory, createSourceWorkTransport, createTicketFromSource, sourceOperationError, evaluatePlacement, probeProject } from './state/workspace'
-import { heartbeatStale, nodeConnected } from './lib/format'
+import { nodeOnline } from './lib/format'
 import type { LoomNode } from './api/types'
 import { grantOperationsSummary } from './lib/permissions'
 import { canRetryTicket } from './lib/retryControl'
@@ -53,7 +53,7 @@ const protocolName = computed(() => bootstrap.value?.client_api ?? bootstrap.val
 const nodeStatus = computed(() => {
   if (state.credentialState === 'required') return '需要认证'
   if (state.connected === null) return '尚未验证连接'
-  return !state.connected ? '未连接' : !nodes.value.length ? '未注册节点' : nodes.value.some(n => nodeConnected(n.status) && !heartbeatStale(n.last_heartbeat ?? n.last_seen_at)) ? '节点在线' : '节点离线'
+  return !state.connected ? '未连接' : !nodes.value.length ? '未注册节点' : nodes.value.some(nodeOnline) ? '节点在线' : '节点离线'
 })
 const navItems: { page: Page; label: string; icon: IconName }[] = [
   { page: 'conversation', label: '对话', icon: 'conversation' }, { page: 'activity', label: '活动', icon: 'activity' },

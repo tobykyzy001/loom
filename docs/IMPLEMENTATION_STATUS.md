@@ -2,6 +2,14 @@
 
 Updated: 2026-11-19.
 
+## Device presence now honors the controller-computed staleness
+
+The former Devices page and topbar treated stored `status:'online'` as current online even when the controller's `/nodes` response had already computed `online:false` and `freshness:'stale_offline'`. Shared `nodeOnline` honors explicit backend presence and falls back to the existing 90-second client heuristic only for legacy results without `online`. `revoked_at` and `offline` always count as unavailable without weakly deriving a Grant or remote reachability. Busy/degraded activity is still distinct from heartbeat expiry; the raw timestamp is retained as historical evidence instead of a fake freshness/probe.
+
+`node tests/model-inventory/offline-heartbeat.mjs` is a real registration/challenge, fresh authenticated heartbeat, then deliberate fixture-only aging of the owned SQLite record's timestamp while the controller is stopped. It returns the original database on the same token/baseUrl with `stale_offline`, and actual production Edge renders the dead-current-count as zero and the card/header as offline, with the original absolute `last_heartbeat`. A second owned browser context at 390px retains this after the real save-and-reconnect flow. A separately authenticated management revocation followed by the fixture's own issued Node credential returns actual `401 unauthorized`, demonstrating that heartbeat staleness is not revocation and cannot regain a paused installation.
+
+Proof: `/tmp/loom-node-staleness-proof.json` (five PASS checks). Source-presence scope is limited to a single logical fixture on one machine; timestamp aging is not a physical network failure or host power-off, and it is not a second Host, an installed DSH Profile, mobile, or TTL wait proof. Real browser/server/profile cleanup and safe test-root destruction were run. All 208 Web tests and production build pass with the new `devices-presence` busy/stale/revoked-labeled fixtures.
+
 ## Migrated Artifact reads preserve evidence and enforce privacy even on errors
 
 Schema 15 -> 16 migration now has a **real router + real artifact byte proof**, not just a `Store::get` check. A genuine starting schema drops `read_evidence_json` and retains project/grant/Ticket/file/digest and historical audit, then reopens as schema 16.
