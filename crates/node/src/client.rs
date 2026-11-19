@@ -229,13 +229,25 @@ impl NodeClient {
             "acknowledgement".into(),
             json!(if accepted { "accepted" } else { "rejected" }),
         );
-        self.request(
-            "/api/v1/nodes/acknowledge",
-            Value::Object(body.clone()),
-            Some(identity.token()?),
-            15,
-        )
-        .await
+        let response: Value = self
+            .request(
+                "/api/v1/nodes/acknowledge",
+                Value::Object(body.clone()),
+                Some(identity.token()?),
+                15,
+            )
+            .await?;
+        if response.get("accepted").and_then(Value::as_bool) != Some(true) {
+            anyhow::bail!("coordinator did not accept the ordinary assignment acknowledgement");
+        }
+        let acknowledged_at = response
+            .get("acknowledged_at")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 80)
+            .context("coordinator ACK must contain a nonempty acknowledged_at timestamp")?;
+        chrono::DateTime::parse_from_rfc3339(acknowledged_at)
+            .context("coordinator acknowledged_at must be RFC3339")?;
+        Ok(response)
     }
 
     pub async fn cancellation_observed(

@@ -164,7 +164,7 @@ try {
   assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok')
   assert.equal((await admin.get('/api/v1/audit/verify')).valid, true, 'The accepted revocation and original admission keep one valid audit chain')
   const centralSchema = db.prepare('PRAGMA user_version').get().user_version
-  assert.equal(centralSchema, 15)
+  assert.equal(centralSchema, 16)
 
   // A direct stop is not ordinary admission replay. The center has to see
   // this current cancellation intent again, rather than a local cache hiding it.

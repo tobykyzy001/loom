@@ -12,6 +12,18 @@ A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored 
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
 
+## Rust native ordinary acknowledgements validate their receipt before replay
+
+The Rust Bare runner previously treated any parseable HTTP success from ordinary `acknowledge_envelope` as an acknowledgement. But real Concierge ordinary admission requires `accepted:true` and a valid `acknowledged_at` backed by an assignment audit. A malformed `200` could therefore be treated locally as admission before artifact delivery.
+
+`NodeClient::acknowledge_envelope` now accepts only a true `accepted` value and a nonempty, ≤80-byte RFC3339 timestamp. A successful local operation with a rejected/missing/malformed receipt returns deferred without sending that new artifact/report or advancing its last-assignment cursor. Cancellation observation and unknown-outcome paths are intentionally distinct and unchanged.
+
+For a previously real completed successful assignment, the replay code first revalidates binding, Grant/digest, lease/root and its logical digest, only then repeats the ordinary acknowledgement and releases those original outbox bodies. It does not run another file operation. Concierge responds to that exact valid retry with the original timestamp and one matching entrypoint audit, never a new Grant or new execution claim. Revoked/old scope or changed input remains blocked before replay.
+
+`crates/node/tests/completed_replay.rs` now has **five passing tests**, including three first-task malformed receipts per owned fixture and a bounded recovery loop confirming unchanged original bodies, restored queue and still exactly one local effect. The controlled loopback is explicitly not a representation of Rust center's committed ACK audit or physical network loss. Real `scripts/bare-integration.mjs` and native descriptor Registry continue passing for the valid contract, and the genuine TypeScript `tests/runner/ack-replay.mjs` flow separately passed the ACK-committed response-loss case against actual schema16, with a single admission audit and no second execution. The old test's remaining `schema 15` fixture expectation was corrected to the established v16 rather than ignored as a feature defect.
+
+This closes a precise ordinary Native task-admission/recovery gap, not multi-Host transport, arbitrary Socket failures, all cancellation or full M0/M1.
+
 ## Verified Rust bare `model_descriptor` source execution and Registry support
 
 The previously NOT-RUN native descriptor read is now a real execution path, not only the already-declared capability. `crates/node/src/model_descriptor.rs` implements a strict metadata-only `loom.model-descriptor.v1` reader, and `Assignment::decode` admits this existing kind only for exact `model.json`, preserving the current read Grant/digest/workers/root and explicitly no supplied file content. It accepts no paths, weights, invocation, download or Provider workflows.

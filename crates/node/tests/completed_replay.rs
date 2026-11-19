@@ -30,6 +30,7 @@ struct TransportState {
     packet: Arc<Mutex<Value>>,
     calls: Arc<Mutex<Vec<Call>>>,
     delivery_attempts: Arc<AtomicUsize>,
+    acknowledgement: Arc<Mutex<Option<Value>>>,
 }
 
 struct Transport {
@@ -48,6 +49,7 @@ impl TransportState {
             packet: Arc::new(Mutex::new(original.clone())),
             calls: Arc::new(Mutex::new(Vec::new())),
             delivery_attempts: Arc::new(AtomicUsize::new(0)),
+            acknowledgement: Arc::new(Mutex::new(None)),
         };
         let app = Router::new()
             .fallback(post(answer))
@@ -118,10 +120,15 @@ async fn answer(
         );
     }
     if path.ends_with("/acknowledge") {
-        return (
-            StatusCode::OK,
-            Json(json!({"accepted":true,"acknowledged_at":chrono::Utc::now(),"duplicate":false})),
-        );
+        let acknowledgement = state
+            .acknowledgement
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(
+                || json!({"accepted":true,"acknowledged_at":chrono::Utc::now(),"duplicate":false}),
+            );
+        return (StatusCode::OK, Json(acknowledgement));
     }
     (
         StatusCode::NOT_FOUND,
@@ -345,6 +352,90 @@ impl Fixture {
                 entry.kind
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_admission_receipt_is_checked_before_delivery_and_retried_without_extra_effects() {
+    for bad in [
+        json!({"accepted":true}),
+        json!({"accepted":true,"acknowledged_at":"not-an-rfc3339-time"}),
+        json!({"accepted":false,"acknowledged_at":chrono::Utc::now()}),
+    ] {
+        let fixture = Fixture::new(false).await;
+        *fixture.server.acknowledgement.lock().unwrap() = Some(bad.clone());
+        assert!(matches!(
+            fixture.tick(fixture.original.clone()).await.unwrap(),
+            TickStatus::Deferred
+        ));
+        assert!(fixture.server.calls("/artifacts").is_empty());
+        assert!(fixture.server.calls("/reports").is_empty());
+        assert_eq!(
+            StateStore::open(&fixture.state).unwrap().data.outbox.len(),
+            2
+        );
+        let actual_effect_bytes = std::fs::read_dir(&fixture.artifacts)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "bin")
+            })
+            .count();
+        assert_eq!(
+            actual_effect_bytes, 1,
+            "the local read happens only once before repeated bad receipts"
+        );
+        assert_eq!(fixture.server.calls("/acknowledge").len(), 1);
+        let original = StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .clone();
+        *fixture.server.acknowledgement.lock().unwrap() = None;
+        for _ in 0..4 {
+            if StateStore::open(&fixture.state)
+                .unwrap()
+                .data
+                .outbox
+                .is_empty()
+            {
+                break;
+            }
+            fixture.due_original_outbox();
+            assert!(matches!(
+                fixture.tick(fixture.original.clone()).await.unwrap(),
+                TickStatus::Deferred
+            ));
+        }
+        assert!(StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .is_empty());
+        assert!(fixture.server.calls("/acknowledge").len() >= 2);
+        for entry in &original {
+            let endpoint = if entry.kind == "artifact" {
+                "/artifacts"
+            } else {
+                "/reports"
+            };
+            assert!(fixture
+                .server
+                .calls(endpoint)
+                .iter()
+                .all(|body| body == &entry.body));
+            assert!(!fixture.server.calls(endpoint).is_empty());
+        }
+        assert_eq!(std::fs::read_dir(&fixture.artifacts).unwrap().count(), 2);
+        assert!(fixture
+            .server
+            .calls("/acknowledge")
+            .iter()
+            .all(|body| body["assignment_id"] == ASSIGNMENT));
     }
 }
 

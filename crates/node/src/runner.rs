@@ -202,6 +202,15 @@ impl LocalNodeRunner {
                 if previous["state"] == "running" {
                     bail!("running assignment requires reconciliation before evidence replay");
                 }
+                if previous["state"] == "succeeded" {
+                    // An ordinary acknowledgement may have needed a retry after
+                    // transport loss. The server checks this same current lease,
+                    // Grant and input before returning the original admission.
+                    // Do not execute the completed local operation a second time.
+                    if !self.client.acknowledge(&self.identity, &assignment, true, "Replay a completed local assignment; retry only the ordinary admission receipt").await.is_ok() {
+                        return Ok(TickStatus::Deferred);
+                    }
+                }
                 self.state.data.last_assignment_id = Some(assignment.id.clone());
                 self.state.flush()?;
                 self.dispatch_outbox().await?;
@@ -322,6 +331,12 @@ impl LocalNodeRunner {
                 .await
                 .is_ok()
         };
+        if accepted && !acknowledged {
+            // The local file exists and remains owned by this worker. Without a
+            // valid, affirmative admission receipt with a timestamp, it is not
+            // time to upload its artifact or mark the work successfully admitted.
+            return Ok(TickStatus::Deferred);
+        }
         self.state.data.last_assignment_id = Some(assignment.id.clone());
         self.state.flush()?;
         self.dispatch_outbox().await?;
