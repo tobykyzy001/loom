@@ -791,6 +791,48 @@ async fn a_preexisting_lock_link_must_not_redirect_or_alias_the_state_owner() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn non_file_lock_paths_are_rejected_without_blocking_or_changing_mode() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    for object_kind in ["directory", "fifo"] {
+        let fixture = Fixture::new(false).await;
+        let path = fixture.state.join("runner.lock");
+        if object_kind == "directory" {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            let status = std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{status}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let before = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(before.mode() & 0o777, 0o640);
+        let before_state = std::fs::read(fixture.state.join("node-state.json")).ok();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), fixture.try_runner())
+            .await
+            .expect("a non-file lock path must not block");
+        let error = result
+            .err()
+            .expect("{object_kind} must not become the owner lock");
+        assert!(
+            error.to_string().contains("ordinary single-linked"),
+            "{object_kind}: {error}"
+        );
+        let after = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(after.mode() & 0o777, 0o640);
+        assert_eq!(after.is_dir(), object_kind == "directory");
+        assert_eq!(after.file_type().is_fifo(), object_kind == "fifo");
+        assert_eq!(
+            std::fs::read(fixture.state.join("node-state.json")).ok(),
+            before_state
+        );
+        assert_eq!(fixture.server.calls("/register").len(), 0);
+    }
+}
+
 #[tokio::test]
 async fn native_completed_replay_checks_full_input_before_evidence_delivery() {
     let fixture = Fixture::new(false).await;
