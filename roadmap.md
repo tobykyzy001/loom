@@ -268,6 +268,12 @@ M0“受限输入到可信执行”又已有真实本机例子：`tests/harness/
 | 工作负载变化 | 忙碌、显存不足或服务异常能与“从未安装”区分 |
 | 库存到 Placement | 根据一次简单任务解释为什么选某 Host；没有合适 Host 时等待或询问 |
 
+M1“本地图像能力问询”已有一个**条件化不移交图片执行权**的真实例子：显式 `--this-controller-host` 的本机固定probe，在独立当前Node/Installation上运行实际macOS system_profiler，生成中心settings私有的`loom.local-hardware-probe.v1`及同事务审计。公共Nodes/fleet/placement从这个精确记录投影，Node心跳自带 `controller_probed`、放大内存或permission flag无法偷换这份报告；血缘、时间、Workload Busy与OS/arch缺测未知继续分开。GPU-only而没有测量内存时，不能凭空补出可用内存数值。
+
+实际 driver `tests/model-inventory/image-capability.mjs` 已验证disable、错Installation、缺本机operator声明、非法inspector均无写入；CLI完整DTO与私有settings相同。恶意heartbeat不再冒充控制器证明，64,000,000,000 bytes实测内存对照68,719,476,736 bytes（64 GiB）要求真实得到`hardware_incompatible`，原始readGrant及binding匹配仍通过。生产Edge实际选择readGrant，看到该条件原因与 `node_busy/worker_busy`；完整NodeID与source字段的换行也已修正，390px桌面布局按实际source显示“控制器实测”。随后同port/token/data_dir中心重开与原Edge重新读取报告通过，未产生任何新Ticket、Grant、下载、模型或图片。这是本机资源条件验讫，**不是已支持图片模型/启示程序、通用自然语言意图解析或第二物理Host**。真实401/新的回连下，`capability-evaluate`经统一run与只读post epoch gate；旧普通已接受写入语义不被改错。
+
+详见[当前可信硬件条件报告](tests/model-inventory/README.md#current-trusted-local-hardware-condition-report)及 `/tmp/loom-image-capability-proof.json`。除此之外仍有第二物理设备、真正的图片Smoke、mobile真机、Windows/Linux/多Harness和全M1事项未验证。
+
 **进入 M2 的证据**
 
 能力矩阵由实际探测产生，并覆盖能力存在、缺失、离线、无权限和状态过期五类情况；至少一个不具备图像能力的测试环境也得到正确、可操作的回答。

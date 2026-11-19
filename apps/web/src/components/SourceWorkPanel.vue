@@ -1,6 +1,7 @@
 <script lang="ts">
 import { ApiError } from '../api/client'
-import type { Grant, LoomNode, Project, SourceInstance, SourceWorkDraft } from '../api/types'
+import type { Grant, LoomNode, SourceInstance, SourceWorkDraft } from '../api/types'
+export { publishedSourceRoot } from '../lib/projectRoot'
 
 export type { SourceWorkDraft } from '../api/types'
 export interface SourceWorkTransport {
@@ -15,15 +16,6 @@ export function eligibleSourceGrant(grant: Grant | undefined): grant is Grant & 
   if (grant.status !== undefined && grant.status !== 'active') return false
   if (grant.node_id === 'auto') return false
   return Array.isArray(grant.operations) && grant.operations.includes('read')
-}
-
-export function publishedSourceRoot(node: LoomNode | undefined, project: Project | undefined): string {
-  if (!node || !project) return ''
-  const canonical = node.inventory?.canonical_project_roots?.[project.id]
-  if (typeof canonical === 'string') return canonical
-  if (node.inventory?.canonical_project_roots) return ''
-  const declared = node.inventory?.project_roots?.[project.id]
-  return typeof declared === 'string' && declared === project.root ? declared : ''
 }
 
 export function sourceWorkError(error: unknown): string {
@@ -72,7 +64,8 @@ export function createWebSourceTransport(workspace: {
 import { computed, ref, watch } from 'vue'
 import { safeRelativePath, statusLabel, statusToneFor } from '../lib/format'
 import { sourceIntentFromEvent } from '../lib/sourceIntent'
-import type { SourceEvent, SourceTicketReceipt, SourceThread } from '../api/types'
+import type { Project, SourceEvent, SourceTicketReceipt, SourceThread } from '../api/types'
+import { publishedSourceRoot } from '../lib/projectRoot'
 import { acceptSourceTicketReceipt, rejectSourceSpecMismatch } from '../api/parsing'
 import AppIcon from './AppIcon.vue'
 

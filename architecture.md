@@ -426,6 +426,12 @@ report / reconciliation_state
 
 本地硬件查看是一种显式、只读的 Controller Probe：只在进程选择 `LOOM_ENABLE_LOCAL_HARDWARE_PROBE=1` 时启用，固定使用当前OS自带命令及白名单参数（macOS 使用 `/usr/sbin/system_profiler` 和 `SPDisplaysDataType`，或同时读取 Hardware与Displays）。固定子进程超时、stdout/stderr上限和pipe结束上限均有处置；超时、超限、启动失败或无法解释的输出形成稳定error/unknown，绝不直接当成“此设备没有这个模型或 GPU”。不会保留原始报告、stderr、用户名、路径、serial/device UUID、bus或display详情。真实当前OS上的硬件来源标为 `controller_probed / local_only`；未验证 fixture 和 host-report不能冒充该来源。GPU/Metal只是一类设备事实，**没有**自动激活 Model Registry、图片生成Grant或其它主机的能力；模型未探测保持 unknown。
 
+要把这实际信息关联到一个注册设备，必须使用显式 `inventory-probe`，带 exact Node/Installation 和 **`--this-controller-host`**。后者的含义是：操作者明确声明该 identity 就是当前执行 probe 的物理控制器本机；它不是密码学设备证明，也不能将当前macOS的硬件事实指派给远程/另一台Host。缺省或错误ID、offline/revoked非法快照不运行原inspector，也不写probe/审计。Node的环境 Capability 与该operator-selected本机声明不是新Grant。
+
+这份完整 `loom.local-hardware-probe.v1` 报告实际保存于中心私有 `settings.hardware_probe:<node>:<installation>`，和审计同一事务写入，验证时间、白名单资源、来源和`permission_granted:false`。公共 `/nodes`、`/nodes/{id}/inventory`、`/inventory` 和 Placement按同一精确身份投影这份记录。普通heartbeat中的同名 `hardware_probe` 或放大后的raw hardware字段**不能霸占该授权下的controller意义**；无记录时继续保留原host_reported及其陈旧/未知语义，含trusted记录时，GPU-only而缺内存则明确unknown而不是接受旧假内存。设置/审计回滚原子，纯GET不再执行硬件inspector；损坏记录不借口自报变成可用设备事实。
+
+生产设备的“图片生成前提评估”让用户**明确选择**已有read Grant，调用原`placement/evaluate`只是当前资源/Grant/root条件的解释，不是图片Ticket或Grant。OS/内存等不满足或未测保持不同等待原因，另有模型/运行时/实际图片输出均未验证的说明，不把无GPU等同全机不可用。这个只读条件POST也经认证 `run` 与端到端credential epoch响应核验；过期401进入required，旧结果不得冒充最新。条件candidate如果存在仍仅描述现有read_summary Place，不能添加图像操作或Artifact。验证入口和本机单例见[本地能力条件报告](tests/model-inventory/README.md#current-trusted-local-hardware-condition-report)。
+
 
 ### 3.1.1 受认证 SourceInstance、Thread 与 Trigger（当前受限入口）
 

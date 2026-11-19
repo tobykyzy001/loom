@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import AppIcon, { type IconName } from './components/AppIcon.vue'
 import TicketList from './components/TicketList.vue'
 import TicketComposer from './components/TicketComposer.vue'
@@ -15,6 +15,8 @@ import ActivityView from './views/ActivityView.vue'
 import DevicesView from './views/DevicesView.vue'
 import ProjectsView from './views/ProjectsView.vue'
 import { memoryCandidates, memoryText, type MemoryCandidate, type ReviewDecision } from './lib/memoryCandidate'
+import { IMAGE_HARDWARE_EXAMPLE, imageGrantCandidates, placementResult, type ImageEvaluationState } from './lib/imageAvailability'
+import { publishedSourceRoot } from './lib/projectRoot'
 import { skillSourceRefs } from './lib/skillProof'
 import { editMemoryCandidateText, reviewMemoryCandidate } from './state/workspace'
 import MemoriesView from './views/MemoriesView.vue'
@@ -22,8 +24,9 @@ import InstallPlansView from './views/InstallPlansView.vue'
 import SkillsView from './views/SkillsView.vue'
 import AccessView from './views/AccessView.vue'
 import HelpView from './views/HelpView.vue'
-import { useWorkspace, refresh, reconnect, navigate, readPreferences, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, downloadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory, createSourceWorkTransport, createTicketFromSource, sourceOperationError } from './state/workspace'
+import { useWorkspace, refresh, reconnect, navigate, readPreferences, startNewTicket, selectTicket, createTicket, createProject, updatePreferences, cancelTicket, retryTicket, decideApproval, loadArtifact, downloadArtifact, createEnrollmentCode, createGrant, createProjectBinding, revokeGrant, startPolling, stopPolling, saveMemory, deleteMemory, loadResources, loadSkillEvidence, startSkillReplay, reviewSkill, loadInstallPlans, createInstallPlan, approveInstallTarget, rollbackInstallTarget, observeInstallTarget, loadModelInventory, createSourceWorkTransport, createTicketFromSource, sourceOperationError, evaluatePlacement } from './state/workspace'
 import { heartbeatStale, nodeConnected } from './lib/format'
+import type { LoomNode } from './api/types'
 import { grantOperationsSummary } from './lib/permissions'
 import { canRetryTicket } from './lib/retryControl'
 import type { Grant, GrantOperation, NewTicket, Page, Project, ProjectBindingInput, ProjectMode, SkillCandidate, InstallOutcome, InstallPlan, InstallTarget, SourceWorkDraft, Ticket } from './api/types'
@@ -122,6 +125,34 @@ function observeTarget(plan: InstallPlan, target: InstallTarget, operation: 'app
 function openSourceWork() {
   sourceFeedback.value = ''
   sourcePanelOpen.value = true
+}
+const imageEvaluations = reactive<Record<string, ImageEvaluationState>>({})
+async function assessImageAvailability(node: LoomNode, selected: Grant) {
+  const key = `${node.id}/${node.installation_id}`
+  if (imageEvaluations[key]?.busy) return
+  const evaluation = reactive<ImageEvaluationState>({ busy: true, error: '', result: imageEvaluations[key]?.result })
+  imageEvaluations[key] = evaluation
+  try {
+    const grant = imageGrantCandidates(node, projects.value, state.grants).find(candidate => candidate.id === selected.id)
+    if (!grant) throw new Error('当前授权的 Node / Installation / Worker / 项目根已变化。请重新选择一个已存在的精确读取 Grant；不会借用其它 Grant。')
+    const request = { project_id: grant.project_id, capability: 'read_summary' as const,
+      worker_id: grant.worker_id, grant_id: grant.id, project_binding_id: grant.project_binding_id,
+      node_id: node.id, hardware: IMAGE_HARDWARE_EXAMPLE,
+    }
+    const response = placementResult(await evaluatePlacement(request))
+    if (!response) throw new Error('Controller 返回的评估证据不完整；没有将其解读为能力结论。')
+    if (response.selected) {
+      const project = projects.value.find(candidate => candidate.id === grant.project_id)
+      if (response.selected.node_id !== node.id || response.selected.installation_id !== node.installation_id
+        || response.selected.worker_id !== grant.worker_id || response.selected.project_binding_id !== grant.project_binding_id
+        || response.selected.root_scope !== publishedSourceRoot(node, project) || !response.existing_grant_matching_passed) {
+        throw new Error('评估返回的Node/Installation/Worker/绑定或项目根不符合已选范围；已丢弃，不把它当作新权限。')
+      }
+    }
+    evaluation.result = { decision: response, received_at: new Date().toISOString() }
+  } catch (error) {
+    evaluation.error = `${error instanceof Error ? error.message : '评估未完成。'}${evaluation.result ? '（仅保留上一次展示，不视为最新评估。）' : ''}`
+  } finally { evaluation.busy = false }
 }
 function reviewSourceWork(draft: SourceWorkDraft) {
   const selected = state.grants.find(candidate => candidate.id === draft.grant_id)
@@ -280,7 +311,7 @@ onBeforeUnmount(() => { stopPolling(); document.removeEventListener('visibilityc
       <InstallPlansView v-else-if="state.page === 'plans'" :plans="state.installPlans" :policy="state.installPlanPolicy" :loading="state.busy.plans" :busy="state.busy['plan-write']" :error="state.errors['plan-write']" :read-error="state.errors.plans" @create="createPlan" @approve="approveTarget" @rollback="rollbackTarget" @observe="observeTarget" @refresh="void loadInstallPlans()" />
       <ActivityView v-else-if="state.page === 'activity'" :tickets="tickets" :projects="projects" :audit="state.audit" @select="selectTask" />
       <template v-else-if="state.page === 'devices'">
-        <DevicesView ref="devicesView" :nodes="nodes" :busy="state.busy.enrollment" :loading="state.busy.resources" :inventory="state.modelInventory" :inventory-loading="state.busy.models" :inventory-error="state.errors.models" @enroll="void enroll()" @refresh-inventory="void loadModelInventory()" />
+        <DevicesView ref="devicesView" :nodes="nodes" :projects="projects" :grants="state.grants" :evaluations="imageEvaluations" :busy="state.busy.enrollment" :loading="state.busy.resources" :inventory="state.modelInventory" :inventory-loading="state.busy.models" :inventory-error="state.errors.models" @enroll="void enroll()" @refresh-inventory="void loadModelInventory()" @assess-image="args => void assessImageAvailability(args.node, args.grant)" />
         <p v-if="state.errors.enrollment" class="form-error" role="alert">{{ state.errors.enrollment }}</p>
       </template>
       <ProjectsView v-else-if="state.page === 'projects'" :projects="projects" :nodes="nodes" :expanded="expanded" :preferences-busy="state.busy['preferences:global']" :binding-busy="state.busy['binding-write']" :notice="bindingNotice" @add="showProjects = true" @bind="bindingProject = $event; state.errors.confirm = ''" @create-grant="bindingNotice = ''; changePage('access')" @preference="value => void updatePreferences(value, '')" />

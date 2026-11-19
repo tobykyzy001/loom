@@ -2,6 +2,20 @@
 
 Updated: 2026-11-19.
 
+## Local hardware evidence now answers a bounded precondition question, not an image-execution claim
+
+The M1 local-image question now has a real **bounded evidence flow**, not a generated image or a general hardware badge. `inventory-probe` requires both `LOOM_ENABLE_LOCAL_HARDWARE_PROBE=1` and the explicit typed `--this-controller-host` flag, plus an exact registered online Node/Installation. That local operator assertion couples the selected identity to this current physical controller; it is **not** cryptographic device attestation or remote proof. Disabled, wrong installation, missing locality confirmation and arbitrary inspector values all refuse before the fixed native profiler, with no report or registry change.
+
+The complete `loom.local-hardware-probe.v1` report is stored under controller-owned `settings.hardware_probe:<node>:<installation>` alongside its audit in one transaction, including the real observed_at and `permission_granted:false`. Heartbeats cannot overwrite this or become controller evidence by supplying the same field. Nodes/exact inventory/fleet/placement use the same exact trusted record. A probe with no memory measurement leaves controller-scoped memory unknown, and corruption/failure never promotes a fake host value to current hardware readiness. The original Node root, raw registration, non-hardware observations and heartbeat remain separate.
+
+`tests/model-inventory/image-capability.mjs` proves the entire path with a genuine registered Node, the actual fixed macOS system profiler, immutable private DTO and production Edge. An actual later heartbeat claims fake controller provenance, `permission_granted:true` and immense memory but cannot replace the truthful projection or placement evaluation. Actual memory **64,000,000,000 bytes = 59.6 GiB** is below the explicitly declared **64 GiB = 68,719,476,736 bytes** example, so it waits with `hardware_incompatible`; os/arch gaps remain unknown and current Node/Worker workload is faithfully `busy`. This example is not a guess at every image model's requirements. The standard grant/binding/root/worker match succeeds separately; no Image Grant is invented.
+
+A human must explicitly choose an existing read Grant in the UI before its condition assessment. A read-only POST uses the shared authenticated `run` and a request-local epoch/response fence, so accepted hardware condition evaluations cannot masquerade as newly accepted authority or survive stale credential publication. A real Rust HTTP test shows invalid credentials returning 401, moving to `credentialState='required'`, preventing another POST, then recovering; Tickets remain zero. Normal accepted legacy writes retain their existing receipt semantics. DevicesView now labels measured memory by **fact.source** rather than always saying host-reported.
+
+1280px/390px Edge layout, long-identifier wrapping, loading busy facts, identical DTO across same-data-dir/port/token controller restart and verification of a genuine report all passed without a model request, image generation, download, extra Ticket or Grant. The retained `/tmp/loom-image-capability-proof.json` contains only bounded checks/hardware primitives/viewports, not client/Node tokens or raw profiler data. See [Local hardware condition evidence](../tests/model-inventory/README.md#current-trusted-local-hardware-condition-report). This is not full M1 acceptance, remote/second Host validation, actual image execution/quality or real mobile lifecycle.
+
+
+
 ## Parent/child delegation reaches the production collaboration view without forging provenance
 
 The current narrow M0 multi-Agent case now has an **installed zero-network DSH rc.5 parent and child plus a real Edge end-to-end proof**, not only a unit-rendered relationship badge. `tests/harness/real-delegation.mjs --browser` executes the existing fixed two-step pipeline, retrieves its byte-backed parent proof through the existing Node/current-Assignment/Lease endpoint, then exposes the validated parent Ticket, parent Artifact UUID and distinct parent/child SessionRefs in the real collaboration tab.

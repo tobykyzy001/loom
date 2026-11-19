@@ -63,12 +63,14 @@ pub struct ProjectProbe {
     pub credential_location: String,
     pub permission_granted: bool,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[value(rename_all = "snake_case")]
 pub enum LocalHardwareInspector {
     Uname,
     /// Physical memory and graphics observations on this macOS host.
     MacSystemProfiler,
     /// An independently selectable GPU-only macOS display inspection.
+    #[default]
     MacDisplaysProfiler,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -829,6 +831,201 @@ fn parse_mac_displays(text: &str, observed_at: DateTime<Utc>, report: &mut Probe
     }
 }
 
+pub const LOCAL_HARDWARE_PROBE_SCHEMA: &str = "loom.local-hardware-probe.v1";
+const MAX_TRUSTED_PROBE_BYTES: usize = 64 * 1024;
+
+/// Server-only provenance for one actual CLI report. Never accept this shape
+/// from a Node heartbeat or copy a heartbeat's source flag into it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TrustedHardwareProbe {
+    pub schema: String,
+    pub node_id: String,
+    pub installation_id: String,
+    pub inspector: String,
+    pub observed_at: DateTime<Utc>,
+    pub facts: Vec<ResourceFact>,
+    pub issues: Vec<InventoryIssue>,
+    pub source: FactSource,
+    pub permission_granted: bool,
+}
+pub(crate) fn hardware_key(node_id: &str, installation_id: &str) -> String {
+    format!("hardware_probe:{node_id}:{installation_id}")
+}
+fn validate_trusted(
+    report: &TrustedHardwareProbe,
+    node_id: &str,
+    installation_id: &str,
+) -> anyhow::Result<()> {
+    let valid = report.schema == LOCAL_HARDWARE_PROBE_SCHEMA
+        && report.node_id == node_id
+        && report.installation_id == installation_id
+        && valid_selector(node_id)
+        && valid_selector(installation_id)
+        && bounded(Some(&report.inspector), 80).is_some()
+        && report.source == FactSource::ControllerProbed
+        && !report.permission_granted
+        && report.facts.len() <= 64
+        && report.issues.len() <= 64
+        && report.facts.iter().all(|fact| {
+            if fact.resource.starts_with("hardware.") {
+                fact.source == FactSource::ControllerProbed
+                    && fact.observed_at == Some(report.observed_at)
+                    && crate::inventory::normalize_reported_facts(
+                        std::slice::from_ref(fact),
+                        Freshness::Fresh,
+                    )
+                    .1
+                    .is_empty()
+            } else {
+                fact.resource == "models"
+                    && fact.source == FactSource::Unverified
+                    && fact.value.is_none()
+            }
+        })
+        && report.issues.iter().all(|issue| {
+            issue.resource.starts_with("hardware.")
+                && bounded(Some(&issue.code), 80).is_some()
+                && bounded(Some(&issue.resource), 160).is_some()
+        });
+    if valid {
+        Ok(())
+    } else {
+        anyhow::bail!("invalid_trusted_hardware_probe")
+    }
+}
+/// Read exact server-owned state only. Corruption fails closed rather than
+/// falling back to self-reported hardware for placement.
+pub(crate) fn trusted_hardware(
+    store: &crate::store::Store,
+    node_id: &str,
+    installation_id: &str,
+) -> anyhow::Result<Option<TrustedHardwareProbe>> {
+    let Some(encoded) = store.setting(&hardware_key(node_id, installation_id)) else {
+        return Ok(None);
+    };
+    if encoded.len() > MAX_TRUSTED_PROBE_BYTES {
+        anyhow::bail!("invalid_trusted_hardware_probe")
+    }
+    let report: TrustedHardwareProbe = serde_json::from_str(&encoded)?;
+    validate_trusted(&report, node_id, installation_id)?;
+    Ok(Some(report))
+}
+
+/// Explicit owner CLI action. Only the fixed native wrapper's actual report is
+/// committed, under its own exact identity; the Node's inventory is untouched.
+pub fn local_hardware_inventory<F>(
+    store: &mut crate::store::Store,
+    node_id: &str,
+    installation_id: &str,
+    request: &LocalProbeRequest,
+    enabled: bool,
+    this_controller_host: bool,
+    probe: F,
+) -> anyhow::Result<Value>
+where
+    F: FnOnce(&LocalProbeRequest, DateTime<Utc>) -> ProbeReport,
+{
+    if !enabled {
+        anyhow::bail!("local_hardware_disabled")
+    }
+    if !this_controller_host {
+        // The registry alone cannot prove a registered Node belongs to this
+        // physical controller. Only an explicit local operator may associate
+        // measurement here with that identity. This is not device attestation.
+        anyhow::bail!("controller-local association requires explicit --this-controller-host")
+    }
+    if !valid_selector(node_id) || !valid_selector(installation_id) || request.host_id != node_id {
+        anyhow::bail!("scope_mismatch")
+    }
+    let rows = store.query(
+        "SELECT * FROM nodes WHERE id=?1 AND installation_id=?2",
+        rusqlite::params![node_id, installation_id],
+    )?;
+    let snapshot = rows.first().ok_or_else(|| {
+        anyhow::anyhow!("unknown_installation: exact Node/Installation is not registered")
+    })?;
+    if snapshot["status"] != "online" || !snapshot["revoked_at"].is_null() {
+        anyhow::bail!("inactive_installation")
+    }
+    let Some(inventory) = snapshot["inventory"].as_object() else {
+        anyhow::bail!("future_invalid_inventory")
+    };
+    if inventory
+        .get("hardware")
+        .is_some_and(|value| !value.is_object())
+        || inventory.get("resources").is_some_and(|value| {
+            value.as_array().is_none_or(|facts| {
+                facts
+                    .iter()
+                    .any(|fact| serde_json::from_value::<ResourceFact>(fact.clone()).is_err())
+            })
+        })
+        || inventory
+            .get("model_catalog")
+            .is_some_and(|value| !value.is_object())
+    {
+        anyhow::bail!("future_invalid_inventory")
+    }
+    let at = Utc::now();
+    let report = probe(request, at);
+    if report.host_id != node_id
+        || report.source != FactSource::ControllerProbed
+        || report.schema != INVENTORY_SCHEMA
+        || report.permission_granted
+        || report.probed_at != at
+        || report.facts.len() > 64
+        || report.issues.len() > 64
+        || report.facts.iter().any(|fact| {
+            !(fact.resource.starts_with("hardware.") || fact.resource == "models")
+                || fact.resource.starts_with("hardware.")
+                    && fact.source != FactSource::ControllerProbed
+        })
+    {
+        anyhow::bail!("invalid_controller_report")
+    }
+    let trusted = TrustedHardwareProbe {
+        schema: LOCAL_HARDWARE_PROBE_SCHEMA.to_owned(),
+        node_id: node_id.to_owned(),
+        installation_id: installation_id.to_owned(),
+        inspector: report
+            .inspector
+            .as_deref()
+            .and_then(|value| bounded(Some(value), 80))
+            .ok_or_else(|| anyhow::anyhow!("invalid_controller_report"))?,
+        observed_at: report.probed_at,
+        facts: report.facts.clone(),
+        issues: report.issues.clone(),
+        source: FactSource::ControllerProbed,
+        permission_granted: false,
+    };
+    validate_trusted(&trusted, node_id, installation_id)?;
+    let encoded = serde_json::to_string(&trusted)?;
+    let snapshot_inventory = serde_json::to_string(&snapshot["inventory"])?;
+    let tx = store
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current: String = tx.query_row("SELECT inventory FROM nodes WHERE id=?1 AND installation_id=?2 AND status='online' AND revoked_at IS NULL",
+        rusqlite::params![request.host_id,installation_id], |row| row.get(0))?;
+    if current != snapshot_inventory {
+        anyhow::bail!("inventory_changed_or_invalid")
+    }
+    tx.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        rusqlite::params![hardware_key(node_id, installation_id), encoded],
+    )?;
+    crate::store::audit_tx_plan(
+        &tx,
+        "owner_cli",
+        "inventory.hardware_probe",
+        &serde_json::json!({"node_id":request.host_id,"installation_id":snapshot["installation_id"],
+            "inspector":trusted.inspector,"measured_at":trusted.observed_at,"permission_granted":false}),
+    )?;
+    tx.commit()?;
+    // Public stdout is the same bounded DTO: no Token, stderr or raw profile.
+    Ok(serde_json::to_value(trusted)?)
+}
+
 /// A model adapter that has not been verified is absence of knowledge, not a
 /// fabricated unavailable/live model installation.
 pub fn unverified_model_adapter(observed_at: DateTime<Utc>) -> ProbeReport {
@@ -846,7 +1043,446 @@ pub fn unverified_model_adapter(observed_at: DateTime<Utc>) -> ProbeReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
     use serde_json::json;
+
+    struct RegistryFixture {
+        _dir: tempfile::TempDir,
+        store: crate::store::Store,
+        original: Value,
+    }
+    fn registry_fixture() -> RegistryFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store.conn().execute("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','synthetic','/fixture','read_only',1,'2026-01-01T00:00:00Z','{}')", []).unwrap();
+        store.conn().execute("INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at) VALUES('grant','project','node-a','worker-a','install-a','[\"read\"]',1,'original-digest','2026-01-01T00:00:00Z')", []).unwrap();
+        let inventory = json!({"hardware":{"os":"darwin","arch":"unchanged"},"resources":[{"schema":INVENTORY_SCHEMA,"resource":"service.runtime","value":"original","source":"host_reported","observed_at":null,"freshness":"fresh","confidence":"available","location":"local_only"}],"project_roots":{"project":"/fixture"}});
+        let capabilities = json!([{"ticket_kind":"read_summary","permission":"read"}]);
+        let workers = json!([{"worker_id":"worker-a","status":"online"}]);
+        store.conn().execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node-a','install-a','not-secret','not-secret','online',?1,?2,?3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", params![capabilities.to_string(),workers.to_string(),inventory.to_string()]).unwrap();
+        let original = store.get("nodes", "node-a").unwrap().unwrap();
+        RegistryFixture {
+            _dir: dir,
+            store,
+            original,
+        }
+    }
+    fn must_not_probe(request: &LocalProbeRequest, _: DateTime<Utc>) -> ProbeReport {
+        panic!(
+            "native wrapper called for refused identity {}",
+            request.host_id
+        )
+    }
+    fn checked_inventory(
+        fixture: &mut RegistryFixture,
+        request: &LocalProbeRequest,
+        enabled: bool,
+    ) -> anyhow::Result<Value> {
+        local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "install-a",
+            request,
+            enabled,
+            true,
+            must_not_probe,
+        )
+    }
+    #[test]
+    fn inventory_probe_registry_refusal_and_future_inventory_never_invoke_or_write() {
+        for (label, setup) in [
+            ("missing", "DELETE FROM nodes"),
+            ("wrong_node", "UPDATE nodes SET id='node-b'"),
+            (
+                "scope_mismatch",
+                "UPDATE nodes SET installation_id='install-b'",
+            ),
+            (
+                "revoked",
+                "UPDATE nodes SET revoked_at='2026-01-01T00:00:00Z'",
+            ),
+            ("offline", "UPDATE nodes SET status='offline'"),
+            (
+                "future_invalid_inventory",
+                "UPDATE nodes SET inventory='[]'",
+            ),
+            (
+                "future_hardware",
+                "UPDATE nodes SET inventory='{\"hardware\":[]}'",
+            ),
+            (
+                "future_resources",
+                "UPDATE nodes SET inventory='{\"resources\":{}}'",
+            ),
+            (
+                "future_resource",
+                "UPDATE nodes SET inventory='{\"resources\":[{}]}'",
+            ),
+        ] {
+            let mut fixture = registry_fixture();
+            fixture.store.conn().execute(setup, []).unwrap();
+            let request = LocalProbeRequest {
+                host_id: "node-a".into(),
+                inspector: LocalHardwareInspector::MacDisplaysProfiler,
+            };
+            assert!(
+                checked_inventory(&mut fixture, &request, label != "missing").is_err(),
+                "{label}"
+            );
+            assert!(
+                checked_inventory(&mut fixture, &request, false).is_err(),
+                "{label}"
+            );
+            assert!(fixture.store.audits(None).unwrap().is_empty(), "{label}");
+            let after = fixture.store.query("SELECT * FROM nodes", []).unwrap();
+            assert!(after.is_empty() == (label == "missing"), "{label}");
+            if !after.is_empty() {
+                assert_eq!(
+                    after[0]["inventory"],
+                    if label == "future_invalid_inventory" {
+                        json!([])
+                    } else if label == "future_hardware" {
+                        json!({"hardware":[]})
+                    } else if label == "future_resources" {
+                        json!({"resources":{}})
+                    } else if label == "future_resource" {
+                        json!({"resources":[{}]})
+                    } else {
+                        fixture.original["inventory"].clone()
+                    },
+                    "{label}"
+                );
+            }
+        }
+        let mut fixture = registry_fixture();
+        let request = LocalProbeRequest {
+            host_id: "node-a".into(),
+            inspector: LocalHardwareInspector::Uname,
+        };
+        assert!(checked_inventory(&mut fixture, &request, false).is_err());
+        assert_eq!(
+            fixture.store.get("nodes", "node-a").unwrap(),
+            Some(fixture.original)
+        );
+        assert!(fixture.store.audits(None).unwrap().is_empty());
+    }
+    #[test]
+    fn hardware_probe_requires_explicit_current_controller_association() {
+        let mut fixture = registry_fixture();
+        let before_audits = fixture.store.audits(None).unwrap().len();
+        let request = LocalProbeRequest {
+            host_id: "node-a".into(),
+            inspector: LocalHardwareInspector::MacSystemProfiler,
+        };
+        let error = local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "install-a",
+            &request,
+            true,
+            false,
+            must_not_probe,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--this-controller-host"));
+        assert_eq!(
+            fixture.store.get("nodes", "node-a").unwrap(),
+            Some(fixture.original)
+        );
+        assert!(trusted_hardware(&fixture.store, "node-a", "install-a")
+            .unwrap()
+            .is_none());
+        assert_eq!(fixture.store.audits(None).unwrap().len(), before_audits);
+    }
+
+    #[test]
+    fn inventory_probe_real_upsert_is_atomic_and_preserves_registry_identity() {
+        let mut fixture = registry_fixture();
+        let original_grant = fixture.store.get("grants", "grant").unwrap().unwrap();
+        let before_audits = fixture.store.audits(None).unwrap().len();
+        let request = LocalProbeRequest {
+            host_id: "node-a".into(),
+            inspector: LocalHardwareInspector::MacDisplaysProfiler,
+        };
+        let measured = DateTime::parse_from_rfc3339("2026-11-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let output = local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "install-a",
+            &request,
+            true,
+            true,
+            |_, actual_at| {
+                assert!(actual_at >= measured && actual_at <= Utc::now());
+                let mut report = base_report(
+                    "node-a",
+                    Some("system_profiler"),
+                    actual_at,
+                    FactSource::ControllerProbed,
+                );
+                report.facts = vec![
+                    fact(
+                        "hardware.gpu.model",
+                        Some(FactValue::Text("Apple M2".into())),
+                        FactConfidence::Available,
+                        actual_at,
+                        FactSource::ControllerProbed,
+                    ),
+                    ResourceFact::unknown("models"),
+                ];
+                report
+            },
+        )
+        .unwrap();
+        assert_eq!(output["permission_granted"], false);
+        assert_eq!(output["facts"].as_array().unwrap().len(), 2);
+        for field in ["stderr", "node_token", "token", "raw_profile"] {
+            assert!(output.get(field).is_none(), "{field}");
+        }
+        assert_eq!(output["node_id"], "node-a");
+        assert_eq!(output["installation_id"], "install-a");
+        assert_eq!(output["source"], "controller_probed");
+        let node = fixture.store.get("nodes", "node-a").unwrap().unwrap();
+        assert_eq!(
+            node, fixture.original,
+            "the whole raw Node row stays separate"
+        );
+        let trusted = trusted_hardware(&fixture.store, "node-a", "install-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(&trusted).unwrap(), output);
+        assert!(node["inventory"].get("hardware_probe").is_none());
+        assert_eq!(
+            node["inventory"]["resources"][0]["resource"],
+            "service.runtime"
+        );
+        let view = crate::inventory::trusted_node_view(
+            &fixture.store,
+            &crate::inventory::InstallationIdentity {
+                node_id: "node-a".into(),
+                installation_id: "install-a".into(),
+            },
+            Some(&node),
+            Utc::now(),
+        )
+        .unwrap();
+        let gpu = view
+            .facts
+            .iter()
+            .find(|fact| fact.resource == "hardware.gpu.model")
+            .unwrap();
+        assert_eq!(gpu.source, FactSource::ControllerProbed);
+        assert_eq!(gpu.observed_at, Some(trusted.observed_at));
+        assert!(view
+            .facts
+            .iter()
+            .any(|fact| fact.resource == "service.runtime"
+                && fact.value == Some(FactValue::Text("original".into()))));
+        assert_eq!(view.hardware_probe.unwrap().inspector, "system_profiler");
+        assert_eq!(
+            fixture.store.get("grants", "grant").unwrap(),
+            Some(original_grant)
+        );
+        let audits = fixture.store.audits(None).unwrap();
+        assert_eq!(audits.len(), before_audits + 1);
+        let audit = &audits[0];
+        assert_eq!(audit["action"], "inventory.hardware_probe");
+        assert!(audit["evidence"].to_string().contains("node-a"));
+        assert!(fixture.store.verify_audit().unwrap());
+
+        let before_failed_write = node["inventory"].clone();
+        let before_failed_probe = fixture.store.setting(&hardware_key("node-a", "install-a"));
+        fixture.store.conn().execute("CREATE TRIGGER reject_probe_audit BEFORE INSERT ON audits WHEN NEW.action='inventory.hardware_probe' BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END", []).unwrap();
+        assert!(local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "install-a",
+            &request,
+            true,
+            true,
+            |_, at| {
+                base_report(
+                    "node-a",
+                    Some("system_profiler"),
+                    at,
+                    FactSource::ControllerProbed,
+                )
+            }
+        )
+        .is_err());
+        let rolled_back = fixture.store.get("nodes", "node-a").unwrap().unwrap();
+        assert_eq!(rolled_back["inventory"], before_failed_write);
+        assert_eq!(
+            rolled_back["last_heartbeat"],
+            fixture.original["last_heartbeat"]
+        );
+        assert_eq!(fixture.store.audits(None).unwrap().len(), audits.len());
+        assert_eq!(
+            fixture.store.setting(&hardware_key("node-a", "install-a")),
+            before_failed_probe,
+            "audit failure rolls back the trusted DTO too"
+        );
+    }
+
+    #[test]
+    fn controller_report_rejects_scope_crlf_and_ghost_model_without_a_write() {
+        let mut fixture = registry_fixture();
+        let request = LocalProbeRequest {
+            host_id: "node-a".into(),
+            inspector: LocalHardwareInspector::MacDisplaysProfiler,
+        };
+        for (label, invalidate) in [
+            ("wrong_host", 0),
+            ("host_reported_source", 1),
+            ("crlf_inspector", 2),
+            ("ghost_model", 3),
+        ] {
+            let result = local_hardware_inventory(
+                &mut fixture.store,
+                "node-a",
+                "install-a",
+                &request,
+                true,
+                true,
+                |_, at| {
+                    let mut report = base_report(
+                        "node-a",
+                        Some("system_profiler"),
+                        at,
+                        FactSource::ControllerProbed,
+                    );
+                    match invalidate {
+                        0 => report.host_id = "other".into(),
+                        1 => report.source = FactSource::HostReported,
+                        2 => report.inspector = Some("system_profiler\r\ntoken".into()),
+                        _ => report.facts.push(fact(
+                            "model.ghost",
+                            Some(FactValue::Text("invented".into())),
+                            FactConfidence::Available,
+                            at,
+                            FactSource::ControllerProbed,
+                        )),
+                    }
+                    report
+                },
+            );
+            assert!(result.is_err(), "{label}");
+            assert!(fixture
+                .store
+                .setting(&hardware_key("node-a", "install-a"))
+                .is_none());
+            assert!(fixture.store.audits(None).unwrap().is_empty());
+            assert_eq!(
+                fixture.store.get("nodes", "node-a").unwrap(),
+                Some(fixture.original.clone())
+            );
+        }
+        for bad in ["node-a\r\nother-installation", "installation"] {
+            assert!(local_hardware_inventory(
+                &mut fixture.store,
+                "node-a",
+                bad,
+                &request,
+                true,
+                true,
+                must_not_probe
+            )
+            .is_err());
+        }
+        fixture
+            .store
+            .set_setting(&hardware_key("node-a", "install-b"), "{}")
+            .unwrap();
+        assert!(trusted_hardware(&fixture.store, "node-a", "install-a")
+            .unwrap()
+            .is_none());
+        fixture
+            .store
+            .set_setting(&hardware_key("node-a", "install-a"), "{}")
+            .unwrap();
+        assert!(trusted_hardware(&fixture.store, "node-a", "install-a").is_err());
+    }
+
+    #[test]
+    fn inventory_probe_exact_installation_selection_preserves_other_rows_and_model_catalog() {
+        let mut fixture = registry_fixture();
+        let second = json!({"model_catalog":{"schema":"loom.model-inventory.v1","revision":1,"entries":[]},"resources":[]});
+        fixture.store.conn().execute("INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) SELECT id,'install-b',public_key,token_hash,status,capabilities,workers,?1,registered_at,'2026-01-01T00:00:00Z' FROM nodes WHERE installation_id='install-a'", [second.to_string()]).unwrap();
+        let request = LocalProbeRequest {
+            host_id: "node-a".into(),
+            inspector: LocalHardwareInspector::MacDisplaysProfiler,
+        };
+        let before = fixture
+            .store
+            .query("SELECT * FROM nodes ORDER BY installation_id", [])
+            .unwrap();
+        let result = local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "install-b",
+            &request,
+            true,
+            true,
+            |_, at| {
+                base_report(
+                    "node-a",
+                    Some("system_profiler"),
+                    at,
+                    FactSource::ControllerProbed,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result["permission_granted"], false);
+        let after = fixture
+            .store
+            .query("SELECT * FROM nodes ORDER BY installation_id", [])
+            .unwrap();
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1]["last_heartbeat"], before[1]["last_heartbeat"]);
+        assert_eq!(
+            after[1]["inventory"]["model_catalog"],
+            second["model_catalog"]
+        );
+        assert_eq!(after[1], before[1]);
+        assert!(fixture
+            .store
+            .setting(&hardware_key("node-a", "install-a"))
+            .is_none());
+        let trusted = trusted_hardware(&fixture.store, "node-a", "install-b")
+            .unwrap()
+            .unwrap();
+        assert_eq!(trusted.schema, LOCAL_HARDWARE_PROBE_SCHEMA);
+        assert!(local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "unknown",
+            &request,
+            true,
+            true,
+            must_not_probe
+        )
+        .is_err());
+        assert!(local_hardware_inventory(
+            &mut fixture.store,
+            "node-a",
+            "",
+            &request,
+            true,
+            true,
+            must_not_probe
+        )
+        .is_err());
+        assert_eq!(
+            fixture
+                .store
+                .query("SELECT * FROM nodes ORDER BY installation_id", [])
+                .unwrap(),
+            after
+        );
+    }
     use std::sync::{Mutex, OnceLock};
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {

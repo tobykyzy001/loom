@@ -275,7 +275,31 @@ export interface NodeInventory {
   project_roots?: Record<string, string>
   /** Public controller inspection of an already-declared Node root, null when unavailable. */
   canonical_project_roots?: Record<string, string | null>
+  hardware_probe?: HardwareProbeSnapshot
   permission_boundary?: string
+}
+
+export interface HardwareProbeSnapshot {
+  schema: 'loom.local-hardware-probe.v1' | string
+  inspector?: string | null
+  observed_at: string
+  source: 'controller_probed'
+  permission_granted: false
+}
+
+export interface PlacementWait {
+  code: string
+  source: string
+  resource: string
+  confidence: string
+}
+export interface PlacementDecision {
+  schema: 'loom.inventory.v1' | string
+  selected: { node_id: string; installation_id: string; worker_id: string; project_binding_id: string; root_scope: string } | null
+  waiting: PlacementWait[]
+  explanation: string
+  existing_grant_matching_passed: boolean
+  permission_boundary: string
 }
 
 export interface LoomNode {

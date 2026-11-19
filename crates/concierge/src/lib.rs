@@ -54,6 +54,19 @@ pub enum Command {
     },
     Doctor,
     Reconcile,
+    /// Explicit local, read-only hardware observation; not a remote operation.
+    InventoryProbe {
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        installation_id: String,
+        #[arg(long, value_enum, default_value_t = inventory_probe::LocalHardwareInspector::default())]
+        inspector: inventory_probe::LocalHardwareInspector,
+        /// Operator asserts this exact registered Node is this current physical controller.
+        /// It is an explicit local association, not cryptographic device attestation.
+        #[arg(long)]
+        this_controller_host: bool,
+    },
 }
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -147,6 +160,29 @@ async fn run_cli() -> Result<()> {
             command::doctor(&cli.data_dir, token.as_deref()).await?
         }
         Command::Reconcile => command::reconcile(&cli.data_dir).await?,
+        Command::InventoryProbe {
+            node_id,
+            installation_id,
+            inspector,
+            this_controller_host,
+        } => {
+            let mut store = store::Store::open(cli.data_dir)?;
+            let request = inventory_probe::LocalProbeRequest {
+                host_id: node_id,
+                inspector,
+            };
+            let result = inventory_probe::local_hardware_inventory(
+                &mut store,
+                &request.host_id,
+                &installation_id,
+                &request,
+                std::env::var_os(inventory_probe::LOCAL_HARDWARE_ENV).as_deref()
+                    == Some("1".as_ref()),
+                this_controller_host,
+                inventory_probe::probe_local_hardware,
+            )?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
     }
     Ok(())
 }

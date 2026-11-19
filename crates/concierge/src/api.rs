@@ -2656,6 +2656,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hardware_apis_publish_only_the_exact_trusted_projection() {
+        const TOKEN: &str = "hardware-projection-test-token-12345";
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        let at = chrono::Utc::now();
+        let inventory = json!({
+            "hardware":{"os":"macos","arch":"arm64","memory_bytes":999999999u64},
+            "hardware_probe":{"source":"controller_probed","inspector":"spoof\r\nsecret","permission_granted":true},
+            "resources":[
+                {"schema":"loom.inventory.v1","resource":"hardware.memory_bytes","value":999999999u64,"source":"controller_probed","observed_at":at,"freshness":"fresh","confidence":"available","location":"local_only"},
+                {"schema":"loom.inventory.v1","resource":"model.adapter","value":"original","source":"host_reported","observed_at":at,"freshness":"fresh","confidence":"unknown","location":"local_only"}
+            ]
+        });
+        for installation in ["installation", "other"] {
+            store.conn().execute(
+                "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node',?1,'public','private','online','[]','[{\"worker_id\":\"default\",\"status\":\"online\"}]',?2,?3,?3)",
+                params![installation, inventory.to_string(), at.to_rfc3339()],
+            ).unwrap();
+        }
+        let trusted = crate::inventory_probe::TrustedHardwareProbe {
+            schema: crate::inventory_probe::LOCAL_HARDWARE_PROBE_SCHEMA.into(),
+            node_id: "node".into(),
+            installation_id: "installation".into(),
+            inspector: "system_profiler".into(),
+            observed_at: at,
+            facts: vec![crate::inventory::ResourceFact {
+                schema: crate::inventory::INVENTORY_SCHEMA.into(),
+                resource: "hardware.gpu.model".into(),
+                value: Some(crate::inventory::FactValue::Text("actual GPU".into())),
+                source: crate::inventory::FactSource::ControllerProbed,
+                observed_at: Some(at),
+                freshness: crate::inventory::Freshness::Fresh,
+                confidence: crate::inventory::FactConfidence::Available,
+                location: crate::inventory::LocationPolicy::LocalOnly,
+            }],
+            issues: vec![],
+            source: crate::inventory::FactSource::ControllerProbed,
+            permission_granted: false,
+        };
+        store
+            .set_setting(
+                &crate::inventory_probe::hardware_key("node", "installation"),
+                &serde_json::to_string(&trusted).unwrap(),
+            )
+            .unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        async fn get(app: &Router, uri: &str) -> Value {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::extract::Request::builder()
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+        let observed_at = serde_json::to_value(at).unwrap();
+        let assert_valid = |inventory: &Value| {
+            assert_eq!(inventory["identity"]["installation_id"], "installation");
+            assert_eq!(inventory["hardware_probe"]["source"], "controller_probed");
+            assert_eq!(inventory["hardware_probe"]["observed_at"], observed_at);
+            assert_eq!(inventory["hardware_probe"]["permission_granted"], false);
+            let facts = inventory["facts"].as_array().unwrap();
+            assert!(facts
+                .iter()
+                .any(|fact| fact["resource"] == "hardware.gpu.model"
+                    && fact["source"] == "controller_probed"));
+            assert!(facts
+                .iter()
+                .any(|fact| fact["resource"] == "hardware.memory_bytes"
+                    && fact["confidence"] == "unknown"));
+            assert!(facts.iter().any(|fact| fact["resource"] == "model.adapter"
+                && fact["value"] == "original"
+                && fact["source"] == "host_reported"));
+            assert!(!facts.iter().any(|fact| fact["value"] == 999999999));
+            assert!(!inventory.to_string().contains("spoof\\r\\nsecret"));
+        };
+        let list = get(&app, "/api/v1/nodes").await;
+        let current = list["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["installation_id"] == "installation")
+            .unwrap();
+        let other = list["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["installation_id"] == "other")
+            .unwrap();
+        assert_valid(&current["inventory"]);
+        assert!(other["inventory"].get("hardware_probe").is_none());
+        assert_valid(
+            &get(
+                &app,
+                "/api/v1/nodes/node/inventory?installation_id=installation",
+            )
+            .await,
+        );
+        let legacy = get(&app, "/api/v1/inventory").await;
+        assert_valid(
+            &legacy["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["installation_id"] == "installation")
+                .unwrap()["inventory"],
+        );
+        let other = get(&app, "/api/v1/nodes/node/inventory?installation_id=other").await;
+        assert!(other.get("hardware_probe").is_none());
+        assert_eq!(other["facts"][2]["source"], "host_reported");
+        state.store.lock().unwrap().conn().execute("UPDATE nodes SET status='offline',last_heartbeat='2026-01-01T00:00:00Z' WHERE installation_id='installation'", []).unwrap();
+        let offline = get(
+            &app,
+            "/api/v1/nodes/node/inventory?installation_id=installation",
+        )
+        .await;
+        assert_eq!(offline["reachability"], "stale");
+        assert_eq!(offline["hardware_probe"]["observed_at"], observed_at);
+        let memory = offline["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fact| fact["resource"] == "hardware.memory_bytes")
+            .unwrap();
+        assert_eq!(memory["freshness"], "stale");
+        assert_eq!(memory["confidence"], "unknown");
+    }
+
+    #[tokio::test]
     async fn model_descriptor_is_a_bounded_read_task_not_model_invocation() {
         const TOKEN: &str = "test-client-token-123456789012345";
         let directory = tempfile::tempdir().unwrap();
@@ -4147,7 +4295,8 @@ async fn create_grant(
     Ok(Json(json!({"grant":store.get("grants",&gid)?})))
 }
 async fn nodes(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
-    let mut nodes = state.lock()?.list("nodes")?;
+    let store = state.lock()?;
+    let mut nodes = store.list("nodes")?;
     for n in &mut nodes {
         let declared_roots = n["inventory"]["project_roots"].clone();
         let last = n["last_heartbeat"]
@@ -4168,7 +4317,8 @@ async fn nodes(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> 
             node_id: n["id"].as_str().unwrap_or_default().to_owned(),
             installation_id,
         };
-        let view = crate::inventory::node_view(&identity, Some(n), chrono::Utc::now());
+        let view =
+            crate::inventory::trusted_node_view(&store, &identity, Some(n), chrono::Utc::now())?;
         n["inventory"] = serde_json::to_value(view).map_err(|_| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4542,7 +4692,7 @@ async fn node_inventory(
         node_id: raw_id,
         installation_id,
     };
-    let view = crate::inventory::node_view(&identity, record, chrono::Utc::now());
+    let view = crate::inventory::trusted_node_view(&store, &identity, record, chrono::Utc::now())?;
     Ok(Json(serde_json::to_value(view).map_err(|_| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6881,8 +7031,31 @@ async fn verify_audit(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<V
 
 async fn inventory(AppState(state): AppState<Arc<State>>) -> ApiResult<Json<Value>> {
     let store = state.lock()?;
+    let mut nodes = store.list("nodes")?;
+    for node in &mut nodes {
+        let identity = crate::inventory::InstallationIdentity {
+            node_id: node["id"].as_str().unwrap_or_default().to_owned(),
+            installation_id: node["installation_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        node["inventory"] = serde_json::to_value(crate::inventory::trusted_node_view(
+            &store,
+            &identity,
+            Some(node),
+            chrono::Utc::now(),
+        )?)
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inventory_encoding",
+                "Cannot encode resource inventory",
+            )
+        })?;
+    }
     Ok(Json(
-        json!({"nodes":store.list("nodes")?,"projects":store.list("projects")?,"source":"last_recorded_probe","observed_at":now(),"note":"Online status is not inferred from cached capabilities."}),
+        json!({"nodes":nodes,"projects":store.list("projects")?,"source":"last_recorded_probe","observed_at":now(),"note":"Online status is not inferred from cached capabilities."}),
     ))
 }
 #[allow(dead_code)]

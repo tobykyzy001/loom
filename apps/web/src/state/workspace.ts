@@ -69,7 +69,7 @@ function rethrowCredentialFailure(error: unknown): void {
 }
 let poll: ReturnType<typeof setInterval> | undefined
 
-const writesNeedingCredentials = new Set(['project', 'composer', 'source-write', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'enrollment'])
+const writesNeedingCredentials = new Set(['project', 'composer', 'source-write', 'ticket-write', 'grant-write', 'memory-write', 'binding-write', 'skill-write', 'plan-write', 'enrollment', 'capability-evaluate'])
 function preferenceScope(ticketId?: string) { return ticketId ? `ticket:${ticketId}` : 'global' }
 function preferenceWriteKey(ticketId?: string) { return ticketId ? `preferences:ticket:${ticketId}` : 'preferences:global' }
 function preferenceReadKey(ticketId?: string) { return `${preferenceWriteKey(ticketId)}:read` }
@@ -1052,6 +1052,18 @@ export async function loadModelInventory(): Promise<boolean> {
     }
   })
   return result !== undefined
+}
+
+export async function evaluatePlacement(input: Record<string, unknown>): Promise<unknown> {
+  // Read-only POST: use a current authenticated epoch even though no object is
+  // persisted. Never ignore 401 or publish a superseded condition report.
+  const result = await run('capability-evaluate', () => client.post<unknown>('/placement/evaluate', input, { requireCurrentCredential: true }))
+  if (result === undefined) {
+    throw new Error(state.credentialState === 'required'
+      ? '凭据已失效。此次评估没有继续；仅保留旧快照，不能当作最新条件。'
+      : state.connected === false ? '控制器当前不可达，未取得新的条件评估。' : '凭据变化或认证尚未完成，未取得可发布的条件评估。')
+  }
+  return result
 }
 
 export function useWorkspace() { return { state, ...toRefs(state) } }

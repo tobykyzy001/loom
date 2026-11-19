@@ -89,6 +89,14 @@ impl ResourceFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareProbeView {
+    pub schema: String,
+    pub inspector: String,
+    pub observed_at: DateTime<Utc>,
+    pub source: FactSource,
+    pub permission_granted: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallationIdentity {
     pub node_id: String,
     pub installation_id: String,
@@ -180,6 +188,8 @@ pub struct NodeView {
     pub workers: Vec<WorkerView>,
     pub issues: Vec<InventoryIssue>,
     pub permission_boundary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware_probe: Option<HardwareProbeView>,
 }
 
 /// Absence of a record means "not registered at this coordinator", not proof
@@ -201,6 +211,7 @@ pub fn never_installed(identity: InstallationIdentity) -> NodeView {
             FactConfidence::Missing,
         )],
         permission_boundary: DISCOVERY_BOUNDARY.to_owned(),
+        hardware_probe: None,
     }
 }
 
@@ -696,7 +707,64 @@ pub fn node_view(
         workers,
         issues,
         permission_boundary: DISCOVERY_BOUNDARY.to_owned(),
+        hardware_probe: None,
     }
+}
+
+/// Project only a server-written, exact-installation CLI observation. In its
+/// absence the base view keeps the old host-reported presentation. A corrupt
+/// trusted record is an error, never permission to trust spoofed Node hardware.
+pub(crate) fn trusted_node_view(
+    store: &Store,
+    identity: &InstallationIdentity,
+    node: Option<&Value>,
+    now: DateTime<Utc>,
+) -> Result<NodeView> {
+    let mut view = node_view(identity, node, now);
+    if view.presence == InstallationState::NeverInstalled {
+        return Ok(view);
+    }
+    let Some(report) = crate::inventory_probe::trusted_hardware(
+        store,
+        &identity.node_id,
+        &identity.installation_id,
+    )?
+    else {
+        return Ok(view);
+    };
+    view.facts
+        .retain(|fact| !fact.resource.starts_with("hardware."));
+    view.issues
+        .retain(|issue| !issue.resource.starts_with("hardware."));
+    for mut fact in report.facts {
+        if fact.resource.starts_with("hardware.") {
+            // The write path admits only controller-owned hardware observations.
+            fact.source = FactSource::ControllerProbed;
+            view.facts.push(fact.stale_if_reported(view.freshness));
+        }
+    }
+    if !view
+        .facts
+        .iter()
+        .any(|fact| fact.resource == "hardware.memory_bytes")
+    {
+        let mut unknown = ResourceFact::unknown("hardware.memory_bytes");
+        unknown.source = FactSource::ControllerProbed;
+        unknown.observed_at = Some(report.observed_at);
+        view.facts.push(unknown.stale_if_reported(view.freshness));
+    }
+    view.issues.extend(report.issues);
+    view.hardware_probe = Some(HardwareProbeView {
+        schema: report.schema,
+        inspector: report.inspector,
+        observed_at: report.observed_at,
+        source: FactSource::ControllerProbed,
+        permission_granted: false,
+    });
+    if view.issues.is_empty() && view.reachability == Reachability::Online {
+        view.health = NodeHealth::Available;
+    }
+    Ok(view)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -822,7 +890,7 @@ pub fn decide_placement(store: &Store, request: &PlacementRequest) -> Result<Pla
     let record = nodes.iter().find(|node| {
         node["id"] == identity.node_id && node["installation_id"] == identity.installation_id
     });
-    let view = node_view(&identity, record, request.evaluated_at);
+    let view = trusted_node_view(store, &identity, record, request.evaluated_at)?;
     let preferred_for_matching = Some(identity.node_id.as_str());
     let matched = crate::maintenance::matching_physical_node(
         store,
@@ -1333,6 +1401,98 @@ mod tests {
             .iter()
             .any(|reason| reason.code == "hardware_requirement_unknown"));
     }
+    #[test]
+    fn trusted_gpu_scope_ignores_spoofed_memory_and_fails_closed_on_corruption() {
+        let _guard = lock();
+        let at = Utc::now();
+        let (_dir, store) = store_with_node(at, "online", true);
+        store.conn().execute(
+            "UPDATE nodes SET inventory=?1",
+            [json!({
+                "project_roots":{"project-a":"/synthetic"},
+                "hardware":{"os":"macos","arch":"arm64","memory_bytes":999999999u64},
+                "hardware_probe":{"schema":"loom.local-hardware-probe.v1","source":"controller_probed","permission_granted":false},
+                "resources":[{"schema":"loom.inventory.v1","resource":"hardware.memory_bytes","value":999999999u64,"source":"controller_probed","observed_at":at,"freshness":"fresh","confidence":"available","location":"local_only"}]
+            }).to_string()],
+        ).unwrap();
+        let report = crate::inventory_probe::TrustedHardwareProbe {
+            schema: crate::inventory_probe::LOCAL_HARDWARE_PROBE_SCHEMA.into(),
+            node_id: "node-host".into(),
+            installation_id: "install-a".into(),
+            inspector: "system_profiler".into(),
+            observed_at: at,
+            facts: vec![ResourceFact {
+                schema: INVENTORY_SCHEMA.into(),
+                resource: "hardware.gpu.model".into(),
+                value: Some(FactValue::Text("actual GPU".into())),
+                source: FactSource::ControllerProbed,
+                observed_at: Some(at),
+                freshness: Freshness::Fresh,
+                confidence: FactConfidence::Available,
+                location: LocationPolicy::LocalOnly,
+            }],
+            issues: vec![],
+            source: FactSource::ControllerProbed,
+            permission_granted: false,
+        };
+        store
+            .set_setting(
+                &crate::inventory_probe::hardware_key("node-host", "install-a"),
+                &serde_json::to_string(&report).unwrap(),
+            )
+            .unwrap();
+        let record = store.list("nodes").unwrap().remove(0);
+        let view = trusted_node_view(&store, &identity(), Some(&record), at).unwrap();
+        assert_eq!(
+            view.hardware_probe.unwrap().source,
+            FactSource::ControllerProbed
+        );
+        assert!(view
+            .facts
+            .iter()
+            .any(|fact| fact.resource == "hardware.gpu.model"
+                && fact.value == Some(FactValue::Text("actual GPU".into()))
+                && fact.source == FactSource::ControllerProbed));
+        assert_eq!(
+            view.facts
+                .iter()
+                .find(|fact| fact.resource == "hardware.memory_bytes")
+                .unwrap()
+                .confidence,
+            FactConfidence::Unknown
+        );
+        assert!(!view
+            .facts
+            .iter()
+            .any(|fact| fact.value == Some(FactValue::Integer(999999999))));
+        let mut request = placement_request(at);
+        request.hardware = Some(HardwareTarget {
+            os: None,
+            arch: None,
+            minimum_memory_bytes: Some(1),
+        });
+        let rejected = decide_placement(&store, &request).unwrap();
+        assert!(rejected.selected.is_none());
+        assert!(rejected
+            .waiting
+            .iter()
+            .any(|wait| wait.resource == "hardware.memory_bytes"
+                && wait.code == "hardware_requirement_unknown"
+                && wait.source == FactSource::ControllerProbed));
+        request.hardware = None;
+        assert!(decide_placement(&store, &request)
+            .unwrap()
+            .selected
+            .is_some());
+        store
+            .set_setting(
+                &crate::inventory_probe::hardware_key("node-host", "install-a"),
+                "{broken",
+            )
+            .unwrap();
+        assert!(decide_placement(&store, &request).is_err());
+    }
+
     #[test]
     fn inventory_partial_hardware_error_and_secret_are_not_hidden_or_echoed() {
         let _guard = lock();

@@ -12,6 +12,11 @@ export class ApiError extends Error {
   }
 }
 
+export interface LoomClientRequestInit extends RequestInit {
+  /** Only explicit no-side-effect reads may opt into this post freshness gate. */
+  requireCurrentCredential?: boolean
+}
+
 export interface LoomClientOptions {
   token: () => string
   fetch?: typeof globalThis.fetch
@@ -27,12 +32,12 @@ export class LoomClient {
     this.fetchFn = options.fetch ?? globalThis.fetch.bind(globalThis)
   }
 
-  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async request<T>(path: string, init: LoomClientRequestInit = {}): Promise<T> {
     const epoch = this.options.credentialEpoch?.()
     const read = ['GET', 'HEAD', 'OPTIONS'].includes((init.method ?? 'GET').toUpperCase())
     const token = this.options.token().trim()
     const currentCredential = () => {
-      if (read && this.options.credentialEpoch
+      if ((read || init.requireCurrentCredential === true) && this.options.credentialEpoch
         && (epoch !== this.options.credentialEpoch() || token !== this.options.token().trim())) {
         throw new ApiError(0, 'credential_epoch_changed', '凭据已更新，这次旧读取的结果不再用于更新工作区。', path)
       }
@@ -96,8 +101,8 @@ export class LoomClient {
     return this.request<T>(path, { signal })
   }
 
-  post<T>(path: string, body?: unknown) {
-    return this.request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
+  post<T>(path: string, body?: unknown, options: Pick<LoomClientRequestInit, 'signal' | 'requireCurrentCredential'> = {}) {
+    return this.request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}), ...options })
   }
 
   put<T>(path: string, body: unknown) {

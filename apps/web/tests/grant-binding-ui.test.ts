@@ -102,6 +102,15 @@ describe('typed resource facts view', () => {
     expect(html).toContain('主机上报')
     expect(html).not.toContain('16 GiB ·')
   })
+  it('labels a controller-measured memory fact as such rather than host-reported', async () => {
+    const DeviceView = (await import('../src/views/DevicesView.vue')).default
+    const html = await render(DeviceView, { nodes: [{ id: 'node-a', installation_id: 'install-a', status: 'online', last_heartbeat: new Date().toISOString(), inventory: {
+      schema: 'loom.inventory.v1', freshness: 'fresh', facts: [{ resource: 'hardware.memory_bytes', value: 64000000000, confidence: 'available', source: 'controller_probed' }],
+      project_roots: { 'project-a': '/srv/exact-project' },
+    } }] })
+    expect(html).toContain('59.6 GiB · 控制器实测')
+    expect(html).not.toContain('59.6 GiB · 主机上报')
+  })
 })
 
 describe('credential recovery presentation', () => {

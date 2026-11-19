@@ -108,6 +108,24 @@ describe('LoomClient protocol and credential boundaries', () => {
     await expect(client.get('/tickets')).rejects.toMatchObject({ code: 'credential_epoch_changed', status: 0 })
   })
 
+  it('rejects a superseded response only when a condition-specific read-only POST asks for freshness', async () => {
+    let epoch = 1
+    let finish!: (response: Response) => void
+    const pending = new Promise<Response>(resolve => { finish = resolve })
+    const client = new LoomClient({ token: () => 'before', credentialEpoch: () => epoch, fetch: vi.fn().mockResolvedValue(pending) })
+    const evaluation = client.post('/placement/evaluate', { scope: 'bounded' }, { requireCurrentCredential: true })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    epoch++
+    finish(json({ schema: 'loom.inventory.v1' }))
+    await expect(evaluation).rejects.toMatchObject({ code: 'credential_epoch_changed' })
+  })
+
+  it('preserves accepted ordinary writes even when the credential epoch changes later', async () => {
+    let epoch = 1
+    const client = new LoomClient({ token: () => 'before', credentialEpoch: () => epoch, fetch: vi.fn().mockImplementation(async () => { epoch++; return json({ accepted: true }) }) })
+    await expect(client.post('/tickets/id/cancel')).resolves.toMatchObject({ accepted: true })
+  })
+
   it('bounds stalled reads explicitly without modifying task state, auto-retrying or inferring grant status', async () => {
     const fetch = vi.fn().mockImplementation(async (_url, init) => await new Promise((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new DOMException('Bounded fixture read timed out', 'TimeoutError')), { once: true })
