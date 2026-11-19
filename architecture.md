@@ -154,6 +154,10 @@ Host 数量、设备类型、模型能力和任务组合均由用户环境决定
 
 **Bare持久outbox中的调度时间不能使未投递证据被算作已投递。** 对每个排队项，只有普通有效RFC3339时间可参与比较；明确的quarantine hold `+999999999-12-31T23:59:59Z`由StateStore统一保留为未来不发送。任何其它不可解析的字符串在任何Artifact/Report发送尝试前产生显式调度错误，保留原item/body/attempt和光标等待operator对账，**不将此字符串随机解释为现在，也不把正式hold重写为新状态或权限**。这一个坏项会阻止该次dispatch中的所有投递，是显式保真优先于继续不区分地发其他项的选择。真正不可重试HTTP拒绝继续Reject ed，可重试等待保持Deferred；存在future /hold但未再次投递的内容同样Deferred，只有队列真正没有未投递内容时才可能是Delivered。缺失、null、数字及其它非字符串时间后续也已在StateStore open阶段显式拒绝，不再伪装成`now`，并保持原raw file未写；Bare v1自始就序列化此字段，尚未发现必须兼容的无字段旧格式。这只是显式结构与时间校验，不能据以宣称任意损坏文件均有完整验证、自动恢复或全球调度正确。
 
+**ProjectBinding必须归到精确、可用的 `(Node ID, Installation ID)`，不能只按Node ID取第一条记录。** `POST /project-bindings` 只有在单个未撤销Installation时才可省略`installation_id`保 留旧调用；多个可用安装而缺少选择返回409 `exact_installation_required`。可选参数是非空、非空白、≤160 UTF-8字节的字符串；`null`/数字等400，不存在的Node或指定Installation 404，选中已撤销记录403。选择之后仍要求该**选定记录**的未撤销状态、worker声明和实际project-root自报一致，绝不按哪个root碰巧相符来推断身份。单Installation的旧绑定/读写路径不变。这里的“可用”仅未撤销，不等于 已证明设备在线与硬件事实。注册和heartbeat自报不自动赋予管理权限，真正管理凭据仍必填，Node token不能替代。
+
+`project_bindings` INSERT 与 **`project.binding.approved`** 审计现由同一Store锁下、`BEGIN IMMEDIATE` 事务中原子提交，包含原有binding ID和root digest的证据链；二者未共同成功便不作为accepted Binding返回，也不留下单独的autocommit Binding。保留现有 hash-chain格式而非新增Grant / Ticket / Assignment或另设每Installation撤销API。单进程单写者事务不推导全局exactly-once、重复请求别名、跨进程权限共识，也不替代后续Grant/Task的独立权限与执行验证。真实负 例和恢复入口见 `node tests/runner/installation-binding.mjs` 和同文件的持久trigger handler回归。当前Vue绑定对话框只传`node_id`，尚未为多active安装提供可选Installation UI，因此合法的二选 择将来仍需另一处用户入口增量，不能宣称已完整交付，但后端现在必须明确停 止歧义授权。
+
 ### 3.3 Router、Project Scheduler、Resource Scheduler
 
 三者不应混为一个路由 LLM：

@@ -80,6 +80,20 @@ StateStore两个既有写入路径统一使用同一个未变serialized permanen
 
 Bare v1从第一版的编码就带这个时间字段，没有检测到支持的缺失期限旧格式。故这次**不是改变schema或利用一个真实中心发布异常数据**，而是让未知的本机恢复结构显式需修正。原始字段损坏可能使Node无法启动直到operator修正，不能用这点推断完整文件校验、其它客户端的时间策略或跨机器幂等。没有全局DSH profile变更。[当前Rust结果](/tmp/loom-deadline-structure-rust.log)为**188 passed / 0 failed / 1 opt-in probe ignored**；[实际Native Bare集成](/tmp/loom-deadline-structure-bare.log)仍PASS。
 
+## 多Installation绑定及审计原子性
+
+```sh
+node tests/runner/installation-binding.mjs
+```
+
+此driver用真实签名与注册把一个Node公钥复用为**两份不同Installation身份**（非两台物理机），对各自不同root做真实heartbeat，再调用管理API。当前新接口只增加**必要时`installation_id`的选择**：多个未撤销安装而未选择返回409 `exact_installation_required`，必须无Binding/审计。小字符串非空、非空白≤160 bytes；数字、空串、null 均400，未知install404。单安装保持老请求不变，并不要求到处传节点子身份。之后仍要求所选row的Worker及project root自报一致，注册不能等 同于设备授权或管理凭据，直接Node token调用管理绑定实际401。
+
+`state.lock`下 用`BEGIN IMMEDIATE`写入Binding并追加`project.binding.approved`，使用同 一`store::audit_tx` hashchain证据；失败整体rollback。SQL持久trigger以真正 `NEW.action='project.binding.approved'` 拒绝该write，capture对应`HTTP400 invalid_request / owned binding audit failure`：必须有此精 确原因和零新增行，不能随机把400当作回滚成功。handler中 的Rust单安装/同事存连 regression也通过第一次残 留问题再到恢复两阶段，不把多instance第一行的偶然顺序当证据。
+
+最终[实际proof](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-binding-proof-S21Vie/result.json)比较选中第二份的完整SQL binding字段、独立第 一/第二inventory、唯一匹配审计，以及对应 **read-only Grant** 的installation/worker/binding，未产Ticket/Assignment/Report/Artifact/Effect。错误root 403且不附加去新Binding；手动撤销fixture仅用于已 撤销身份 负例（不是新增独立逐安装撤销API），Grant counts保持。真正center restart再检验 SQLite、hash chain、原有 binding与Grant都保留。**不推导create_grant等其它事务或跨进程Exactly-once。**
+
+`DatabaseSync.get()`返回null-prototype 对象，driver按值比较所有SQL SELECT字 段（复制为普通对象）而不把对象原型不同当身份差异；`grant.operations`已是JSON数组，无需二次parse。不暴露私钥/token。Rust完整target实测 **189 passed/0 failed/1 opt-in probe忽略**，[记录](/tmp/loom-installation-binding-rust.log)，配合[Rust bare原生正常流程](/tmp/loom-installation-binding-bare.log)和Node39/Vue155 + `vue-tsc`。**当前Vue对话框仍未Expose安装选择UI**, 后续需独立真实入口补测。
+
 ## 用户 UI 撤权 + 两次未领取空poll的补充证据
 
 在普通生产浏览器驱动 `tests/browser/run.mjs --keep-evidence` 内，用户通过权限页精确Grant的确认按钮撤回授权，做的是现有Concierge的真实 `POST /grants/{id}/revoke`，而不是 Node 直接访问管理路由。此 Ticket 已签发 Assignment，却从未被 Node acknowledged；撤权后不调用executor，连续两次原LocalNodeRunner的正常poll通过同一注册身份拿到真实 `assignment:null`。对待原响应只做只读记录、保留认证上下文和返回形状，不把缺轮询或短路包装为空poll当作通过。

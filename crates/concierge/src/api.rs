@@ -399,6 +399,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn binding_audit_failure_does_not_leave_an_approved_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let store = crate::store::Store::open(directory.path().join("db")).unwrap();
+        let root_text = root.to_string_lossy().to_string();
+        store.conn().execute(
+            "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('project','Binding audit fixture',?1,'read_write',1,'2026-01-01T00:00:00Z','{}')",
+            [&root_text],
+        ).unwrap();
+        let inventory = json!({"project_roots":{"project":root_text}});
+        store.conn().execute(
+            "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,revoked_at,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','fixture-public-key','fixture-token-hash','registered',NULL,'[]','[{\"worker_id\":\"default\"}]',?1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [inventory.to_string()],
+        ).unwrap();
+        // Same physical connection that the handler will subsequently open/write.
+        // This is a persistent server-visible failure, not a TEMP trigger on another DB handle.
+        store.conn().execute_batch(
+            "CREATE TRIGGER reject_binding_audit_for_unit BEFORE INSERT ON audits WHEN NEW.action='project.binding.approved' BEGIN SELECT RAISE(ABORT,'binding audit failure fixture'); END;",
+        ).unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: "binding-fixture-token".into(),
+            bootstrap_token_written: false,
+        });
+        let body = json!({"project_id":"project","node_id":"node","worker_id":"default","root_scope":root_text});
+        let error = create_project_binding(AppState(state.clone()), Json(body.clone()))
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let bindings = state
+            .lock()
+            .unwrap()
+            .query("SELECT count(*) AS count FROM project_bindings", [])
+            .unwrap();
+        let audits = state
+            .lock()
+            .unwrap()
+            .query(
+                "SELECT count(*) AS count FROM audits WHERE action='project.binding.approved'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            bindings[0]["count"], 0,
+            "Failed binding audit cannot leave a usable binding behind"
+        );
+        assert_eq!(audits[0]["count"], 0);
+
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch("DROP TRIGGER reject_binding_audit_for_unit")
+            .unwrap();
+        let approved = create_project_binding(AppState(state.clone()), Json(body))
+            .await
+            .unwrap();
+        assert_eq!(approved.0["installation_id"], "installation");
+        let after = state
+            .lock()
+            .unwrap()
+            .query("SELECT count(*) AS count FROM project_bindings", [])
+            .unwrap();
+        assert_eq!(after[0]["count"], 1);
+    }
+
     const REVOCATION_TOKEN: &str = "test-client-token-123456789012345";
 
     fn revocation_test_state() -> (tempfile::TempDir, Arc<State>) {
@@ -3911,15 +3979,51 @@ async fn create_project_binding(
     let project_data = store
         .get("projects", project)?
         .ok_or_else(|| ApiError::missing("Project is unknown"))?;
-    let node_data = store
-        .get("nodes", node)?
-        .ok_or_else(|| ApiError::missing("Node is unknown"))?;
-    if node_data["revoked_at"] != Value::Null {
+    let requested_installation = if body.get("installation_id").is_some() {
+        let target = required(&body, "installation_id", 160)?;
+        if target.trim().is_empty() {
+            return Err(ApiError::bad("installation_id must be nonempty"));
+        }
+        Some(target)
+    } else {
+        None
+    };
+    let records = store.query(
+        "SELECT installation_id,revoked_at,workers,inventory FROM nodes WHERE id=?1",
+        [node],
+    )?;
+    if records.is_empty() {
+        return Err(ApiError::missing("Node is unknown"));
+    }
+    let mut installations: Vec<Value> = records
+        .into_iter()
+        .filter(|record| {
+            requested_installation
+                .is_none_or(|target| record["installation_id"].as_str() == Some(target))
+        })
+        .collect();
+    if installations.is_empty() {
+        return Err(ApiError::missing("Installation is unknown"));
+    }
+    if installations
+        .iter()
+        .all(|record| record["revoked_at"] != Value::Null)
+    {
         return Err(ApiError::denied(
             "revoked_node",
             "Cannot bind a revoked node",
         ));
     }
+    installations.retain(|record| record["revoked_at"].is_null());
+    if installations.len() > 1 {
+        return Err(ApiError::conflict(
+            "exact_installation_required",
+            "One Node with multiple usable installations requires an exact installation_id",
+        ));
+    }
+    let node_data = installations
+        .pop()
+        .ok_or_else(|| ApiError::denied("revoked_node", "Cannot bind an inactive installation"))?;
     let declared = node_data["inventory"]["project_roots"][project].as_str();
     if declared != Some(root) {
         return Err(ApiError::denied(
@@ -3949,11 +4053,21 @@ async fn create_project_binding(
     let binding = id("binding");
     let at = now();
     let digest = store::hash(&json!({"project_id":project,"node_id":node,"installation_id":installation,"worker_id":worker,"root_scope":root}).to_string());
-    store.conn_mut().execute(
+    let tx = store
+        .conn_mut()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
         "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![binding,project,node,installation,worker,root,digest,at],
     )?;
-    store.audit(None, "client", "project.binding.approved", &json!({"binding_id":binding,"project_id":project,"node_id":node,"worker_id":worker,"root_digest":store::hash(root),"project_revision":project_data["inventory"]["revision"]}))?;
+    store::audit_tx(
+        &tx,
+        None,
+        "client",
+        "project.binding.approved",
+        &json!({"binding_id":binding,"project_id":project,"node_id":node,"worker_id":worker,"root_digest":store::hash(root),"project_revision":project_data["inventory"]["revision"]}),
+    )?;
+    tx.commit()?;
     Ok(Json(
         json!({"id":binding,"project_id":project,"node_id":node,"installation_id":installation,"worker_id":worker,"binding_digest":digest}),
     ))
