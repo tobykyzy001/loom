@@ -500,6 +500,61 @@ fn only_exact_controller_mapping_executes_and_project_has_no_cwd_default() {
 }
 
 #[test]
+fn model_descriptor_only_admits_exact_metadata_file_and_no_injected_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let mut raw = input(&project);
+    raw["kind"] = json!("model_descriptor");
+    raw["relative_path"] = json!("model.json");
+    let decoded = Assignment::decode(
+        &raw,
+        &"a".repeat(64),
+        "installation-one",
+        &project,
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(decoded.kind, "model_descriptor");
+    assert_eq!(decoded.content, None);
+    for invalid in [
+        json!("other.json"),
+        json!("nested/model.json"),
+        json!("/model.json"),
+    ] {
+        raw["relative_path"] = invalid;
+        assert!(Assignment::decode(
+            &raw,
+            &"a".repeat(64),
+            "installation-one",
+            &project,
+            chrono::Utc::now()
+        )
+        .is_err());
+    }
+    raw["relative_path"] = json!("model.json");
+    raw["content"] = json!("not a source override");
+    assert!(Assignment::decode(
+        &raw,
+        &"a".repeat(64),
+        "installation-one",
+        &project,
+        chrono::Utc::now()
+    )
+    .is_err());
+    raw["content"] = Value::Null;
+    raw["grant"]["operations"] = json!(["invoke_text"]);
+    assert!(Assignment::decode(
+        &raw,
+        &"a".repeat(64),
+        "installation-one",
+        &project,
+        chrono::Utc::now()
+    )
+    .is_err());
+}
+
+#[test]
 fn cancelled_assignment_does_not_execute_file_effect() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut assignment, mut state) = executable(&tmp, |v| {

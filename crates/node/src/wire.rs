@@ -104,10 +104,16 @@ impl Assignment {
             bail!("grant version must be positive");
         }
         let kind = required(value, "kind")?.to_owned();
-        if kind != "read_summary" && kind != "edit_file" {
+        if !matches!(
+            kind.as_str(),
+            "read_summary" | "edit_file" | "model_descriptor"
+        ) {
             bail!("unsupported assignment kind {kind}");
         }
         let relative_path = required(value, "relative_path")?.to_owned();
+        if kind == "model_descriptor" && relative_path != "model.json" {
+            bail!("model_descriptor only accepts the exact read-only model.json target");
+        }
         loom_protocol::RelativePath::parse(relative_path.clone())?;
         if relative_path.len() > 1000 {
             bail!("relative target is too long");
@@ -119,6 +125,9 @@ impl Assignment {
         };
         if kind == "edit_file" && content.is_none() {
             bail!("edit_file has no content");
+        }
+        if kind == "model_descriptor" && content.is_some() {
+            bail!("model_descriptor does not accept supplied content");
         }
         let status = value
             .get("status")

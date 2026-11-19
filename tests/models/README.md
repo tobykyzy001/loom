@@ -30,6 +30,9 @@ node tests/models/produce-descriptor.mjs
 # Genuine source → metadata register → distinct place authorization → revoke/retire/reopen.
 node tests/models/local-descriptor.mjs
 
+# Genuine newly compiled Rust bare assignment/read/report/proof, malformed-input and restart.
+node tests/models/bare-descriptor.mjs
+
 # Full compatibility, migrations and all-target lint.
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings

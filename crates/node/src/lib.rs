@@ -11,6 +11,7 @@ pub mod binding;
 pub mod client;
 pub mod executor;
 pub mod identity;
+pub mod model_descriptor;
 pub mod runner;
 pub mod state;
 pub mod storage;

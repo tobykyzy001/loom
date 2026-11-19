@@ -60,6 +60,10 @@ test('schema, permissions, local type, dimensions and paths cannot manufacture a
   assert.throws(() => modelDescriptorProof(duplicated), /exactly five/)
   assert.throws(() => modelDescriptorProof(Buffer.alloc(8193, ' ')), /8192/)
   assert.throws(() => modelDescriptorProof(Buffer.from([0xff, 1, 2])), /UTF-8/)
+  const base = validSource.trimEnd()
+  const padded = Buffer.from(base + ' '.repeat(8192 - Buffer.byteLength(base)))
+  assert.equal(padded.length, 8192)
+  assert.throws(() => modelDescriptorProof(padded), /proof.*8192/)
   for (const path of ['../a.json', '/etc/passwd', 'secrets/model.json', 'other.json']) {
     await assert.rejects(() => executor.execute(assignment(project, { relative_path: path }), { ...grantRoot, project_root: project }))
   }

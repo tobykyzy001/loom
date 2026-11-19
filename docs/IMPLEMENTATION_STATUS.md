@@ -12,6 +12,19 @@ A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored 
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
 
+## Verified Rust bare `model_descriptor` source execution and Registry support
+
+The previously NOT-RUN native descriptor read is now a real execution path, not only the already-declared capability. `crates/node/src/model_descriptor.rs` implements a strict metadata-only `loom.model-descriptor.v1` reader, and `Assignment::decode` admits this existing kind only for exact `model.json`, preserving the current read Grant/digest/workers/root and explicitly no supplied file content. It accepts no paths, weights, invocation, download or Provider workflows.
+
+- Input is valid UTF-8 with exactly the five known members and fixture values. A streaming root visitor rejects duplicate or escaped duplicate names rather than silently accepting last-write-wins; empty/root-shape/malformed/trailing fields/documents do not become authority.
+- Both raw source and **the complete nine-field proof** are capped at 8192 bytes. This follows the actual Registry `size_bytes` and storage-file limit, and is now enforced by Rust plus both the common and vendored JS helpers. A valid source padded to 8192 bytes can still fail the proof budget explicitly without becoming a false registered model.
+- Descriptor-specific Rust file I/O uses 8193 bytes as its read detector, checks regular/nlink and length before opening and on the opened descriptor, and rechecks length, identity, path and hardlink metadata after reading. This supports the scoped local fixture, not a general OS exploit/TOCTOU-proof necessity statement nor a guarantee on other OS_hosts.
+- Native Effect, Artifact, Report and outbox continue using existing IDs. Source Registry required a further real adjustment: descriptor input digest must be SHA-256 over its canonical `assignment_id/kind/path/content:null` shape in that order, independently of original source and proof hashes and distinct from admission/replay's lease/epoch digest. The previous incompatible digest was reproduced by genuinely POSTing the Native proof to `/models`; fixing its fingerprint in the actual Native effect makes that interface accept it.
+
+Run `node tests/models/bare-descriptor.mjs`: it builds and launches the actual `loom-node`, explicitly enrolls, applies an approved read Grant/binding, rejects wrong paths and separate invoke-only authorization, reads `model.json` and receives a server-accepted Artifact whose two hashes are checked, and then registers its proof as `registered` with `activation:false`. Duplicate-root input and the valid-but-too-large proof stay `reconciling`/`unknown` with no new Artifact. The same Concierge's subsequent native process restart creates no duplicate report/artifact, and the original fetched bytes/hash remain unchanged. The source project file itself is not modified by valid reading.
+
+Latest proof: `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-bare-descriptor-proof-iZgix1/result.json`, **7 PASS checks**, without tokens/private credentials and explicitly without live models, second machines or DSH Profile. The older TypeScript `rust_bare_executor_support: "NOT RUN"` refers to that script, not this new separately run Rust result.
+
 ## Repeated worker declarations are rejected in the real node heartbeat path
 
 In addition to the enum fix, the mounted heartbeat handler previously copied `workers` from a Node without enforcing unique identities. A Node could submit several conflicting records with the same worker ID and let a later `.find()` choose one favourable declaration. This made ambiguous registration data look like a consistent worker/root/capability placement fact rather than requiring new task authority.

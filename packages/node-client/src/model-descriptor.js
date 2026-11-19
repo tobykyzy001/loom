@@ -17,9 +17,11 @@ export function modelDescriptorProof(bytes) {
     || descriptor.provider !== 'fixture-local-text' || descriptor.revision !== 'v1'
     || !Array.isArray(descriptor.input_modalities) || descriptor.input_modalities.length !== 1 || descriptor.input_modalities[0] !== 'text'
     || descriptor.local_only !== true) throw new Error('Model descriptor must exactly match the local fixture schema')
-  return Buffer.from(JSON.stringify({ schema: descriptor.schema, provider: descriptor.provider,
+  const result = Buffer.from(JSON.stringify({ schema: descriptor.schema, provider: descriptor.provider,
     revision: descriptor.revision, input_modalities: ['text'], local_only: true,
     source_kind: 'explicit_local_artifact_descriptor', relative_path: 'model.json', source_sha256: createHash('sha256').update(bytes).digest('hex'), source_document: source }))
+  if (result.length > 8192) throw new Error('Model descriptor proof exceeds the 8192-byte registry artifact budget')
+  return result
 }
 function rawRootKeys(source) {
   const members = /(?:^|[{,])\s*"([^"\\]+)"\s*:/g

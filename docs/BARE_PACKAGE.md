@@ -38,6 +38,8 @@ node scripts/bare-integration.mjs
 
 That integration command also passed after this packaging increment, including genuinely produced artifacts, an authorized atomic file effect, persisted cancellation and restart without repeating completed work. Its limitations remain unchanged and are independent of package metadata.
 
+For the bounded descriptor capability, `node tests/models/bare-descriptor.mjs` now independently builds and executes a real Bare process, produces server-accepted `model_descriptor` proof and checks non-read authorization, exact file/schema scope, malformed unknown and restart behavior. See [descriptor reader](../tests/models/DESCRIPTOR_READER.md). This remains an additional source-read proof, not a newly signed distribution package or model runtime.
+
 The package explicitly records `built_not_installed_not_activated` and `current_host_only`. A generated binary is not an installed, registered, granted or authorized Node. Private identity generation, pairing, ProjectBindings, current Grants and ordinary Tickets remain separate explicit steps.
 
 ## Review fixes and remaining limitations
