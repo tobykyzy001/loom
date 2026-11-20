@@ -317,7 +317,8 @@ try {
   Object.assign(result, {
     overall: 'PASS', first_request_id: firstRequestId, node_id: runner.nodeId,
     assignment_id: assignment.id, initial_message_id: initialMessageId,
-    registered_local_node: true, real_rust_concierge: true, http_sqlite_schema: 15,
+    registered_local_node: true, real_rust_concierge: true,
+    http_sqlite_schema: db.prepare('PRAGMA user_version').get().user_version,
     first_delivery_accepted: true, first_receipt_duplicate: false,
     exact_replay_duplicate_after_restart: true,
     formatting_equivalence_replay: true,

@@ -12,6 +12,12 @@ The focused Rust case proves positive initial delivery, offline suppression with
 
 Separately, a pre-existing revocation-stop candidate ordering defect was reproduced on clean HEAD `fe19e88`. Investigating/publicly fixing that wrong admitted-versus-unacknowledged reconcile choice is a separate increment, not silently included in the offline execute repair.
 
+## Install/receipt reports now read the actual store schema instead of replaying 15
+
+`tests/install/plan.mjs` verified the real Concierge database as schema 16, but assembled its final PASS report with hardcoded `schema: 15`. It now emits `persistence.schema_version` obtained from the authenticated doctor of that same center. The install plan protocol remains `loom.install-plan.v1`; a new read-evidence column is not a deployment or grant change. The test install README is aligned with the actual store and these separate layers.
+
+`tests/runner/node-event-receipt.mjs` similarly reports `http_sqlite_schema` read from the fixture's real `PRAGMA user_version`, not a frozen 15. Both scripts were rerun successfully. The install-plan approval/rollback, unknown durability and receipt behavior is unchanged, and no migration, installation or cross-platform claim follows from this metadata correction.
+
 ## Read-only Git project inspection disables a configured fsmonitor helper
 
 The protected project registration and re-probe path could execute a repository-configured `core.fsmonitor` external helper while returning `read_only_probe:true` and ordinary revision/dirty observations. Disabling `.git/hooks`, global configuration and credential helpers did not cover this separate entry point. An isolated Git repository and its actual failing helper reproduced this through authenticated Concierge HTTP before the repair.

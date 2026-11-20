@@ -284,6 +284,11 @@
 - 真实HTTP修复前，临时仓库配置了只记录marker、然后失败的external fsmonitor，project create/reprobe仍返回`read_only_probe:true`，但marker实际存在，断言失败。问题独立于`core.hooksPath`与credential helper：目标仓库自己的config仍是一条命令入口。先带入旧逻辑复现RED，再在固定`project_git`参数中增加`-c core.fsmonitor=`，使每条Git inspection都不再运行该helper。不要修改仓库原配置或Git事实本身。
 - 同一真实`node tests/projects/git-probe.mjs`现在通过：既没有marker产生，正常HEAD、dirty true、远端净化及nonGit/document路径、probe HOME/private/audit检查均保持。未配置该helper的控制只删除local fixture配置，也保留相同revision和实际dirty变更。它是当前macOS对此**一个**启动源的只读边界，不是任意仓库配置安全执行证明、隐式clone/fetch或跨平台部署证明。下一开发优先读取此处命令组成的scope，不只要看hook path就认为额外helper都被屏蔽。
 
+### 5.5.11 存储版本报告必须读实际doctor/SQLite
+
+- `tests/install/plan.mjs`原在真实doctor验证schema 16后仍把最终通过报告写成schema 15。现直接使用`persistence.schema_version`，同时README区分底层store schema 16与不随它升级的`loom.install-plan.v1`协议。`tests/runner/node-event-receipt.mjs`也改为从自有数据库`PRAGMA user_version`取数，而非固定15。
+- 这两个实际driver都已重新通过；Unknown/回滚/事件回执语义没有随之扩展。这类一致性修复不是新迁移、包安装或权限提权，不能把“用了新版本号”当新母宿能力。新增package真实核验另行叙述，避免把原始report里的错旧schema标签混入同一份metadata凭证。
+
 ### 6. 尚未解决
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。

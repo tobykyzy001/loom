@@ -121,7 +121,7 @@ try {
   await expectReject(client.post(`/api/v1/install-plans/${incompatible.plan.id}/approve`, { target_id: incompatible.plan.targets[0].id, reviewed_plan_digest: incompatible.plan.plan_digest }), e => e.status === 400)
   pass('incompatible fixture never receives approval')
 
-  console.log(JSON.stringify({ overall: 'PASS', schema: 15, protocol_schema: 'loom.install-plan.v1', proof_kind: 'synthetic_plan_only', host_execution: false, checks }, null, 2))
+  console.log(JSON.stringify({ overall: 'PASS', schema: persistence.schema_version, protocol_schema: 'loom.install-plan.v1', proof_kind: 'synthetic_plan_only', host_execution: false, checks }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ overall: 'FAIL', error: error.stack, cause: error.cause, checks }, null, 2))
   process.exitCode = 1
