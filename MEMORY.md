@@ -251,6 +251,12 @@
 - 独立终审同时查过原P1（服务项目只projectid清空）与额外Memory cleanup，当前No Findings。production Vue `memoryScope.ts`辅助仅判可编辑、显示与selectedproject关系，未 自行发明单个substring权限表达式。新增4个helper/SSR-tests，现有213 Web tests群的配置8 src registrations及full cargo backend/Clippy story均未掩耳奥。而因为平读死端口5173，新增 **空闲 loopback端口probe**给Vite专用，避免defaultport是occupied被误当 fixture host。
 - 单用户 M0偏好编辑小闭环不是自动habit，完整Web、移动设备或全局memory权限仍未完成。`cargo test -p loom-concierge user_scope_edit_preserves_project_relation_but_scope_change_is_explicit -- --nocapture` 可单独回归，测试[说明](tests/observations/README.md)范围修改时的原子事务与既有source关联规则仍各自保留。
 
+### 5.5.6 显式Memory新建也不能脱离保存审计
+
+- 原 `create_memory` 是裸 `INSERT memories(...)`，之后才 `store.audit(...)`。真实Router与有效Project请求注入只拒绝`memory.explicit_saved`的SQL trigger后，曾得到**Memory rows=1、对应保存审计=0**：用户看到失败却会留下无对应审计的偏好。现在跟上一步scope修复分开，将Memory与saving audit放进同一`BEGIN IMMEDIATE`、同一已有connection，miss/error显式ROLLBACK，所有步骤通过才COMMIT。Source/Project、scope/version1及`grant_created:false`不变。
+- 原红测 `cargo test -p loom-concierge explicit_memory_creation_and_audit_fail_together -- --nocapture` 已变为GREEN；常见保存错误类型仍是当前anyhow映射的400，不在此偷偷换成500。独立review确认无P1/P2，未发现嵌套事务/新增Grant/改动原scope与source关系。真实`node tests/observations/candidates.mjs --browser`全原链PASS，现有更新/删除的原子审计失败、撤回和scope编辑均仍有效，没有重新引入bug等操作来制造成功。
+- **独立的未完成恢复线索**：曾对该负例追加“失败后再发健康CREATE”的临时诊断，后续请求采样卡在**认证 `client()`→`State.lock()`→pthread等待**，并不足以证明卡在SQL COMMIT。临时`drop(store)`、改RAII、改成独立Store以及timeout辅助对照没有给出一致根因，全部已从最终diff清除；不能把这一步的小负例直接当作恢复调度能力验收。既有实际浏览器/普通更新失败链仍通过；若继续查这一问题，先针对认证与已完成request之间谁仍持锁取证，不要再把结果错误归咎于Memory列或重复跑无关假driver。采样存于`/tmp/loom-memory-atomicity-current.txt`（终将过期），代码与上述明确命令才是可持续回归入口。
+
 ## 6. 尚未解决、不要误判为已闭环的事项
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。

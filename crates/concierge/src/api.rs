@@ -2477,6 +2477,99 @@ mod tests {
         assert!(store.list("grants").unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn explicit_memory_creation_and_audit_fail_together() {
+        const TOKEN: &str = "memory-create-audit-atomicity-test-token";
+        const PROJECT: &str = "known-memory-project";
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        let root = directory.path().join(PROJECT);
+        std::fs::create_dir(&root).unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES(?1,'Memory audit fixture',?2,'read_only',1,?3,'{}')",
+                params![PROJECT, root.to_string_lossy(), crate::now()],
+            )
+            .unwrap();
+        let project_before = store.get("projects", PROJECT).unwrap().unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+
+        state
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_memory_saved_audit BEFORE INSERT ON audits WHEN NEW.action='memory.explicit_saved' BEGIN SELECT RAISE(ABORT,'owned_audit_write_failure'); END;",
+            )
+            .unwrap();
+
+        let response = post_json(
+            &app,
+            "/api/v1/memories".into(),
+            TOKEN,
+            json!({
+                "scope":"project",
+                "project_id":PROJECT,
+                "content":"Created only with audit",
+                "source_ticket_id":null
+            }),
+        )
+        .await;
+        let status = response.status();
+        let response_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the existing error mapping is preserved: {response_body}"
+        );
+        assert_eq!(
+            response_body["error"]["message"], "owned_audit_write_failure",
+            "an otherwise valid write must fail specifically because its audit was rejected"
+        );
+
+        let store = state.lock().unwrap();
+        let memories = store.list("memories").unwrap();
+        let saved_audits = store
+            .audits(None)
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["action"] == "memory.explicit_saved")
+            .count();
+        let projects = store.list("projects").unwrap();
+        let grants = store.list("grants").unwrap();
+        assert!(
+            store.list("memories").unwrap().is_empty(),
+            "memory creation and its audit were not atomic: memories rows={}, saved audits={}, projects rows={}, grants rows={}; rows present with no audit: {:?}",
+            memories.len(),
+            saved_audits,
+            projects.len(),
+            grants.len(),
+            memories
+        );
+        assert_eq!(saved_audits, 0);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            store.get("projects", PROJECT).unwrap().unwrap(),
+            project_before
+        );
+        assert!(grants.is_empty());
+        drop(store);
+    }
+
     async fn post_json(app: &Router, uri: String, token: &str, body: Value) -> Response {
         app.clone()
             .oneshot(
@@ -7699,16 +7792,28 @@ async fn create_memory(
             ));
         }
     }
-    store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at,source_ticket_id) VALUES(?1,?2,?3,?4,1,?5,?5,?6)",params![id,project,content,scope,now(),source_ticket_id])?;
-    store.audit(
-        source_ticket_id,
-        "client",
-        "memory.explicit_saved",
-        &json!({"memory_id":id,"scope":scope}),
-    )?;
-    Ok(Json(
-        json!({"id":id,"content":content,"scope":scope,"version":1,"grant_created":false}),
-    ))
+    store.conn().execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> ApiResult<Value> {
+        store.conn().execute("INSERT INTO memories(id,project_id,content,scope,version,created_at,updated_at,source_ticket_id) VALUES(?1,?2,?3,?4,1,?5,?5,?6)", params![id, project, content, scope, now(), source_ticket_id])?;
+        // Memory creation and its auditable fact must never split apart.
+        store.audit(
+            source_ticket_id,
+            "client",
+            "memory.explicit_saved",
+            &json!({"memory_id":id,"scope":scope}),
+        )?;
+        Ok(json!({"id":id,"content":content,"scope":scope,"version":1,"grant_created":false}))
+    })();
+    match result {
+        Ok(body) => {
+            store.conn().execute("COMMIT", [])?;
+            Ok(Json(body))
+        }
+        Err(error) => {
+            store.conn().execute("ROLLBACK", [])?;
+            Err(error)
+        }
+    }
 }
 async fn edit_memory(
     AppState(state): AppState<Arc<State>>,

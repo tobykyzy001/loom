@@ -2,6 +2,16 @@
 
 Updated: 2026-11-20.
 
+## A direct Memory and its saving audit now succeed or roll back together
+
+`create_memory` previously inserted a Memory before calling the existing audit writer. If that audit write failed, the user faced a failed save while the new Memory remained visible without its corresponding saving fact. This was reproduced through the real authenticated Router and an owned SQL trigger rejecting only `memory.explicit_saved`: **Memory rows=1, saving audits=0**.
+
+The raw Memory INSERT and its saving audit now share the same guarded connection and `BEGIN IMMEDIATE`, committing only after both succeed. Errors roll back the INSERT. We preserve the existing error mapping (this audit fault is currently 400 `invalid_request`) rather than silently changing the response contract, and keep all trace/source/project/scope/version rules and `grant_created:false`. There is no nested transaction, new Grant or automatic learning operation.
+
+`cargo test -p loom-concierge explicit_memory_creation_and_audit_fail_together -- --nocapture` now passes. It observes the actual audit fault response, enforces exactly zero new Memory/saving audit, equality with the complete pre-existing Project row and zero Grants. The existing `node tests/observations/candidates.mjs --browser` also passes the full ordinary Memory/Candidate UI, scope and source preservation flow. Independent review found no P1/P2 in the final narrow diff.
+
+A separately investigated *follow-up* write after this kind of failure produced a thread stack at `client -> State.lock -> pthread_mutex_wait`; it is not proved to be a SQL COMMIT problem and is not resolved or waived by this atomicity increment. Diagnostic ablations/direct calls/extra Stores were removed. The recommended next investigation is the authentication/request lifecycle that retains the mutex, not further scope redesign. This unit and the supplied Edge chain do not establish retry-after-failure behavior for every caller, mobile or second-Host operation, generic provider behavior or global exactly-once.
+
 ## Authenticated heartbeat status validation now fails before storage mutation
 
 Previously the controller used `body["status"].as_str().unwrap_or("online")` without constraining the input. A registered installation with a legitimate transport credential could write unsupported strings, or non-string/null/array status fields, even though the string decoder falls back to a normal `online` default for those fields. This could update last-seen registration data and make an otherwise unknown status visible as a recent online snapshot.
