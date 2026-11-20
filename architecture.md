@@ -454,7 +454,7 @@ Project registry的公开inventory不只有目录注册语义。`ProjectInventor
 
 - 缺失revision/dirty必须保留未知；不能把`dirty:"true"`或不完整时间戳解释成clean。普通documents目录不需要伪造HEAD。working-tree也有dirty:null、尚无提交的HEAD等合法状态；另有命令或快照未获得时的未知字段。
 - 公共canonical_remote仍使用controller的净化结果，剔除userinfo、query、fragment以及不安全的login或path。UI仅用无href的文本展示它，不把raw `.git/config` 变成可达性或凭据授权证据。被剥离/不公开地址和“从未采集”必须分开。
-- 用户主动触发的 `POST /projects/{id}/probe` 是已有受保护的只读读取，不是隐式联网或项目hook执行。它复用当前认证时代与 `requireCurrentCredential`；`probeProject`以每Project busy处理重复调用。成功必须具备 `read_only_probe:true`、同ID和完整公开inventory，之后才替换同一Registry item，不改Grant/Project mode。
+- 用户主动触发的 `POST /projects/{id}/probe` 是已有受保护的只读读取，不是隐式联网或项目hook执行。固定的本地Git命令不能因项目自己的`core.fsmonitor`启动外部helper；它与`.git/hooks`属于不同配置源，现统一由命令行`-c core.fsmonitor=`禁用而不改写仓库配置。前端busy、授权与错误处理不因这个禁用失去事实读取或独立权限；该处置不宣称任意仓库配置都是可信执行环境。它复用当前认证时代与 `requireCurrentCredential`；`probeProject`以每Project busy处理重复调用。成功必须具备 `read_only_probe:true`、同ID和完整公开inventory，之后才替换同一Registry item，不改Grant/Project mode。
 - transport/401/epoch差错、错Project、缺inventory或异常metadata到来时，**保留旧快照与旧probed_at**，不能因返回HTTP 200但字段不完整而抹掉旧观察。probe没有伪称新任务audit或跨主机权限。默认GET不自动重新检查每个目录。
 
 `/projects`真实API与production Edge `tests/projects/browser.mjs` 实测 Git/document目录、HEAD基线与修改、忙时禁止重复probe、坏远端被隐藏、命令结果未知/缺失Project失败时旧观测及同data-dir重开保持。文件直接Modify用于自有fixture数据，不把其误写成远端批处理或对所有Credentials的证明。验证范围和仍缺少的设备/Profile覆盖见[tests/projects/README.md](tests/projects/README.md#Production-project-facts-and-explicit-re-probe)。

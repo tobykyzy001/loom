@@ -207,6 +207,8 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 
 
 
+**只读Git probe也要禁掉fsmonitor helper**：仓库自己的 `.git/config`可让独立`core.fsmonitor`外部程序执行，disabled hooks/hookspath/credential-helper并不覆盖它。固定`project_git`命令行必须设置`core.fsmonitor=`，不改写仓库自己的配置或HEAD/远端事实。`node tests/projects/git-probe.mjs`用仅记录并失败退出的fixture实测旧RED与新PASS，unset控制保留真实dirty；不把这只是修复某个入口的宣传扩展为任意仓库配置都可安全执行或全平台验证。见 [local probe](tests/projects/README.md)。
+
 **Git/Project观察与Grant/真实remote分开**：项目`Inventory`经原控制器净化，生产视图要展示实际form/revision/dirty/controller_probe/probed_at与凭据类别，缺值unknown，working-tree dirty:null不允许包装成clean，非Git不造HEAD。`probeProject(id)`使用既有受保护POST和per-Project busy，只读epoch仍必须fresh；必须 `read_only_probe=true`、同ID且公开inventory完整才替换原Registry item，失败保留旧观测。验证入口`tests/projects/browser.mjs`用真实Git/document/Edge验证busy、redaction、命令未知以及删除project的真实400与同数据库恢复。它不争隐私跨机clone/fetch/远端可达，同时声明没有新增probe audit或新Grant。完整M1/真手机/第二Host不能由浏览器390px或单page证明。更多细节见[projects](tests/projects/README.md)。
 
 ## 7. 修改和验证协议

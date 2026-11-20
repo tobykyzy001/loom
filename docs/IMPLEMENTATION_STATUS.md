@@ -12,6 +12,14 @@ The focused Rust case proves positive initial delivery, offline suppression with
 
 Separately, a pre-existing revocation-stop candidate ordering defect was reproduced on clean HEAD `fe19e88`. Investigating/publicly fixing that wrong admitted-versus-unacknowledged reconcile choice is a separate increment, not silently included in the offline execute repair.
 
+## Read-only Git project inspection disables a configured fsmonitor helper
+
+The protected project registration and re-probe path could execute a repository-configured `core.fsmonitor` external helper while returning `read_only_probe:true` and ordinary revision/dirty observations. Disabling `.git/hooks`, global configuration and credential helpers did not cover this separate entry point. An isolated Git repository and its actual failing helper reproduced this through authenticated Concierge HTTP before the repair.
+
+Every fixed local inspection command now receives the command-line override `core.fsmonitor=`. It disables that specific configured helper without rewriting the repository's own config or losing its legitimate revision/remote metadata. This is not a claim that arbitrary Git configuration is harmless or that network access is permitted.
+
+The real `node tests/projects/git-probe.mjs` fixture writes a marker only if the helper executes, then exits nonzero. The original production behavior left that marker despite the read-only label; after the change, create and re-probe leave it absent. A control without fsmonitor retains the identical HEAD and actual modified-file `dirty:true`, while remote-userinfo redaction, non-Git document treatment, persistence, audits and the no-probe-HOME rule continue to pass. The proof is limited to this macOS/POSIX `core.fsmonitor` case and does not validate other platforms or a general repository execution sandbox.
+
 ## A Worker that is offline stays historical and cannot create a new model call
 
 A worker could be clearly `offline` while retaining a valid historical catalog and active placement/invoke Grants, yet enter a new `model_text` binding. The view relied on Node/catalog freshness and worker-ID existence: the actual Worker state and current invocation availability were separately mishandled. `matching_physical_node` even accepted `_worker` without using it, so selecting by ID did not exclude the offline identity.

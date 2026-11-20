@@ -34,6 +34,11 @@ try {
   git(repository, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'fixture'])
   addRemote('https://user:must-not-appear@example.invalid/team/repo.git')
 
+  const monitorMarker = join(root, 'fsmonitor-invocations')
+  const monitorFixture = join(root, 'fixture-fsmonitor')
+  await writeFile(monitorFixture, `#!/bin/sh\nprintf 'external fsmonitor executed: %s\\n' "$*" >> "${monitorMarker}"\nexit 1\n`, { mode: 0o700 })
+  git(repository, ['config', 'core.fsmonitor', monitorFixture])
+
   server = await startRustConcierge({ root: join(root, 'rust') })
   const call = async (method, path, body) => {
     const response = await fetch(`${server.baseUrl}/api/v1${path}`, {
@@ -63,6 +68,18 @@ try {
   assert.equal(inventory.dirty, true)
   assertPublicInventory(inventory, 'https://example.invalid/team/repo.git')
   assertNoPrivate(reprobed)
+  assert.equal(await exists(monitorMarker), false,
+    'A configured external fsmonitor must not execute during read-only create/re-probe; the helper deliberately fails if invoked')
+  assert.equal((await readFile(remoteFile, 'utf8')).includes(monitorFixture), true,
+    'The fixture keeps the repository fsmonitor setting unchanged for this exact test')
+  const revisionBeforeControl = inventory.revision
+  git(repository, ['config', '--unset', 'core.fsmonitor'])
+  const control = await call('POST', `/projects/${encodeURIComponent(projectId)}/probe`, {})
+  assert.equal(control.project.inventory.revision, revisionBeforeControl)
+  assert.equal(control.project.inventory.dirty, true)
+  assert.equal(control.project.inventory.read_only_probe, undefined)
+  assert.equal(await exists(monitorMarker), false,
+    'A Git repository without fsmonitor also produces correct facts without executing the fixture helper')
 
   privateStrings.push('user@example.invalid')
   setRemote('https://user@example.invalid/team/repo.git')

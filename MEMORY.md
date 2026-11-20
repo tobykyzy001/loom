@@ -279,6 +279,11 @@
 - 真实`grant-revocation-fence.mjs`保持原Assignment/lease、原revokedAt/v2及恰一条grant revoke audit；无ACK邻居不获停止/执行，0Report/Artifact/Effect、文件不变，重复Node撤权确认照旧fence。完整`revoke-after-local-effect.mjs`证实**本地已完成编辑但首ACK未达**仍按原有limit_unknown转reconcile、保留bytes及local effects、中央不补Admission；`kill-reconciliation`恢复真实Admission/bytes/一次file effect，document-pipeline cancelled center重开不复苏后续writer。
 - 同一笔（与db8f235分开）还需保留explicit cancel先于已ACK一般reconcile的负例。原`STOP_SELECTION_CONTROL`对照旧created_at选择邻票，并非把旧证物改为现实，生产新次序由真实router、原准入及审计记录实测。独立终审确认ACK不等于TaskStart，普通grant检查、unknown outcome与live claim不被一条order抬高。
 
+### 5.5.10 只读Git探测也不能让仓库core.fsmonitor执行额外程序
+
+- 真实HTTP修复前，临时仓库配置了只记录marker、然后失败的external fsmonitor，project create/reprobe仍返回`read_only_probe:true`，但marker实际存在，断言失败。问题独立于`core.hooksPath`与credential helper：目标仓库自己的config仍是一条命令入口。先带入旧逻辑复现RED，再在固定`project_git`参数中增加`-c core.fsmonitor=`，使每条Git inspection都不再运行该helper。不要修改仓库原配置或Git事实本身。
+- 同一真实`node tests/projects/git-probe.mjs`现在通过：既没有marker产生，正常HEAD、dirty true、远端净化及nonGit/document路径、probe HOME/private/audit检查均保持。未配置该helper的控制只删除local fixture配置，也保留相同revision和实际dirty变更。它是当前macOS对此**一个**启动源的只读边界，不是任意仓库配置安全执行证明、隐式clone/fetch或跨平台部署证明。下一开发优先读取此处命令组成的scope，不只要看hook path就认为额外helper都被屏蔽。
+
 ### 6. 尚未解决
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。

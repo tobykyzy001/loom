@@ -4630,6 +4630,9 @@ fn project_git(root: &Path, args: &[&str]) -> Option<String> {
                 "core.hooksPath=/dev/null"
             },
             "-c",
+            "core.fsmonitor=",
+            // Fsmonitor is a separate external helper config, not a .git hook.
+            "-c",
             "credential.helper=",
         ])
         .args(args)
