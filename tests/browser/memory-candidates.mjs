@@ -14,9 +14,15 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
   const appRoot = fileURLToPath(new URL('../../apps/web/', import.meta.url))
   const { createServer } = await import(pathToFileURL(join(appRoot, 'node_modules/vite/dist/node/index.js')).href)
   const { chromium } = await import('playwright-core')
+  const { createServer: createTcpServer } = await import('node:net')
+  const probe = createTcpServer()
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve) })
+  const port = probe.address().port
+  assert.ok(port > 0)
+  await new Promise(resolve => probe.close(resolve))
   await mkdir(join(root, 'memory-browser-profile'), { recursive: true, mode: 0o700 })
   const app = await createServer({ root: appRoot, configFile: join(appRoot, 'vite.config.ts'), logLevel: 'silent', cacheDir: join(root, 'memory-vite-cache'),
-    server: { host: '127.0.0.1', port: 0, strictPort: true, hmr: false, fs: { allow: [appRoot] }, proxy: { '/api': { target: server.baseUrl, changeOrigin: true } } } })
+    server: { host: '127.0.0.1', port, strictPort: true, hmr: false, fs: { allow: [appRoot] }, proxy: { '/api': { target: server.baseUrl, changeOrigin: true } } } })
   let context
   const logs = []
   let page
@@ -84,7 +90,19 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     assert.equal(await article.count(), 1)
     assert.match(await article.innerText(), /真实 Ticket|来源/)
     const dialog = page.locator('.confirm-modal')
+    let scopeProof = null
     const rootId = candidateId
+    const projects = (await controller.get('/api/v1/projects')).projects.sort((a, b) => a.name.localeCompare(b.name))
+    await mkdir(join(root, 'alternate-explicit-project'), { recursive: true, mode: 0o700 })
+    const alternateProject = await controller.post('/api/v1/projects', {
+      name: 'Explicit alternate project for scope editing', root: join(root, 'alternate-explicit-project'),
+      mode: 'read_only',
+    })
+    const alternateProjectId = alternateProject.project.id
+    assert.ok(alternateProjectId)
+    const parentProjectId = projects[0]?.id
+    assert.ok(parentProjectId)
+    assert.notEqual(parentProjectId, alternateProjectId)
     const path = `/api/v1/candidates/${encodeURIComponent(rootId)}`
     const readCandidate = async id => {
       const body = await controller.get('/api/v1/candidates')
@@ -354,7 +372,117 @@ export async function verifyMemoryCandidateBrowser({ server, root, candidateId }
     const undoWithdrawals = await memoryAudits('candidate.memory.withdrawn', reopened.derived_memory_id)
     assert.equal(undoWithdrawals.length, 1, 'The last re-accepted linked Memory has one and only one candidate withdrawal')
     assert.equal((await memoryAudits('memory.explicit_updated', savedBeforeEdit.id)).length, 1, 'No later UI action duplicates the original explicit edit')
+    // Scope identity comes from the authoritative Memory.scope, not merely a
+    // project relation. Worker/host records are also explicitly supported by
+    // the real API, but must never be silently converted into user preference.
+    const parentProject = savedBeforeEdit.project_id
+    const nextProject = [parentProjectId, alternateProjectId].find(id => id !== parentProject)
+    assert.ok(nextProject)
+    const scopeInputs = [
+      { scope: 'worker', text: 'Scope worker must stay worker, never implicit user' },
+      { scope: 'host', text: 'Scope host must stay host, never implicit user' },
+      { scope: 'user', text: 'User preference retains explicit project relation', project_id: parentProject },
+    ]
+    for (const input of scopeInputs) {
+      const created = await controller.post('/api/v1/memories', { content: input.text, scope: input.scope, project_id: parentProject })
+      input.id = created.id
+      const persisted = (await controller.get('/api/v1/memories')).memories.find(memory => memory.id === created.id)
+      assert.ok(persisted)
+      assert.equal(persisted.scope, input.scope)
+      assert.equal(persisted.project_id, parentProject)
+    }
+    await page.setViewportSize({ width: 1280, height: 980 })
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.locator('.loom-app').waitFor()
+    await page.locator('.main-nav').getByRole('button', { name: '记忆', exact: true }).click()
+    const scopeWrites = []
+    const onScopeWrite = request => {
+      if (request.method() === 'PATCH' && scopeInputs.some(input => `/api/v1/memories/${input.id}` === new URL(request.url()).pathname)) {
+        scopeWrites.push(request.postDataJSON())
+      }
+    }
+    page.on('request', onScopeWrite)
+    const scopedCard = text => page.locator('.memory-list .memory-item').filter({ has: page.getByText(text, { exact: true }) })
+    for (const input of scopeInputs.slice(0, 2)) {
+      const control = scopedCard(input.text)
+      await control.waitFor()
+      const editButton = control.getByRole('button', { name: '编辑记忆', exact: true })
+      await editButton.waitFor()
+      assert.match(await control.locator('.scope-tag').first().innerText(), new RegExp(input.scope))
+      assert.equal(await editButton.isDisabled(), true, `${input.scope}: read-only scoped Memory must not enter an implicit user/project editor`)
+      assert.match(await editButton.getAttribute('title'), /scope|范围|作用域/)
+      assert.equal(await page.locator('.memory-form #memory-scope').count(), 1)
+    }
+    const associated = scopedCard(scopeInputs[2].text)
+    assert.match(await associated.innerText(), /用户级偏好/)
+    await associated.getByRole('button', { name: '编辑记忆', exact: true }).click()
+    assert.equal(await page.locator('#memory-scope').inputValue(), 'user')
+    const unchangedResponse = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === `/api/v1/memories/${scopeInputs[2].id}`)
+    await page.getByRole('button', { name: '保存修改', exact: true }).click()
+    const unchanged = await unchangedResponse
+    assert.equal(unchanged.status(), 200)
+    assert.deepEqual(unchanged.request().postDataJSON(), {
+      content: scopeInputs[2].text, project_id: parentProject, scope: 'user',
+    }, 'Simply editing an existing user-scoped Memory must not erase its previous explicit project association')
+    assert.equal(scopeWrites.length, 1)
+    assert.match(JSON.stringify(scopeWrites), /"scope":"user"/)
+    const preservedUser = (await memories()).find(memory => memory.id === scopeInputs[2].id)
+    assert.equal(preservedUser.scope, 'user')
+    assert.equal(preservedUser.project_id, parentProject)
+    assert.equal(preservedUser.version, 2)
+
+    await page.locator('#memory-scope').selectOption('project')
+    await page.locator('#memory-project').waitFor()
+    await page.locator('#memory-project option').filter({ hasText: alternateProject.project.name }).waitFor({ state: 'attached' })
+    const otherChoices = await page.locator('#memory-project option').evaluateAll(options => options.map(option => option.value).filter(Boolean))
+    assert.ok(otherChoices.includes(nextProject))
+    const projectedSelection = page.locator('#memory-project')
+    await projectedSelection.selectOption(nextProject)
+    assert.equal(await projectedSelection.inputValue(), nextProject)
+    assert.equal(await page.getByRole('button', { name: '保存修改', exact: true }).isDisabled(), false)
+    const converted = page.waitForResponse(response => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === `/api/v1/memories/${scopeInputs[2].id}`)
+    assert.equal(await page.locator('#memory-project').inputValue(), nextProject, 'The user explicitly chooses a different real project, rather than an automatic scope default')
+    await page.getByRole('button', { name: '保存修改', exact: true }).click()
+    const convertedResponse = await converted
+    assert.equal(convertedResponse.status(), 200)
+    assert.equal(convertedResponse.request().postDataJSON().project_id, nextProject)
+    const convertedMemory = (await memories()).find(memory => memory.id === scopeInputs[2].id)
+    assert.equal(convertedMemory.scope, 'project')
+    assert.equal(convertedMemory.project_id, nextProject)
+    assert.equal(convertedMemory.version, 3)
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    for (const input of scopeInputs.slice(0, 2)) {
+      const c = scopedCard(input.text)
+      await c.scrollIntoViewIfNeeded()
+      assert.equal(await c.getByRole('button', { name: '编辑记忆', exact: true }).isDisabled(), true)
+    }
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 390))
+    const finalUserAudits = (await memoryAudits('memory.explicit_updated', scopeInputs[2].id))
+    assert.equal(finalUserAudits.length, 2, 'Exactly the actual user-preserving edit and the explicit return to project are individually audited')
+    assert.equal(scopeWrites.length, 2)
+    for (const input of scopeInputs.slice(0, 2)) {
+      assert.equal((await memories()).find(memory => memory.id === input.id).scope, input.scope)
+      assert.equal((await memories()).find(memory => memory.id === input.id).project_id, parentProject)
+    }
+    for (const input of scopeInputs.slice(0, 2)) {
+      assert.equal((await memoryAudits('memory.explicit_updated', input.id)).length, 0,
+        `${input.scope} is viewable/deletable but was not silently edited in this project/user editor`)
+    }
+    for (const input of scopeInputs) {
+      await controller.request('DELETE', `/api/v1/memories/${input.id}`)
+    }
+    assert.equal((await controller.get('/api/v1/memories')).memories.find(memory => scopeInputs.some(input => input.id === memory.id)), undefined)
+    assert.equal((await controller.get('/api/v1/grants')).grants.length, 2, 'Explicit preference edits never create extra authority')
+    scopeProof = { scope_labels_source_true: true, project_id_does_not_replace_scope: true,
+      worker_and_host_not_silent_user: true, user_keeps_explicit_project_relation: true,
+      readonly_other_scopes: true, real_scope_change_is_audited: true, narrow_scope_labels_fit: true,
+      isolated_extra_memory_cleanup: true }
+
     return { actual_ui_candidate_accept: true, actual_ui_withdraw: true,
+      ...scopeProof,
       actual_ui_candidate_edit_before_accept: true, cancelled_candidate_draft_no_write: true,
       candidate_edit_preserves_fingerprint_and_sources: true, candidate_edit_alone_creates_no_memory: true,
       candidate_edit_refresh_failure_keeps_draft_until_real_reload: true,

@@ -243,6 +243,14 @@
 - `cache.addAll` 接受 RequestInfo 而不是已 fetch 的 Response 数组；正确 `cache.put` 逐项保存。Rust 静态服务需要实际允许 `.webmanifest` MIME，而不是把 manifest 当 HTML fallback。
 - 已准备的桌面浏览器可验证真实进程关闭→同 profile 离线重开、Service Worker 导航和五项静态资源 hash，恢复在线后再受保护读取；这仍不是手机杀进程、离线 Ticket、后台执行、签名更新或全局 CacheStorage 原子事务。
 
+### 5.5.5 显式记忆scope编辑：关系不构成scope、scope不变保留原关系
+
+- **这是普通用户能真实遇到的scope误迁移，已在生产Edge复现并修正。** 后端本就支持 user、project、worker、host，但`project_id`关系不能反推偏好scope；曾经点击worker记忆编辑即被预设user。现在变量label和编辑入口都按 `Memory.scope`。仅原 user/project allowed open the form, worker/host OriginalScope直观保留且依旧有确认的删除流程；没有把它们的scope默认 重写为user、把它们当新execution权限，也没有打开另一个设备生命周期。
+- **没有只停在前端。** 子agent现场证明前端PATCH对`user→user`仍会被服务器清掉关联。`crates/concierge/src/api.rs`现在令**原有scope不变**时保留已形成关联、接受显式有效project；改变到project必须实际选择有注册记录的Project，不能自动拿到第一行或凭代号。`project→user`原语义仍是清掉那个关联，是真正改scope时的事件，而不是否定User_PREF转义。未知project 404，FullMemory/版本/audit unchanged；原始 `source_ticket_id`保留，不用请求造一个出处。
+- **真实 case** `node tests/observations/candidates.mjs --browser`：在source-demo/different-demo 与 owned alternate folder（**none extra Grant or Worker execution**）使用worker/host/user+project关联三条额外user声明。后端及UI label不会把后两者意外当user；disabled edit blocking scope ambiguous automatic conversion没有surprise脱皮。`scope=user`且带原project第一步保存后依旧为原 association/version 2，response核对真实post-save记录而非仅拼HTTP payload；随后真正选择另一个已经注册项目时 version3/scope project/selected id正确。Worker/host仍原值并0 ordinary update audit，没有重复/隐形PATCH。`case`末删除这三个新增Memory使原本Memory仍然为0，Rusted Server再重开和Grant 数及来历都未变。
+- 独立终审同时查过原P1（服务项目只projectid清空）与额外Memory cleanup，当前No Findings。production Vue `memoryScope.ts`辅助仅判可编辑、显示与selectedproject关系，未 自行发明单个substring权限表达式。新增4个helper/SSR-tests，现有213 Web tests群的配置8 src registrations及full cargo backend/Clippy story均未掩耳奥。而因为平读死端口5173，新增 **空闲 loopback端口probe**给Vite专用，避免defaultport是occupied被误当 fixture host。
+- 单用户 M0偏好编辑小闭环不是自动habit，完整Web、移动设备或全局memory权限仍未完成。`cargo test -p loom-concierge user_scope_edit_preserves_project_relation_but_scope_change_is_explicit -- --nocapture` 可单独回归，测试[说明](tests/observations/README.md)范围修改时的原子事务与既有source关联规则仍各自保留。
+
 ## 6. 尚未解决、不要误判为已闭环的事项
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。

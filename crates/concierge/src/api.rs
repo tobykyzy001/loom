@@ -2375,6 +2375,108 @@ mod tests {
         );
     }
 
+    async fn patch_json(app: &Router, uri: String, token: &str, body: Value) -> Response {
+        app.clone()
+            .oneshot(
+                axum::extract::Request::builder()
+                    .method("PATCH")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn user_scope_edit_preserves_project_relation_but_scope_change_is_explicit() {
+        const TOKEN: &str = "memory-scope-tests-token";
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store
+            .set_setting("client_token_hash", &crate::store::hash(TOKEN))
+            .unwrap();
+        store.conn().execute_batch("INSERT INTO projects(id,name,root,mode,version,created_at,inventory) VALUES('original','Original project','/owned/original','read_only',1,'2026-01-01T00:00:00Z','{}'),('alternative','Alternative project','/owned/alternative','read_only',1,'2026-01-01T00:00:00Z','{}')").unwrap();
+        let state = Arc::new(State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: TOKEN.into(),
+            bootstrap_token_written: false,
+        });
+        let app = router(state.clone());
+        let created = post_json(
+            &app,
+            "/api/v1/memories".into(),
+            TOKEN,
+            json!({
+                "scope":"user","project_id":"original","content":"Keep the user's project relation"
+            }),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let memory: Value = serde_json::from_slice(
+            &axum::body::to_bytes(created.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let memory_id = memory["id"].as_str().unwrap().to_owned();
+        let edited = patch_json(
+            &app,
+            format!("/api/v1/memories/{memory_id}"),
+            TOKEN,
+            json!({
+                "scope":"user","project_id":"original","content":"Keep the user's project relation"
+            }),
+        )
+        .await;
+        assert_eq!(edited.status(), StatusCode::OK);
+        let edited_row = state
+            .lock()
+            .unwrap()
+            .get("memories", &memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited_row["scope"], "user");
+        assert_eq!(edited_row["project_id"], "original");
+        assert_eq!(edited_row["version"], 2);
+
+        let migrated = patch_json(&app, format!("/api/v1/memories/{memory_id}"), TOKEN, json!({
+            "scope":"project","project_id":"alternative","content":"Keep the user's project relation"
+        })).await;
+        assert_eq!(migrated.status(), StatusCode::OK);
+        let migrated_row = state
+            .lock()
+            .unwrap()
+            .get("memories", &memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated_row["scope"], "project");
+        assert_eq!(migrated_row["project_id"], "alternative");
+        assert_eq!(migrated_row["version"], 3);
+
+        let before = migrated_row.clone();
+        let audits_before = state.lock().unwrap().audits(None).unwrap();
+        let nonexistent = patch_json(&app, format!("/api/v1/memories/{memory_id}"), TOKEN, json!({
+            "scope":"project","project_id":"not-a-real-project","content":"Keep the user's project relation"
+        })).await;
+        assert_eq!(nonexistent.status(), StatusCode::NOT_FOUND);
+        let store = state.lock().unwrap();
+        assert_eq!(store.get("memories", &memory_id).unwrap().unwrap(), before);
+        assert_eq!(store.audits(None).unwrap(), audits_before);
+        assert_eq!(
+            store
+                .audits(None)
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["action"] == "memory.explicit_updated")
+                .count(),
+            2
+        );
+        assert!(store.list("grants").unwrap().is_empty());
+    }
+
     async fn post_json(app: &Router, uri: String, token: &str, body: Value) -> Response {
         app.clone()
             .oneshot(
@@ -7620,12 +7722,7 @@ async fn edit_memory(
     }
     let project_id = body["project_id"].as_str();
     let store = state.lock()?;
-    if scope == Some("project") || (scope.is_none() && project_id.is_some()) {
-        let Some(project) = project_id else {
-            return Err(ApiError::bad(
-                "Explicit project memory needs a real project",
-            ));
-        };
+    if let Some(project) = project_id {
         if store.get("projects", project)?.is_none() {
             return Err(ApiError::missing("Memory scope project not found"));
         }
@@ -7638,8 +7735,10 @@ async fn edit_memory(
         let scope_sql = scope.unwrap_or_else(|| existing["scope"].as_str().unwrap_or("project"));
         let project_sql = if scope == Some("project") || (scope.is_none() && project_id.is_some()) {
             project_id
-        } else if scope.is_none() {
-            existing["project_id"].as_str()
+        } else if scope.is_none() || scope == existing["scope"].as_str() {
+            // A scope-local edit, especially user -> user, preserves its
+            // existing project relation. Only a real scope conversion clears it.
+            project_id.or_else(|| existing["project_id"].as_str())
         } else {
             None
         };

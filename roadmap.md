@@ -178,6 +178,8 @@ M1 局部新增：版本化 Inventory/ResourceObservation 已在本机验证 13 
 
 ## 3. 里程碑
 
+**显式记忆scope与project关系已不再混淆。** 真实Edge发现worker或host带project_id时被错误预置成`scope=user`并可被保存，现 UI依据真实`Memory.scope`展示/决定编辑资格：worker/host可供查看与删除，却不能被通常user编辑器悄然转换；只有原有user/project范围可进入本编辑器。对user→user编辑，后端原先把关联清为NULL，现在改为scope不变则保留显式project关联；真正`project→user`仍解除关联，`user→project`则用用户从真实已存在项目中选择的ID，不是Client推定或默认首选。`source_ticket_id`、候选与原授权链不由这次编辑迁移，历史grant/ticket/worker并不被授予任何新能力。路由单测覆盖保留原关联、明确第二真实项目、无效项目的404、原行和原审计不变；真实浏览器完成worker/host无改写、user原关联保持、明确新scope转换的版本递进和独立Memory cleanup，保持一个测试Owned Vite/Concierge拓扑和自由端口，不占用户现有GUI或实际主机/手机端口。**不是新的scope系统、自动分类、跨Project票据来源改派或全M3/M5/M0完结证明。** 见 [观测验证](tests/observations/README.md)。
+
 **显式Memory来源现在是经过中心核验的关系。** 项目Memory不能把另一个项目的Ticket直接从客户端填入source_ticket_id；未知ID明确404、bogus数字字段拒绝且不写入任何Memory/审计。合法同项目引用、完全不引用历史的独立Memory、既有项目／用户scope编辑、linked Candidate撤销与再次接受均保留真实流程。候选撤回编辑后的Memory仍使用同一关联事务，没有自动学习、借引用来激活Ticket或创建新的执行Grant。实浏览器另已走过接受→显式project→user编辑且保留出处→直接删除linkedMemory使候选pending→再次接受新ID。另有先前driver没有随当前存储schema14同步更新而失败的问题已修正，当前重启重新读取schema14，而不是沿用user_version11的旧断言。`POST /memories`仍保留allowed optional source，校验来源本身不意味着原Ticket已成功或可继续执行。后续M0补片已另完成普通Memory编辑／无候选关联删除的独立action审计：同Memory实际修改／删除与审计同属一个现有Store事务，记录确实的旧／新版本、scope、出处与变更标记而不复制敏感正文，审计写入失败时原Memory及旧链完整回滚。真实SQLite故障注入、普通UI编辑、linked delete只允许原有candidate withdrawal、成功操作及重开均已验证。schema14与完整源出处规则不改，且不承诺其它旧源码、Ticket/Grant/外部Effect被回滚或所有历史正文已经归档。
 详见 [tests/observations/README.md](tests/observations/README.md)。
 
