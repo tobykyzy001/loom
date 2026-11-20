@@ -6395,6 +6395,13 @@ async fn artifact_upload(
             "Each declared parent needs a valid artifact_ref and controller-verified lineage",
         ));
     }
+    // A readable sibling is not the immutable parent chosen for this Assignment.
+    let ticket_id = body["ticket_id"].as_str().unwrap_or_default();
+    if let Some(input) = crate::pipeline::input_for_assignment(&store, ticket_id)? {
+        if metadata["artifact_ref"] != input["artifact_ref"] {
+            return Err(ApiError::denied("artifact_lineage", "A derived Assignment requires its exact server-selected parent artifact, not a familiar sibling"));
+        }
+    }
     if let Some(reference) = metadata["artifact_ref"].as_object() {
         let source_id = reference
             .get("artifact_id")

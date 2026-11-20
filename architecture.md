@@ -591,6 +591,8 @@ Schema14在现有 `artifacts` 增加可空 `code_evidence_json`，只为这一�
 - Nonce由A私有状态持久化并单次消费，重开未完成的中心保留原请求凭据。但这不是所有端到端副作用保证一次，传输中途的未知须由Host reconciliation另行处理；错误签名/revoked/deadline/cancel/offline/oversize/shape未通过禁止生成新的file effect。
 - v5 的新增direct_offers只是辅助关系，是[id,current attempt,artifact,recipient,nonce,key与definition]的保存，不是新任务权威，也不代替Ticket/Grant或Artifact。迁移采用IF NOT EXISTS；对legacy ticket/grant、原有Artifact bytes与审计链保持不覆盖。其它数据面和非本机部署继承须另行实测。
 
+**Controller也必须拦住没有走DirectExecutor的错误parent上传。** 曾发现receiver使用当前真实Node、Assignment/Lease及有效write Grant，把另一合法sibling的`artifact_ref`当上本次上游；普通`/nodes/artifacts`此前只核其存在、SHA及可选Origin，还导致后续Report/Effect有权成功。现`input_for_assignment(store,ticket)`若返回parent，就必须与上传中的**完整**`artifact_ref`（artifact、ticket、origin、SHA、URI及上游nested关系）相等；没有上游的普通artifact仍走既有SHA/Origin和对象校验，不把pipeline关系强加给全部读取。lineage随后从持久化父记录重建，不能用自述ancestry补权。`node tests/direct/parent-lineage.mjs`用两个真实signed Node和两个合法pipeline child比对一错一正：**篡改parent被拒绝、原ACK/Grant和两条上游不变，正Ref的另一child正常完成；中心重开后相同替补仍403。** 这只是central lineage fence，不写destination文件、不授予新的跨Node访问或证明真实第二物理主机。现有`loopback-handoff`另检验真正的peer socket、文件字节、签名、取消和原权限。
+
 实际一次 source→socket→checksum→B Grant→child file验证在[tests/direct/README.md](tests/direct/README.md)，含取消 expires/lifecycle错误与重启幂等测试。它**不是**第二物理机连接/TLS保证、远程安装包部署、任意大文件默认可下载或全面M2完成证明。中途断流、nonce已经消费而下游结果不确定的自动收据/对账仍未完整验证，不可用一次领取或Model Observation替代未知付款的结果确认。
 
 ### 3.5.1 中心 Artifact 读取、纯文本与有界原字节交付边界

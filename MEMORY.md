@@ -297,6 +297,12 @@
 
 - **这次也不能把同一owner目录上的母/子文件 fd 误当一次永久一致的原子读取。** 经审查发现：即使最末path又恢复同一对象，中间open可能已混入另一目录。现以原有目录fd执行`openat(fd,"loom-node")`，后代Bytes的header、SHA及长度/mode均取自已所开child fd，并在读取前后比较descriptor的ino/dev；**目录句柄/名称entity当前不一致时 reject**。固定[`package_manifest.rs`](crates/concierge/src/package_manifest.rs)类posixowner纹理，仍不把此上纲 为任意Rust类型的恶意包沙盒。这次还补上了同包A/B真实目录交换检查：openat仍取原有A字节，变换后的path则验证失败，**目录身份不能偷偷改变**。以后执行仍需再次读取新bytes及授权，不宣称不限于父目录仍指旧Object的一部派 。
 
+### 5.5.13 Artifact可读不等于能替Assignment选父
+
+- 审查发现真正的P1：合法receiver持有自己的write Grant与Assignment，却可拿另一同义上游的真实sibling Artifact替换本次parent。旧`/nodes/artifacts`只查存在、hash、可选origin，不核对其不可变Assignment亲父；为child生成成功Report和confirmed Effect因而可以挂上错误的输入。仅在DirectExecutor客户端检查也不够，普通Node API同样能绕过它。
+- 已加服务端固定parent比对：`pipeline::input_for_assignment`返回上游时，要求完整`artifact_ref`（artifact/ticket/node/sha/location/nested parents）结构化深相等，缺失/换成另一上游或补造lineage即 `403 artifact_lineage`；**没有父级的普通任务维持原SHA与原记录校验**。不把Source Ticket引用等同于新Grant，也不在后落地ProjectGrant或Scope里另选上游。
+- `node tests/direct/parent-lineage.mjs`实际两组Producer→两个child、真签名Node/Grant/assignments，先一合法兄弟replacer被精确压制且子Artifact/Report/Effect=0；另一个child按其服务器ref正常完成一Report/Effect。原两父、ACK与Grant不变；center停开，再次发誓替换 sibling仍是403。原direct-handoff真实byte/socket、签名、取消和文件效果14 PASS，document-pipeline/ordinary no父读取也必须过完。这仍是同机logical workers及中央lineage授权修补，**不宣称物理第二台Host、通用DAG或跨机exactly-once**。安全圈server receipt/ack也不能被当成执行成功。
+
 ### 6. 尚未解决
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。

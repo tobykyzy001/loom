@@ -392,6 +392,12 @@ M1 Git项目目录已在生产Vue上超越“可注册但不可见”：`Project
 
 实际driver验证真正复制的native Bare包、仅 amend单字节、错误arch、multi-linked manifest及客户端自填digest。拒绝发生在新plan/Audit/Grant/Ticket之前，已有合法plan和其它公开记录全集保持不变。真实Edge也通过已有审批/回滚/unknown流程并额外显示此唯一只读 hash和未安装说明，固定legacy类型字段解析严格64 hex识别，不授予新执行方式。这补的是M2本地候选Package的**当前读取证据**，不是实现跨Host部署或第二物理机器。入口 `node tests/install/package-manifest.mjs` 与 `node tests/install/browser.mjs`，实际manifest格式与来源见 [BARE_PACKAGE](docs/BARE_PACKAGE.md)。
 
+**修复一次真实的parent替换漏洞：** 此前有效receiver经已准许的Assignment/Lease与write Grant，可以直接POST普通Node Artifact，拿另一笔真实且SHA/origin均合法的**sibling**原文来充当自身上游。中心原先只查源Artifact存在、hash与可选origin，不加比对此次child真正的producer。后续Report、confirmed Effect与成功状态因而能跟上错误的child输入。这不只是executor里的格式限制。
+
+现在`artifact_upload`对`pipeline::input_for_assignment`返回的真实父stage，强制 submitted完整`artifact_ref`与中心选定的对应source Artifact/parent ticket/origin/sha/location/原父谱系相等，缺失、替换、添换内容得到`403 artifact_lineage`，普通无父Assignment仍按旧SHA/origin检查，不借用other_Artifact固定Name扩大它的Read Grant。原任何持久Artifact也不因某个谎报child被改写。
+
+`node tests/direct/parent-lineage.mjs`实际创建两组父Ticket/原始Artifact与其不同child，两个真实signed Node和两笔独立read/write绑定。负方没有造假grant或receiver身份，换兄弟后不能形成子Artifact、Report/Effect；正确parent另一笔child正常完成，原ACK/Grant/两份母Ticket与重启中心数据都保持。与真正socket+文件execute 的`loopback-handoff`14 PASS分开叙述，不把该Node API lineage fixture当文件或第二物理machine验收。新增[direct说明](tests/direct/README.md)已更新，memory与architecture保持自己对象职责。
+
 **进入 M3 的证据**
 
 至少两类不同载荷的任务完成双机测试，并完成断线、重连、过期租约、重复回调和未知结果故障注入。选择性安装必须通过一个官方 Host Agent / Adapter 包在部分目标上的部署、失败回滚和权限测试；在 macOS 之外至少通过一类 Linux 或 Windows Host 验证，另一个桌面系统保留为后续明确验收项。跨机成功、编译成功或安装演示本身不足以通过。

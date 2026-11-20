@@ -57,6 +57,20 @@ Coordinator-independent rerun at 2026-11-16/17 UTC:
 
 The local evidence file from that execution was `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-real-http-NM9yTF/direct-loopback-result.json`. UUIDs change per fixture; these are references for this concrete run, not credentials or machine-stable identities.
 
+## Controller rejects a sibling substituted for the immutable parent
+
+```sh
+node tests/direct/parent-lineage.mjs
+```
+
+A second real-Node/HTTP proof previously showed a receiver using its valid assignment, lease and write Grant with a different but entirely real sibling Artifact as its claimed parent. The old upload path accepted this, after which the attached report and confirmed effect could complete the child. That was **not** a DirectOffer signature bypass; a regular Node request could bypass the client's own intermediate ref check.
+
+After re-validating its current Node/assignment/lease, the server now obtains `pipeline::input_for_assignment` and compares the entire structured parent `artifact_ref`, including artifact, ticket, origin, digest, URI and the prior lineage. An authenticated valid dictionary entry or identical content from a sibling is no longer enough to choose the upstream independently. Missing or altered references are rejected. If no pipeline parent exists, ordinary Artifact SHA/origin checks remain unchanged.
+
+The driver creates two actual parents and their distinct downstream Assignment. The first substitution gets exact `403 artifact_lineage` before creating a child Artifact, report or confirmed effect, with the original acknowledged Assignment and full Grant set unchanged. A second child keeps its server-identical reference and completes with one proper artifact/report/effect. The two original parent records remain immutable. After the controller actually stops and restarts with the existing credentials, the original wrong-child lookup is still denied and both child outcomes/grants are unchanged.
+
+This is a **server lineage fence over real HTTP**, not a fabricated filesystem write or another physical Host. The deliberate lineage-probe receiver doesn't execute the proposed output bytes or construct its own `DirectOffer`, so the evidence concerns server acceptance, not a new remote agent tool invocation. Existing `loopback-handoff` independently proves actual byte transport and its ordinary file effect, protected offer signatures and failure cases. No-profile-change/hardcoded-parent validation is not a general second-host DAG or unrestricted Artifact sharing grant.
+
 ## NOT RUN / deliberately unsupported
 
 Physical second devices, public or remote TLS endpoints, global peer/network discovery, localization or a true immutable remote service, non-hostname-trust aliases replaced by trusted mTLS, cross-machine Root deployment, arbitrary remote root reads, big-file/compressed delivery, model/Harness/OAuth portability, mobile, arbitrary pipelines or a complete M2 final acceptance. This bounded local method only proves the direct protocol and its current-scope enforcement can work without blindly transfering bytes through the coordinator.
