@@ -670,11 +670,20 @@ fn overall_status(store: &Store, run: &Value, stages: &[Value]) -> Result<String
     if !run["cancel_requested_at"].is_null()
         || statuses.iter().any(|state| state == "cancel_requested")
     {
-        return Ok(if statuses.iter().all(|state| state == "cancelled") {
-            "cancelled".into()
-        } else {
-            "cancel_requested".into()
-        });
+        // A successful producer is evidence to keep, not a withholding actor.
+        // Once every remaining stage has completed or observed its cancellation,
+        // the aggregate is stopped. Waiting/reconciling/failed states never enter
+        // this branch as a fabricated successful or clean cancellation.
+        return Ok(
+            if statuses
+                .iter()
+                .all(|state| state == "succeeded" || state == "cancelled")
+            {
+                "cancelled".into()
+            } else {
+                "cancel_requested".into()
+            },
+        );
     }
     if statuses.iter().any(|state| state == "failed") {
         return Ok("failed".into());

@@ -193,6 +193,18 @@
 
 - **Vue记录 identity key应匹配协议的复合身份，而不是套用Node ID。** 同一Node有多个Installation/Worker/独立timeline时，Node ID只是共享公共身份，真实安装关联要靠`installation_id`。`nodeIdentityKey()`统一`node.node_id ?? node.id`与全程`installation_id`，card有data-installation-id便于按真实身份验证，避免Node ID相同导致VNode复用和 duplicate-key warning。不要只在一定事件后require unique names才验：要实际A新鲜、B老化时间后保留A在线、B陈旧、online sum恰一，同时 immutable worker/root/inventory/registration都原样。测试内部还分`NodeIdentity.nodeId / installationId` getter 与`report.results.fixture.node_id / installation_id`存储映射，绝不能用错误一层. 两common logical installs在**同一物理fixture computer**是否已有legitimate pubKey不能冒充第二host/物理断网，陈旧也≠自动撤权；原binding B、A worker/root mismatch拒绝及sole legacy payload仍应分别通过。完整真实Edge结果见 [installation-ui](tests/browser/installation-ui.mjs) 与 `/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-installation-ui-proof-pNBgte/result.json`。
 
+### 5.5.2 受限Pipeline完成、取消以及待收stop frame
+
+- **真实修正了一个用户可见“停止不终止”问题。** 已注册的Reader成功产出实际原始Artifact后，editor刚收到真实child Assignment未做文件效果，`/pipelines/{id}/cancel`先正确返回`cancel_requested`。Node真实响应并交付`cancel_acknowledged`，child变为cancelled（零Artifact/Effect/新建文件），但整个run在**still succeeded的parent+cancelled的child**情况下仍一直cancel_requested。`overall_status`现在只在 cancelling分支按实有阶段全部 `succeeded|cancelled` 关闭。reader的`cancel_requested=false`及其原始bytes/digest/Effect/Grant仍在，**不是**要求成功上游作废来推出一场取消。 pending/waiting/failed不符合全部停止条件；reconciling继续显式优先，不偷换成已清执行。最近真driver红转绿证明：
+  - child只持一份confirmed stop Report，`assignment.acknowledged_at:null`，没有normal execution ACK；随后Node试图再ordinary acknowledgement得到409 `outcome_unknown`，没有新准入或file effect；
+  - parent SHA/单据/唯一Artifact不被抢手重新生成；power/binding/digest/grant version保留；重复cancel和definition/run replay不新增 child，恰一次 `pipeline.cancel_requested` audit；2 Tickets/2 Assignments/2 Reports/该source1 Artifact；
+  - 同一run在真实center重启后整体及stage仍cancelled，不再靠计时器等待终态。
+  - 该小聚合不是任意DAG/global StopExactlyOnce，也不撤销早先已发生的外部效果。关于完成本地TICK与运输outcome仍分开。
+
+- **相邻DirectOffer老fixture的直接教训是停止帧有优先权**：routine cancel只是表明旧Ticket的intent，中心下一次poll会把它先给Node完成cancel_acknowledged。旧测试径直 另创建一份Edit，poll最先再次拿到**同一旧 cancelled/cancel_requested Assignment**导致`direct_offer_denied`，被拒其实是先于本条explicit revoke 的正确行为，不能用一般“撤销后总被拒”糊弄过去。现在先`run(nodeB,'cancel_acknowledged')`实际拿到并交付明确停止Report，再确认下一个assignment 在pipeline stage 正好是**新running child / differentTicket/不同assignment/sameInstallation+worker epoch**，才发offer再撤Source Grant。进而在同Grant撤销后，原未消费的peer offer所有bytes仍拒绝、destination文件不存在，原14项signature/nonce/share SHA负例和原拓扑不放宽。这个测试修复专属own fixture，并没有要求降低direct-offer state检查或添加secret fallback。
+
+- 新增和更新实际入口为`node scripts/document-pipeline.mjs`、`node tests/direct/loopback-handoff.mjs`，范围见 [pipeline](tests/pipeline/README.md)。现有新调度的`Grant/Binding/current epoch/root`继续原条职责，这项终态归并不扩展为物理第二台、任意DAG或global stop guarantee。
+
 ### 5.5.1 真实SIGKILL与本地outbox的准入恢复
 
 - **新的真实增量暴露并修复了“先传成果，后补准入”以及中心未检查准入的问题。** `tests/runner/kill-reconciliation.mjs`让原生CLI取得一份实际edit_file，hold的是executor完成后第一笔普通ACK（**不要hold pre-spawn的取消观察poll**），使写效果及两个原outbox先durable，而中心`acknowledged_at`和效果仍空。硬门前是28-byte真实目标文件、completion succeeded、capture的确切Grant/root/epoch/logical digest和confirmed ledger；真正`SIGKILL`并等待退出后开启同identity，才续原先work。

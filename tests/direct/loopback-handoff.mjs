@@ -255,12 +255,17 @@ try {
     peer.now = originalNow
     return { expired_code: 'offer_expired' }
   })
-  await check('cancel intent before the peer response blocks the direct byte fetch too', async () => {
+  const cancelledCase = await check('cancel intent before the peer response blocks the direct byte fetch too', async () => {
     const nextId = randomUUID()
     await admin.post('/api/v1/pipelines', definition(nextId, 'docs/cancelled.txt'))
     await run(nodeA, 'succeeded')
     const pending = await nodeB.client.poll({ waitSeconds: 0 })
     assert.equal(pending.artifact_input.direct_offer, true)
+    const expectedChild = (await admin.get(`/api/v1/pipelines/${nextId}`)).pipeline.stages.at(-1)
+    assert.equal(pending.ticket_id, expectedChild.ticket_id, 'the unconsumed offer input must belong to this new child, not the previous cancelled Assignment')
+    const currentChild = await admin.get(`/api/v1/tickets/${expectedChild.ticket_id}`)
+    assert.equal(currentChild.status, 'running', `current child before cancelling its intent: ${JSON.stringify({ ticket: expectedChild.ticket_id, status: currentChild.status, cancel_requested: currentChild.cancel_requested, assignment: pending.id, ticket_installation: currentChild.installation_id, author_installation: nodeB.installationId })}`)
+    assert.equal(pending.installation_id, nodeB.installationId)
     const issued = await nodeB.http.post('/api/v1/nodes/direct-offers', { ...envelope(nodeB, randomUUID()),
       ticket_id: pending.ticket_id, artifact_id: pending.artifact_input.artifact_ref.artifact_id }, { token: nodeB.identity.token })
     const stoppedPeer = startPeerFor(issued.direct_offer)
@@ -282,7 +287,14 @@ try {
     const unused = JSON.parse(await readFile(stoppedPeer.nonceFile, 'utf8'))
     assert.equal(unused.includes(issued.direct_offer.nonce), false)
     await assert.rejects(() => readFile(join(rootB, 'docs/cancelled.txt')), (error) => error.code === 'ENOENT')
-    return { stop_intent_not_ack_or_success: true, source_bytes_rejected_before_effect: true }
+    // The next poll prioritizes outstanding stop frames. Resolve this exact old
+    // Assignment before creating and issuing an offer for a separate live edit.
+    const acknowledged = await run(nodeB, 'cancel_acknowledged')
+    assert.equal(acknowledged.assignmentId, pending.id)
+    assert.equal((await admin.get(`/api/v1/tickets/${pending.ticket_id}`)).status, 'cancelled')
+    await assert.rejects(() => readFile(join(rootB, 'docs/cancelled.txt')), (error) => error.code === 'ENOENT')
+    return { stop_intent_not_ack_or_success: true, source_bytes_rejected_before_effect: true,
+      cancelled_ticket_id: pending.ticket_id, cancelled_assignment_id: pending.id }
   })
   await check('revoked source Grant blocks a separate unconsumed offer and its next file effect', async () => {
     const nextId = randomUUID()
@@ -290,6 +302,16 @@ try {
     await run(nodeA, 'succeeded')
     const pending = await nodeB.client.poll({ waitSeconds: 0 })
     assert.equal(pending.artifact_input.direct_offer, true)
+    const nextStage = (await admin.get(`/api/v1/pipelines/${nextId}`)).pipeline.stages[1].ticket_id
+    assert.notEqual(pending.ticket_id, cancelledCase.cancelled_ticket_id)
+    assert.equal(pending.ticket_id, nextStage)
+    assert.notEqual(pending.id, cancelledCase.cancelled_assignment_id)
+    assert.equal(pending.status, 'running')
+    assert.equal(pending.cancel_requested, false)
+    assert.equal(pending.kind, 'edit_file')
+    assert.equal(pending.installation_id, nodeB.installationId)
+    assert.equal(pending.worker_id, 'worker-b')
+    assert.equal(pending.lease_epoch, pending.attempt)
     const issued = await nodeB.http.post('/api/v1/nodes/direct-offers', { ...envelope(nodeB, randomUUID()),
       ticket_id: pending.ticket_id, artifact_id: pending.artifact_input.artifact_ref.artifact_id }, { token: nodeB.identity.token })
     const revokedPeer = startPeerFor(issued.direct_offer)

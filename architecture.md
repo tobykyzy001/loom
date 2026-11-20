@@ -844,6 +844,10 @@ bundle的`NodeState`对缺少文件的初始状态执行`structuredClone(EMPTY)`
 
 这只证明**合作runner在单canonical state目录内的生命周期互斥**，不是跨进程global exactly-once。后续重新打开可以只空闲轮询，不强制中心重发已完成Assignment，也不把HTTP accept或锁文件本身当Grant。proxy仅延期一次回执，并非网络丢失、SIGKILL或多机恢复；driver的等待、proxy close、center stop均有界，清理失败或证据写失败都必须使测试FAIL。验证范围和命令详见 [runner验收](tests/runner/README.md)。
 
+**Pipeline停止聚合必须承认已完成parent与已实际停止child。** 真实reader成功后因writer未执行而被停止的两阶段场景以前会在child已交付cancel_acknowledged后仍然只在整体cancel_requested中：parent 是 succeeded，不会被定义中的“所有阶段 literal cancelled”接纳。现仅在 cancelling上下文中，若每阶段均为 `succeeded|cancelled` 才聚为`cancelled`。已完成的Artifact与效果不是未结回调需要后退的对象，而writer尚未产生新增文件、Artifact或Effect，不能把其结果未知当作已经干净执行过。`reconciling`优先，其它pending/failed必须得到该原分支而非误判成clear-cancel。Immediate cancel仍是对当前Assignment的intent；直到真实Node接收并验完停止报告，且以后中心重启不追加child，run才terminal。
+
+这修正了`cancel_requested_at`与 pipeline ticket checkpoint协调而不是让它们各写各的状态。原exact Source Bytes 与ticketing/digest/Grant关系不因终态才改变。相邻DirectOffer还需先把中心给予的未处理stop frame真正acknowledge完，再从**当前另一个running child**发权，避免误把先前取消Ticket当新 DirectOffer 入口源；"一次cancelling过程与旧Artifact权力"的道理不能互相混用。
+
 **Bare execution与Admission顺序必须由中央也强制。** 原生`LocalNodeRunner.start()`不再自行抢先派发outbox，正常poll通过当前Binding/root/Grant/epoch/logical digest后，才会先取得同一当前Assignment的普通准入再投递原始证据。`assignment_unadmitted`仅表示按该正常链暂退，本地原body与UUID保留，权限错误/stale lease和冲突ack record仍按原有不允许传播的HOLD处理；并不 将本地成功文件自动认定已经中央准入。
 
 对应地，中央普通新Artifact与running/succeeded/failed结果要求确认该Assignment**非空可解析acknowledged_at + 恰一条node-origin assignment.acknowledged历史配对**，缺失给`assignment_unadmitted`，坏半边/坏timestamp或多重审计继续403/409不接受。相同旧不可变bytes/Report receipt仅作为原scope read复现，不创建新Effect，未知与取消的特殊对账不能借这项普通Admission约束假 成新建/确认正常效果。Report的ticket_attempt与持久lease_epoch独立比对，避免只核 对ticket attempt而误接旧租期。新建Artifact在写文件及记录前受检查； 原生 ACK恢复与duplicate 都走相同现有Node/Grant/epoch audit helper，重复只读原准入不改变原timestamp 或给新审计。
