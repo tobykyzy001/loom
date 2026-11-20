@@ -95,6 +95,54 @@ try {
     assert.equal((await get('/memories')).memories.length, 0, 'Rejected provenance must leave no visible Memory')
     assert.deepEqual(await get('/audit'), auditBefore, 'A rejected Memory source cannot write memory.explicit_saved or any corresponding audit mutation')
   }
+  const creationBaseMemories = (await get('/memories')).memories
+  const creationBaseAudits = await auditRecords()
+  const creationGrants = (await get('/grants')).grants
+  const creationDatabase = join(server.dataDir, 'loom.sqlite3')
+  let creationFaultRemoved = false
+  const creationInput = { project_id: projectId, scope: 'project',
+    content: 'This creation must commit precisely with its auditable saving record', source_ticket_id: firstSource }
+  try {
+    await sqlScript(creationDatabase, "CREATE TRIGGER reject_memory_creation_audit BEFORE INSERT ON audits WHEN NEW.action='memory.explicit_saved' BEGIN SELECT RAISE(ABORT,'owned_creation_audit_failure'); END;")
+    let rejected
+    try { rejected = await post('/memories', creationInput).catch(error => error) }
+    finally {
+      await sqlScript(creationDatabase, 'DROP TRIGGER IF EXISTS reject_memory_creation_audit')
+      creationFaultRemoved = true
+    }
+    assert.equal(rejected.status, 400, 'Preserve the existing audit-error mapping rather than inventing success')
+    assert.match(rejected.message, /owned_creation_audit_failure/, 'The valid write must reach the saving-audit trigger')
+    assert.deepEqual((await get('/memories')).memories, creationBaseMemories,
+      'Creation without its audit may not leave a visible Memory')
+    assert.deepEqual(await auditRecords(), creationBaseAudits, 'The failed source/save cannot alter the earlier audit chain')
+
+    const recovered = await post('/memories', creationInput)
+    assert.equal(recovered.grant_created, false, 'Saving after audit recovery does not manufacture authority')
+    const recoveredRows = (await get('/memories')).memories
+    assert.equal(recoveredRows.length, creationBaseMemories.length + 1)
+    const recoveredMemory = recoveredRows.find(memory => memory.id === recovered.id)
+    assert.ok(recoveredMemory, 'The same-center authenticated retry can recover a persisted Memory')
+    assert.equal(recoveredMemory.scope, 'project')
+    assert.equal(recoveredMemory.project_id, projectId)
+    assert.equal(recoveredMemory.source_ticket_id, firstSource)
+    assert.equal(recoveredMemory.version, 1)
+    const recoveredSaveAudits = await memoryAudits('memory.explicit_saved', recovered.id)
+    assert.equal(recoveredSaveAudits.length, 1, 'The successfully recovered creation has exactly one matching audit')
+    assert.equal(JSON.parse(recoveredSaveAudits[0].evidence).evidence.scope, 'project')
+    await admin.request('DELETE', `/api/v1/memories/${recovered.id}`)
+    assert.deepEqual((await get('/memories')).memories, creationBaseMemories, 'Only the new recovered fixture is removed')
+    const recoveredDeleteAudits = await memoryAudits('memory.explicit_deleted', recovered.id)
+    assert.equal(recoveredDeleteAudits.length, 1)
+    const deletionEvidence = JSON.parse(recoveredDeleteAudits[0].evidence).evidence
+    assert.equal(deletionEvidence.previous_scope, 'project')
+    assert.equal(deletionEvidence.authority_changed, false)
+    assert.equal(deletionEvidence.candidate_withdrawal, false)
+  } finally {
+    if (!creationFaultRemoved) await sqlScript(creationDatabase, 'DROP TRIGGER IF EXISTS reject_memory_creation_audit').catch(() => {})
+  }
+  assert.deepEqual((await get('/grants')).grants, creationGrants, 'Every original Grant remains byte-equivalent; recovery creates no new authority')
+  assert.equal(await sql(creationDatabase, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='reject_memory_creation_audit'"), 0)
+
   const sourcedMemory = await post('/memories', { project_id: projectId, scope: 'project',
     content: 'A real explicit Memory may refer to a same-project Ticket', source_ticket_id: firstSource })
   assert.equal(sourcedMemory.grant_created, false)
@@ -419,8 +467,8 @@ try {
   assert.equal((await reopenAdmin.get('/api/v1/memories')).memories.length, 0)
   assert.equal((await reopenAdmin.get('/api/v1/audit/verify')).valid, true)
   assert.deepEqual((await reopenAdmin.get('/api/v1/audit')).audit.filter(entry => ['memory.explicit_updated', 'memory.explicit_deleted'].includes(entry.action)), durableMemoryAudits, 'Explicit Memory write audits survive a real Concierge restart unchanged')
-  console.log(JSON.stringify({ overall: 'PASS', source_and_expiry_checks: true, real_derived_memory_and_link: true, ordinary_edit_and_delete_audit: true, audit_failure_rolls_back_memory_mutation: true, missing_ids_do_not_audit: true, undo_does_not_duplicate: true, never_does_not_suggest_again: true,
-    route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: 15,
+  console.log(JSON.stringify({ overall: 'PASS', creation_and_saving_audit_are_atomic: true, same_center_creation_recovery_after_rejected_audit: true, source_and_expiry_checks: true, real_derived_memory_and_link: true, ordinary_edit_and_delete_audit: true, audit_failure_rolls_back_memory_mutation: true, missing_ids_do_not_audit: true, undo_does_not_duplicate: true, never_does_not_suggest_again: true,
+    route_never_becomes_memory: true, duplicate_source_is_not_an_observation: true, known_scope_only: true, reopened_schema: await sql(join(server.dataDir, 'loom.sqlite3'), 'PRAGMA user_version'),
     candidate_edit_preserves_source_identity: true, stale_candidate_edit_rejected: true,
     repeated_candidate_sources_keep_edited_text: true, candidate_edit_is_not_memory_acceptance: true,
     no_generic_learning_or_automatic_listener: true, uses_real_registered_node_and_http: true, browser: browserProof, root }, null, 2))

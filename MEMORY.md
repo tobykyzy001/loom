@@ -255,7 +255,8 @@
 
 - 原 `create_memory` 是裸 `INSERT memories(...)`，之后才 `store.audit(...)`。真实Router与有效Project请求注入只拒绝`memory.explicit_saved`的SQL trigger后，曾得到**Memory rows=1、对应保存审计=0**：用户看到失败却会留下无对应审计的偏好。现在跟上一步scope修复分开，将Memory与saving audit放进同一`BEGIN IMMEDIATE`、同一已有connection，miss/error显式ROLLBACK，所有步骤通过才COMMIT。Source/Project、scope/version1及`grant_created:false`不变。
 - 原红测 `cargo test -p loom-concierge explicit_memory_creation_and_audit_fail_together -- --nocapture` 已变为GREEN；常见保存错误类型仍是当前anyhow映射的400，不在此偷偷换成500。独立review确认无P1/P2，未发现嵌套事务/新增Grant/改动原scope与source关系。真实`node tests/observations/candidates.mjs --browser`全原链PASS，现有更新/删除的原子审计失败、撤回和scope编辑均仍有效，没有重新引入bug等操作来制造成功。
-- **独立的未完成恢复线索**：曾对该负例追加“失败后再发健康CREATE”的临时诊断，后续请求采样卡在**认证 `client()`→`State.lock()`→pthread等待**，并不足以证明卡在SQL COMMIT。临时`drop(store)`、改RAII、改成独立Store以及timeout辅助对照没有给出一致根因，全部已从最终diff清除；不能把这一步的小负例直接当作恢复调度能力验收。既有实际浏览器/普通更新失败链仍通过；若继续查这一问题，先针对认证与已完成request之间谁仍持锁取证，不要再把结果错误归咎于Memory列或重复跑无关假driver。采样存于`/tmp/loom-memory-atomicity-current.txt`（终将过期），代码与上述明确命令才是可持续回归入口。
+- **真实同中心后续恢复现在已有实证**：已增强`node tests/observations/candidates.mjs --browser`，注入该保存审计错误后立即检查Memory/旧Audit不变，移除trigger，再对同一Rust Concierge、同一合法来源和同一客户端发正常创建。记录新Memory的实际source/project/scope/version 1及恰一条同ID saving audit，之后以正常DELETE只清理这个新条目；Audit保留`authority_changed:false`和`candidate_withdrawal:false`，整个原有Grant集合**完全相等**，不只是数量仍2。随后全原Memory/Candidate/Scope/UI链继续PASS。
+- **早期单独的in-process扩展probe只留作上下文**：曾有线程停在`client() → State.lock() → pthread等待`（[会话采样](/tmp/loom-memory-atomicity-current.txt)）。这没有证明SQL COMMIT失败或真实HTTP一定会阻塞；实验中的临时`drop(store)`/RAII改写都不需要进入生产代码。现在应先跑**已有真实driver**：已由同一Rust Concierge、正常认证HTTP完成“fault回滚→恢复保存→普通删除”，不再把先前in-process等待误读为普遍的生产认证缺陷。该实证仍限于固定创建错误/回滚/健康保存，不包含其他平台、任意异常级调度或自动习惯学习。
 
 ## 6. 尚未解决、不要误判为已闭环的事项
 
