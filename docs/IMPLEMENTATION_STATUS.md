@@ -25,6 +25,16 @@ The real `node tests/harness/real-model-binding.mjs` driver first carried out su
 The frontend accepts `worker_offline` only for `unavailable/stale` history, rejects a contradictory offline confidence plus `fresh`/`adapter_observed`, and displays the useful offline-worker label rather than merely an unknown state. `tests/model-inventory/browser.mjs` uses actual Edge and the same registered Node to show this historical state after a user-initiated resource read, with no execute/download/activation button and a passing 390px desktop layout. All of this is a bounded Worker-status repair on a single macOS test setup, not a model deployment, arbitrary provider, true phone, second Host or full M1 acceptance proof.
 
 
+## Revocation STOP selection keeps the original outstanding Assignment
+
+A first Grant revocation changes every still-running Ticket sharing that Grant into `reconciling`. Pure newest-created stop ordering could therefore choose a later, never-acknowledged Ticket and hide an earlier genuinely acknowledged original Assignment. This was reproduced on the previous clean HEAD and confirmed independently rather than attributed to the later offline-Worker fence.
+
+The STOP selection now orders an explicit cancellation intent first (`cancel_requested=1 DESC`), then an existing original `acknowledged_at` ahead of null-ACK neighbours, preserving original newest ordering inside each class. Acknowledgement is an admission fact, not proof that execution started, a new Grant, or a universal reconcile permission. The eligibility conditions and existing null-ACK local-effect reconciliation rules are unchanged.
+
+`first_admitted_original_wins_revoke_over_later_unacknowledged_neighbours` records the original misordering as a SQL control and compares it with the returned original Assignment, true Admission and twice-revoked state. A companion case requires explicit cancellation to outrank an already acknowledged ordinary reconcile. `node tests/runner/grant-revocation-fence.mjs` now proves the original Assignment/lease/original revocation time/current v2 and exactly one revoke audit, while the unacknowledged neighbours do not execute and Reports/Artifacts/Effects stay zero. `revoke-after-local-effect`, `kill-reconciliation` and document-pipeline cancellation/restart preservation also pass without manufacturing ordinary Admission after revocation.
+
+The change is limited to candidate ordering on this local Rust/Node/Legacy workflow. It does not create TaskStart evidence, broaden grant authority, or establish generic Harness cancellation, global fairness, physical multi-Host or mobile lifecycle support.
+
 ## A direct Memory and its saving audit now succeed or roll back together
 
 `create_memory` previously inserted a Memory before calling the existing audit writer. If that audit write failed, the user faced a failed save while the new Memory remained visible without its corresponding saving fact. This was reproduced through the real authenticated Router and an owned SQL trigger rejecting only `memory.explicit_saved`: **Memory rows=1, saving audits=0**.

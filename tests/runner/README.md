@@ -245,7 +245,7 @@ node tests/runner/task-priority.mjs
 
 普通认证客户端创建Ticket时可以明确指定 **[-100,100]的整数priority**，当前Node的合法**未ack普通execute候选**按较大值优先；省略为0，显null、布尔、字符串、小数、越界数字都400且不新建工作。同一默认0仍保持原来的 `assignment.created_at DESC`，不是改成FIFO。failed retry沿用原票的preference，Source event/frozen Spec不能自行提级，Node自报也不能修改中心排程。priority**没有放在Node assignment或operation中，不进入工作digest**。
 
-**停止/对账先于数字比较。** poll先以同一Node/epoch/current Grant和这些租约状态的基本CTE查找当前待处理 `cancel_requested`或 `reconciling`；包括合法首次发放且尚未ack的预取消，keep original created_at order。找到则交出待处理对象，不拾取另一个高priority普通ticket。没有这种待处理时才按 `priority DESC, assignment_created_at DESC` 取一个普通execute。当前不会因此抢占已经开始执行的SDK Agent，也不会因为紧急tag就授权另一physical Node/binding root。 Acknowledge仍不是完成结果，报告与实际工作效果各自成立。
+**停止/对账先于数字比较。** poll先以同一Node/epoch/current Grant和这些租约状态的基本CTE查找当前待处理 `cancel_requested`或 `reconciling`；包括合法首次发放且尚未ack的预取消，先让cancel intent优先，再让已有ACK的原Assignment先于未ACK邻票，同类仍按最新创建时间。ACK只是认领而非完成或开始执行的证明，不给无ACK的真实本地效果对账增设准入限制。找到则交出待处理对象，不拾取另一个高priority普通ticket。没有这种待处理时才按 `priority DESC, assignment_created_at DESC` 取一个普通execute。当前不会因此抢占已经开始执行的SDK Agent，也不会因为紧急tag就授权另一physical Node/binding root。 Acknowledge仍不是完成结果，报告与实际工作效果各自成立。
 
 此driver仅以**一个真实enrolled LocalNode +own临时Project/Binding/root**展示：旧80先于新0，未ack重投不消失，ack之后才取另一个真实Assignment；两个同为0的候选以真实创建时间验证**近者先**。无效六个输入均实际400且SQL没有新票据。对未ack的低值 `pending`作业真正发出cancel后，先收到该停止意图；未报告前重复stop不自动消失，随后只有当前assignment的合法`cancelled+cancel_acknowledged:true` outbox report被接受，才把urgent推进。这里的取消是这一支未启动执行的事实链，**不是SDK active-job abort**。
 

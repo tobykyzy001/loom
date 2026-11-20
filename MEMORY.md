@@ -267,12 +267,19 @@
 
 ### 5.5.8 首次普通execute不能在Worker离线后领取
 
-- 模型任务之外，已签发且尚未ACK的普通票也会漏掉当前Worker offline：CTE曾按Lease/有效Grant继续返回`purpose=execute`并续租。现只在未ACK、running、未取消的execute候选**排序和LIMIT之前**排除该Worker的明确offline声明；原Ticket/Lease不续写，空poll不绝不代表取消或成功。stop/reconcile保留各自的权限与效果路径。
+- 模型任务之外，已签发且尚未ACK的普通票也会漏掉当前Worker offline：CTE曾按Lease/有效Grant继续返回`purpose=execute`并续租。现按原priority/order检查未ACK、running、未取消的候选，跳过该Worker的明确offline声明后才交付并续Lease，避免离线队头使后续有自身授权的候选也无法继续；原Ticket/Lease不续写，空poll不绝不代表取消或成功。stop/reconcile保留各自的权限与效果路径。
 - 离线头不能遮蔽另一个真正拥有独立Grant/Binding的健康候选，但离线原票不改发给standby。旧Ticket空installation显示不用于绕过其有效Grant所确定的真实安装；legacy空worker声明、通配、busy/degraded不另加时间过期规则。Rust用两组独立授权的候选全面复核。
 - 真Node `node tests/runner/task-priority.mjs` 已证approved、未ACK的正常领取之后，同一Node用真实heartbeat下线default：两次poll都为空，Ticket与Lease不变、executor和文件效果为零；恢复后仍是原Assignment，后续取消及真实失败/重试也成功。仍是单机logical Worker围栏，不是第二物理Host或全局公平调度证明。
 - 撤权STOP的错选是**独立旧缺陷**：第一次撤权先把同Grant的多个running票转`reconciling`，原始最新优先可让后建、未ACK的邻居盖住之前的真实ACK Assignment。已用无本次修改的clean HEAD `fe19e88` 再次复现`grant-revocation-fence.mjs`同错误，不能把它算给离线query，也不得忽略。`first_admitted_original_wins_revoke_over_later_unacknowledged_neighbours`与STOP排序独立另审另提交，不能用“ACK-only”误禁ACK未达但本地效果已发生的例外。
 
-### 6. 尚未解决、不要误判为已闭环的事项
+### 5.5.9 撤权STOP必须保留原ACK作业，也不得压住明确取消意图
+
+- 这是与离线execute独立的既有排序缺口：首次Grant revoke将该Grant的所有running Ticket改为`reconciling`，后建未ACK邻票按原`assignment_created_at DESC`遮住了先有真实ACK的原Assignment。duplicate revoke本身只读原v2/时间，不必等duplicate才出错。**不能把ACK解释成已开始执行或用ACK-only排除对账。**
+- 新STOP order明确为`cancel_requested=1 DESC, acknowledged_at IS NULL, assignment_created_at DESC`：有取消意图在前，已有ACK的原Assignment先于未ACK邻票，同类保持newest-first。cancel类别需显式DESC，SQL默认ASC会让明确cancel反而排在普通reconcile之后——真实priority test已经抓获，不靠文字逻辑推导。这里只改排序，不改Grant/Lease/reconcile资格。
+- 真实`grant-revocation-fence.mjs`保持原Assignment/lease、原revokedAt/v2及恰一条grant revoke audit；无ACK邻居不获停止/执行，0Report/Artifact/Effect、文件不变，重复Node撤权确认照旧fence。完整`revoke-after-local-effect.mjs`证实**本地已完成编辑但首ACK未达**仍按原有limit_unknown转reconcile、保留bytes及local effects、中央不补Admission；`kill-reconciliation`恢复真实Admission/bytes/一次file effect，document-pipeline cancelled center重开不复苏后续writer。
+- 同一笔（与db8f235分开）还需保留explicit cancel先于已ACK一般reconcile的负例。原`STOP_SELECTION_CONTROL`对照旧created_at选择邻票，并非把旧证物改为现实，生产新次序由真实router、原准入及审计记录实测。独立终审确认ACK不等于TaskStart，普通grant检查、unknown outcome与live claim不被一条order抬高。
+
+### 6. 尚未解决
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。
 - 真实自然语言/通用编程质量、通用代码工具与 Shell、外部 Provider/Live LLM、完整模型治理、通用 Pipeline/Reviewer/多 Harness。

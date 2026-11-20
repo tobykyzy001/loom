@@ -369,7 +369,7 @@ fn ordinary_execute_worker_offline(
 pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Value>> {
     crate::pipeline::advance_all(store)?;
     let stop = store.query(
-        &format!("{ELIGIBLE_ASSIGNMENTS} AND (status='reconciling' OR cancel_requested=1) ORDER BY assignment_created_at DESC LIMIT 1"),
+        &format!("{ELIGIBLE_ASSIGNMENTS} AND (status='reconciling' OR cancel_requested=1) ORDER BY cancel_requested=1 DESC, acknowledged_at IS NULL, assignment_created_at DESC LIMIT 1"),
         [node_id],
     )?;
     let assignment = if let Some(stop) = stop.into_iter().next() {
@@ -2762,6 +2762,50 @@ mod priority_tests {
     }
 
     #[test]
+    fn explicit_cancel_precedes_an_already_admitted_reconcile_candidate() {
+        let mut fixture = fixture();
+        insert_ticket(&fixture.store, "01", 0);
+        insert_ticket(&fixture.store, "02", 0);
+        let admitted = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted["ticket_id"], "02");
+        acknowledge(&fixture.store, &admitted);
+        let acknowledged = fixture
+            .store
+            .get("assignments", admitted["id"].as_str().unwrap())
+            .unwrap()
+            .expect("The acknowledged Assignment must still exist");
+        assert!(acknowledged["acknowledged_at"].is_string());
+        fixture
+            .store
+            .conn()
+            .execute("UPDATE tickets SET status='reconciling' WHERE id='02'", [])
+            .unwrap();
+        cancel(&fixture.store, "01").unwrap();
+        let stopped = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped["id"], "assignment-01", "An explicit cancellation must not be hidden by an unrelated acknowledged reconcile candidate");
+        assert_eq!(stopped["cancel_requested"], true);
+        assert_eq!(
+            fixture
+                .store
+                .get("assignments", admitted["id"].as_str().unwrap())
+                .unwrap()
+                .expect("Confirmed reconcile history must not vanish behind the explicit stop"),
+            acknowledged
+        );
+        for table in ["reports", "artifacts", "effects"] {
+            assert!(fixture
+                .store
+                .query(&format!("SELECT * FROM {table}"), [])
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
     fn stop_first_includes_acknowledged_and_first_delivery_pre_cancel() {
         for acknowledged in [true, false] {
             let mut fixture = fixture();
@@ -2804,6 +2848,7 @@ mod priority_tests {
 #[cfg(test)]
 mod revoked_assignment_tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -2824,6 +2869,10 @@ mod revoked_assignment_tests {
             store,
         }
     }
+
+    // Diagnostic-only SQL control proving the original ACK versus sibling rank.
+    // No Worker status, expected ticket status, report, or effect is manipulated.
+    const ORIGINAL_STOP_SUFFIX: &str = "AND (status='reconciling' OR cancel_requested=1) ORDER BY assignment_created_at DESC LIMIT 1";
 
     fn revoke_running(fixture: &Fixture, acknowledged: bool) {
         let at = crate::now();
@@ -3084,6 +3133,221 @@ mod revoked_assignment_tests {
             error.to_string().contains("Source stage is missing"),
             "{error:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn first_admitted_original_wins_revoke_over_later_unacknowledged_neighbours() {
+        const NODE_TOKEN: &str = "revoked-neighbour-node-token";
+        let fixture = fixture("edit_file");
+        let store = fixture.store;
+        store.conn().execute(
+            "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) VALUES('node','installation','fixture-public-key',?1,'online','[]','[{\"worker_id\":\"default\",\"status\":\"online\"}]','{}',?2,?2)",
+            params![crate::store::hash(NODE_TOKEN), crate::now()],
+        ).unwrap();
+        store
+            .set_setting(
+                "client_token_hash",
+                &crate::store::hash("unused-client-token-for-node-only"),
+            )
+            .unwrap();
+        store
+            .audit(
+                None,
+                "controller",
+                "fixture.prepared",
+                &json!({"scope":"owned unit fixture"}),
+            )
+            .unwrap();
+        let state = Arc::new(crate::api::State {
+            store: Arc::new(Mutex::new(store)),
+            bootstrap_token: "unused-client-token-for-node-only".into(),
+            bootstrap_token_written: false,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = Arc::clone(&state);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::api::router(server_state))
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let original = {
+            let mut store = state.lock().unwrap();
+            assignment_for_poll(&mut store, "node").unwrap().unwrap()
+        };
+        // A single real authenticated ACK is the only admission here. It does
+        // not stand in for an Assignment-start event or any work result.
+        let ack = client
+            .post(format!("http://{address}/api/v1/nodes/acknowledge"))
+            .bearer_auth(NODE_TOKEN)
+            .json(&json!({
+                "protocol":"loom.node.v1", "node_id":"node",
+                "installation_id":"installation", "request_id":"original-admission",
+                "ticket_id":original["ticket_id"], "assignment_id":original["id"],
+                "lease_epoch":original["lease_epoch"], "worker_id":original["worker_id"],
+                "accepted":true,
+                "reason":"", "cancel_requested":false, "cancellation":false,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ack.status(), 200);
+        assert_eq!(ack.json::<Value>().await.unwrap()["accepted"], true);
+
+        {
+            let store = state.lock().unwrap();
+            let original_row = store
+                .query(
+                    "SELECT created_at FROM assignments WHERE id='assignment'",
+                    [],
+                )
+                .unwrap()[0]["created_at"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let original_created = chrono::DateTime::parse_from_rfc3339(&original_row).unwrap();
+            let original_ack = store.get("assignments", "assignment").unwrap().unwrap()
+                ["acknowledged_at"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(crate::parse_time(&original_ack).is_ok());
+            for (index, neighbour) in ["ticket-neighbour-one", "ticket-neighbour-two"]
+                .into_iter()
+                .enumerate()
+            {
+                // Make only fixture creation times distinct, exactly as sequential
+                // HTTP ticket creation does. No expected ACK/status is manipulated.
+                let later =
+                    (original_created + chrono::Duration::seconds(index as i64 + 1)).to_rfc3339();
+                store.conn().execute(
+                    "INSERT INTO tickets(id,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,created_at,updated_at) SELECT ?1,project_id,objective,kind,relative_path,content,status,grant_id,grant_digest,node_id,installation_id,worker_id,attempt,?2,?2 FROM tickets WHERE id='ticket'",
+                    params![neighbour, &later],
+                ).unwrap();
+                store.conn().execute(
+                    "INSERT INTO assignments(id,ticket_id,node_id,worker_id,attempt,lease_id,lease_epoch,lease_expires_at,created_at) SELECT ?1 || '-assignment',id,node_id,worker_id,attempt,?1 || '-lease',attempt,?2,?2 FROM tickets WHERE id=?1",
+                    params![neighbour, &later],
+                ).unwrap();
+            }
+            let original_detail = store.detail("ticket").unwrap();
+            for table in ["reports", "artifacts", "effects"] {
+                assert_eq!(original_detail[table].as_array().unwrap().len(), 0);
+            }
+        }
+        let call_revoke = |request_id: &str| {
+            client
+                .post(format!("http://{address}/api/v1/grants/grant/revoke"))
+                .bearer_auth("unused-client-token-for-node-only")
+                .json(&json!({"request_id":request_id}))
+        };
+        let first = call_revoke("first-revoke").send().await.unwrap();
+        assert_eq!(first.status(), 200);
+        assert_eq!(first.json::<Value>().await.unwrap()["duplicate"], false);
+        let second = call_revoke("duplicate-revoke").send().await.unwrap();
+        assert_eq!(second.status(), 200);
+        assert_eq!(second.json::<Value>().await.unwrap()["duplicate"], true);
+        let current = {
+            let store = state.lock().unwrap();
+            store.query("SELECT a.id,a.ticket_id,a.acknowledged_at,a.created_at,a.lease_id,a.lease_epoch,t.status,t.cancel_requested,g.version,g.digest,g.revoked_at FROM assignments a JOIN tickets t ON t.id=a.ticket_id JOIN grants g ON g.id=t.grant_id ORDER BY a.rowid", []).unwrap()
+        };
+        let legacy = {
+            let store = state.lock().unwrap();
+            let query = format!("{ELIGIBLE_ASSIGNMENTS} {ORIGINAL_STOP_SUFFIX}");
+            let candidate = store.query(&query, ["node"]).unwrap();
+            assert_eq!(candidate.len(), 1);
+            assert_eq!(
+                candidate[0]["assignment_id"],
+                "ticket-neighbour-two-assignment"
+            );
+            // A proposal-only ORDER BY control, deliberately not applied here.
+            let proposed = query.replace(
+                "ORDER BY assignment_created_at DESC LIMIT 1",
+                "ORDER BY cancel_requested=1 DESC, acknowledged_at IS NULL, assignment_created_at DESC LIMIT 1",
+            );
+            (
+                candidate[0]["assignment_id"].clone(),
+                store.query(&proposed, ["node"]).unwrap()[0]["assignment_id"].clone(),
+            )
+        };
+        eprintln!(
+            "STOP_SELECTION_CONTROL original={} proposed={}",
+            legacy.0, legacy.1
+        );
+        let call_poll = || {
+            client.post(format!("http://{address}/api/v1/nodes/assignments/poll"))
+                .bearer_auth(NODE_TOKEN)
+                .json(&json!({"protocol":"loom.node.v1", "node_id":"node", "installation_id":"installation", "request_id":crate::id("poll"), "last_assignment_id":"assignment", "wait_seconds":0}))
+        };
+        let response = call_poll().send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let candidate = response.json::<Value>().await.unwrap()["assignment"].clone();
+        eprintln!(
+            "REVOKE_ORIGINAL expected={} actual={} legacy={} proposed={} all_rows={}",
+            original["id"],
+            candidate["id"],
+            legacy.0,
+            legacy.1,
+            Value::Array(current.clone())
+        );
+        assert_eq!(legacy.1, "assignment");
+        assert_eq!(candidate["id"], original["id"],
+            "only the original admitted Assignment is eligible; later unacknowledged siblings are not");
+        assert_eq!(candidate["ticket_id"], original["ticket_id"]);
+        assert_eq!(candidate["lease_id"], original["lease_id"]);
+        assert_eq!(candidate["lease_epoch"], original["lease_epoch"]);
+        assert_eq!(candidate["grant_digest"], original["grant_digest"]);
+        assert_eq!(candidate["purpose"], "reconcile");
+        assert_eq!(candidate["grant_version"], 1);
+        assert_eq!(candidate["grant"]["version"], 2);
+        assert!(candidate["grant"]["revoked_at"].is_string());
+        for _ in 0..2 {
+            let response = call_poll().send().await.unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["assignment"],
+                candidate
+            );
+        }
+        {
+            let store = state.lock().unwrap();
+            for neighbour in ["ticket-neighbour-one", "ticket-neighbour-two"] {
+                let sibling = store
+                    .get("assignments", &format!("{neighbour}-assignment"))
+                    .unwrap()
+                    .unwrap();
+                assert!(sibling["acknowledged_at"].is_null());
+                assert!(sibling["last_report_at"].is_null());
+                assert_eq!(store.detail(neighbour).unwrap()["status"], "reconciling");
+            }
+            for table in ["reports", "artifacts", "effects"] {
+                assert!(store
+                    .query(&format!("SELECT * FROM {table}"), [])
+                    .unwrap()
+                    .is_empty());
+            }
+            assert_eq!(
+                store
+                    .query(
+                        "SELECT COUNT(*) AS n FROM audits WHERE action='assignment.acknowledged'",
+                        []
+                    )
+                    .unwrap(),
+                [json!({"n":1})]
+            );
+            assert_eq!(
+                store
+                    .query(
+                        "SELECT COUNT(*) AS n FROM audits WHERE action='grant.revoked'",
+                        []
+                    )
+                    .unwrap(),
+                [json!({"n":1})]
+            );
+            assert!(store.verify_audit().unwrap());
+        }
+        server.abort();
+        let _ = server.await;
     }
 
     #[test]
