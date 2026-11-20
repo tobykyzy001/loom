@@ -16,6 +16,8 @@ pub struct CreateInput {
     schema: String,
     source: String,
     component: Component,
+    #[serde(default)]
+    package_manifest: Option<String>,
     targets: Vec<InventoryTarget>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -25,6 +27,8 @@ struct Component {
     version: String,
     sha256: String,
     source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_manifest_sha256: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -195,12 +199,24 @@ pub fn create(store: &Store, input: CreateInput) -> Result<Value> {
     if input.schema != SCHEMA || input.source != "explicit_admin_inventory_manifest" {
         bail!("The exact versioned synthetic Inventory source is required")
     }
+    if input.component.source_manifest_sha256.is_some() {
+        bail!("A source manifest digest is controller-derived, never a client-supplied approval")
+    }
+    let mut input = input;
+    let package_evidence = input
+        .package_manifest
+        .as_deref()
+        .map(crate::package_manifest::validate_local_package)
+        .transpose()?;
     if input.component.kind != "bare_host"
         || input.component.version != "0.1.0"
         || input.component.sha256 != DIGEST
         || input.component.source != "local_package_candidate"
     {
         bail!("Only the immutable current local Bare package candidate is admitted")
+    }
+    if let Some(verification) = package_evidence {
+        input.component.source_manifest_sha256 = Some(verification.source_manifest_sha256);
     }
     if input.targets.is_empty() || input.targets.len() > 4 {
         bail!("One through four explicit Inventory targets are required")

@@ -6,6 +6,19 @@ Run `node tests/install/plan.mjs` from the repository root. This starts an actua
 
 Rust coverage: `cargo test -p loom-concierge install_plan --locked`. The suite includes v6→v7→v8→v9→v10 ordered migration preserving Grant/Artifact/report lineage, plus preexisting v7 Grant and Skill candidates, no Task/Grant creation, duplicate/unknown-field rejection, unknown stability and disabled observation. This small slice is not an installer, a generic deployment controller or a platform support matrix.
 
+## Local package verification before a review plan
+
+```sh
+node tests/install/package-manifest.mjs
+node tests/install/browser.mjs
+```
+
+The first real HTTP driver takes the package produced by the existing native smoke, then supplies its existing `package_manifest` path alongside the unchanged `loom.install-plan.v1` component/targets. The controller performs a bounded read-only inspection of the exact manifest and its local bare binary: single-regular-file/link restrictions, bounded JSON/bytes, valid mode/size, matching SHA-256 and byte count, and the present thin Mach-O arm64 metadata. Strict JSON handling and the non-executable status constrain what can produce `pending_approval`; there is no execution, host registration or activation.
+
+The returned component keeps `component.sha256` and gains only controller-derived `source_manifest_sha256`, computed over the exact source manifest bytes. Neither the path nor a client-invented value is accepted as authority. Byte mutation, a wrong declared arch, multi-linked metadata or a falsified source digest are refused before plan creation, with no new Plan/Audit/Grant/Ticket and unchanged public snapshots. This is a **local read-time check** (currently Darwin arm64), not a signature or lasting package-existence guarantee. Subsequent execution still requires fresh independent byte and permission checks.
+
+The real Edge proof uses the actual built package plus the standard synthetic Inventory UI, then confirms that a protected refresh presents the controller-produced digest and “已核验本地manifest与binary（未安装）”. The source path is not published, frontend parser accepts only a 64-hex optional field and preserves missing-field legacy plans, and Ticket/Grant/Node collections are unchanged. This does not create a generic package registry, remote rollout, new secret access or a second Host.
+
 ## Actual Vue / Edge review flow
 
 `node tests/install/browser.mjs` launches its own actual Rust controller with the explicit simulation flag plus an isolated Vue/Edge profile. Through the visible UI and confirmation dialogs it creates a fixture-only plan, selects the incompatible Linux example, approves the current plan digest, records a fixture health failure, requests rollback using **the exact apply operation**, then reports that rollback using the newly assigned operation. A separately prepared pending fixture plan becomes `unknown` via an actual visible `connection_lost` confirmation; repeating that exact receipt is read-only and attempting a healthy reclassification is rejected. UI payload shapes are checked, and controller data must contain the real plan digest, current/rollback operation IDs, rollback parent and both separate observations. Ordinary tickets, grants and registered nodes remain unchanged.

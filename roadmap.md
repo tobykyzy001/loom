@@ -388,6 +388,10 @@ M1 Git项目目录已在生产Vue上超越“可注册但不可见”：`Project
 | Rust 跨平台 | 分别安装并运行覆盖平台矩阵的签名 Host 包，验证路径、进程、服务、凭据库和重启恢复；不把“编译成功”作为支持证据 |
 | DSH 节点无重复 Agent | 已有 DSH 的主机只安装并配对 DSH Loom Plugin，即能注册、执行和展示本地 Harness / 模型资源，不强制再安装 Rust Host Agent |
 
+**本机Bare Package已增加“从selected native manifest与binary，验证后才允许计划”的小步：** 管理员可通过现有`loom.install-plan.v1`的可选`package_manifest`绝对路径明确选包，原有component和没有路径时的digest请求完全不变。服务在创建任何plan/target之前，只读检查 strictly-small manifest、普通单link的固定本地文件、权限、实际字节数、SHA-256和当前 thin Mach-O arm64 头。`policy`/`checks`/`not_run`不被当作信任。`source_manifest_sha256`由控制器从原始 manifest bytes计算，**不保存到公开原路径，也不能由客户端指定或重写**；其出现不代表signature/注册/正在安装/未来不变。
+
+实际driver验证真正复制的native Bare包、仅 amend单字节、错误arch、multi-linked manifest及客户端自填digest。拒绝发生在新plan/Audit/Grant/Ticket之前，已有合法plan和其它公开记录全集保持不变。真实Edge也通过已有审批/回滚/unknown流程并额外显示此唯一只读 hash和未安装说明，固定legacy类型字段解析严格64 hex识别，不授予新执行方式。这补的是M2本地候选Package的**当前读取证据**，不是实现跨Host部署或第二物理机器。入口 `node tests/install/package-manifest.mjs` 与 `node tests/install/browser.mjs`，实际manifest格式与来源见 [BARE_PACKAGE](docs/BARE_PACKAGE.md)。
+
 **进入 M3 的证据**
 
 至少两类不同载荷的任务完成双机测试，并完成断线、重连、过期租约、重复回调和未知结果故障注入。选择性安装必须通过一个官方 Host Agent / Adapter 包在部分目标上的部署、失败回滚和权限测试；在 macOS 之外至少通过一类 Linux 或 Windows Host 验证，另一个桌面系统保留为后续明确验收项。跨机成功、编译成功或安装演示本身不足以通过。

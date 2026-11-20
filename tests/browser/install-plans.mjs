@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 
 const appRoot = fileURLToPath(new URL('../../apps/web/', import.meta.url))
 
@@ -245,6 +247,45 @@ export async function verifyInstallPlansBrowser({ server, admin, root }) {
     assert.equal(await page.locator('#client-token').count(), 0)
     output.viewport = { width: 390, no_horizontal_overflow: true, mobile_navigation_accessible: true }
     output.recovery = { same_persisted_plans_after_page_reload: true, previous_rollback_observations_count: 2, unknown_still_no_retry: true, service_restart_proven_separately: 'node tests/install/plan.mjs' }
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      // Only let a package with current native bytes be read by the controller;
+      // this does not execute the candidate or make it a registered Host.
+      const repository = fileURLToPath(new URL('../../', import.meta.url))
+      const rawBuild = await promisify(execFile)('node', ['scripts/bare-package-smoke.mjs'], { cwd: repository, timeout: 120000, maxBuffer: 2 * 1024 * 1024 })
+      const lastBrace = rawBuild.stdout.lastIndexOf('\n{')
+      assert.ok(lastBrace >= 0, rawBuild.stdout)
+      const nativeProof = JSON.parse(rawBuild.stdout.slice(lastBrace + 1))
+      assert.equal(nativeProof.overall, 'PASS')
+      const manifestPath = resolve(dirname(nativeProof.report_path), nativeProof.package_relative)
+      const validatedPlan = await request('/api/v1/install-plans', {
+        ...createdBody,
+        targets: createdBody.targets.filter(host => host.host_key === 'fixture-darwin'),
+        package_manifest: manifestPath,
+      })
+      const manifestDigest = validatedPlan.plan.component.source_manifest_sha256
+      assert.match(manifestDigest, /^[a-f0-9]{64}$/)
+      assert.equal(validatedPlan.plan.component.sha256, createdBody.component.sha256)
+      assert.equal(validatedPlan.plan.host_execution, false)
+      assert.equal(validatedPlan.plan.targets[0].status, 'pending_approval')
+      await page.locator('.install-plans-view').getByRole('button', { name: '刷新', exact: true }).click()
+      const manifestCard = page.locator(`[data-plan-id="${validatedPlan.plan.id}"]`)
+      await manifestCard.waitFor()
+      assert.match(await manifestCard.innerText(), /本地manifest与binary已只读核验（未安装）/)
+      assert.ok((await manifestCard.innerText()).includes(manifestDigest))
+      assert.match(await manifestCard.innerText(), /不是将来的持续安装或权限证明/)
+      assert.equal(JSON.stringify(validatedPlan).includes(manifestPath), false)
+      assert.deepEqual(await Promise.all([read('/api/v1/tickets'), read('/api/v1/grants'), read('/api/v1/nodes')]), [beforeTickets, beforeGrants, beforeNodes])
+      output.package_verification = {
+        locally_verified_bytes: true,
+        manifest_sha256: manifestDigest,
+        native_binary_executed: false,
+        registration_or_installation: false,
+        plan_state: 'pending_approval',
+        source_path_not_public: true,
+      }
+    } else {
+      output.package_verification = { status: 'NOT RUN: current build/cpu proof is limited to darwin arm64' }
+    }
     assert.deepEqual(errors, [], `Browser errors: ${errors.join(' | ')}`)
     await writeFile(evidencePath, JSON.stringify({ ...output, screenshots: screenshotPaths, result: 'PASS' }, null, 2), { mode: 0o600 })
     console.log(`INSTALL_PLANS_BROWSER_PASS ${evidencePath}`)

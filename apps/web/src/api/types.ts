@@ -469,6 +469,7 @@ export interface InstallComponent {
   version: string
   sha256: string
   source: 'local_package_candidate' | string
+  source_manifest_sha256?: string
 }
 export interface InstallPlan {
   id: string

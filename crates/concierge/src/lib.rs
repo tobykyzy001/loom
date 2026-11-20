@@ -14,6 +14,7 @@ mod model_observation;
 mod model_registry;
 mod node_api;
 mod observation_input;
+mod package_manifest;
 pub mod pipeline;
 mod skill_replay;
 pub mod source_events;

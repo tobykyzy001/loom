@@ -61,6 +61,24 @@ describe('controlled synthetic Inventory manifest and response boundaries', () =
     expect(action.list).toBeDefined()
   })
 
+  it('accepts only controller-derived local package evidence and never turns it into install status', async () => {
+    const verified = plan()
+    const source_manifest_sha256 = 'a'.repeat(64)
+    verified.component.source_manifest_sha256 = source_manifest_sha256
+    expect(readInstallPlan(response(verified))?.plan.component.source_manifest_sha256).toBe(source_manifest_sha256)
+    const html = await render([verified])
+    expect(html).toContain('本地manifest与binary已只读核验（未安装）')
+    expect(html).toContain(`manifest SHA-256: ${source_manifest_sha256}`)
+    expect(html).toContain('不是将来的持续安装或权限证明')
+    expect((html.match(/审阅此目标的 apply/g) ?? []).length).toBe(1)
+    expect(readInstallPlan(response(plan()))?.plan.component.source_manifest_sha256).toBeUndefined()
+    for (const bad of ['not-a-hash', `${source_manifest_sha256}\n`, `${source_manifest_sha256}0`, null, 1]) {
+      const mutated = plan()
+      Object.assign(mutated.component, { source_manifest_sha256: bad })
+      expect(readInstallPlan(response(mutated))).toBeNull()
+    }
+  })
+
   it('keeps unknown terminal and disables manual observation when the server has no fixture switch', async () => {
     const unknown = await render([plan([target('unknown', { current_operation_id: 'installop-unknown' })])])
     expect(unknown).toContain('未知—需具名取证对账，不会自动重试')

@@ -48,6 +48,7 @@ export function readInstallPlan(value: unknown): InstallPlanData | null {
   if (!/^[a-f0-9]{64}$/.test(plan.plan_digest) || !Array.isArray(plan.targets) || plan.targets.length < 1 || plan.targets.length > 4 || plan.targets.some(target => !isTarget(target))) return null
   const component = plan.component
   if (!component || component.kind !== fixtureComponent.kind || component.version !== fixtureComponent.version || component.sha256 !== fixtureComponent.sha256 || component.source !== fixtureComponent.source) return null
+  if (component.source_manifest_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(component.source_manifest_sha256)) return null
   return { plan, policy }
 }
 function assertSelection(selected: string[]) {

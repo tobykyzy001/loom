@@ -50,6 +50,7 @@ function operationType(target: InstallTarget): 'apply' | 'rollback' | null {
     <article v-for="plan in plans" :key="plan.id" class="card install-plan-card" :data-plan-id="plan.id" :data-plan-digest="plan.plan_digest">
       <div class="plan-card-heading"><div><span class="eyebrow">合成审阅 · 非真机部署</span><h2>{{ plan.id }}</h2></div><span class="status-badge neutral">v{{ plan.version }} · {{ plan.proof_kind }}</span></div>
       <p class="plan-provenance">{{ plan.source }} · {{ plan.authorization_revision }}</p>
+      <dl v-if="plan.component.source_manifest_sha256" class="plan-digest"><dt>本地manifest与binary已只读核验（未安装）</dt><dd class="wrap-value">manifest SHA-256: {{ plan.component.source_manifest_sha256 }}。这是创建时bytes与Mach-O arm64的对应，不是将来的持续安装或权限证明。</dd></dl>
       <dl class="plan-digest"><dt>不可变计划摘要</dt><dd class="wrap-value">{{ plan.plan_digest }}</dd></dl>
       <div class="install-targets"><article v-for="target in plan.targets" :key="target.id" class="install-target" :data-target-id="target.id" :data-status="target.status">
         <div class="target-heading"><div><h3>{{ target.host_key }} <span class="muted small">{{ target.os }}/{{ target.arch }}</span></h3><code class="target-id wrap-value">{{ target.id }}</code></div><span class="status-badge" :class="mode(target.status)">{{ installStatusText(target.status) }}</span></div>

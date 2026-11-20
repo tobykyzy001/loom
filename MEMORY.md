@@ -289,6 +289,14 @@
 - `tests/install/plan.mjs`原在真实doctor验证schema 16后仍把最终通过报告写成schema 15。现直接使用`persistence.schema_version`，同时README区分底层store schema 16与不随它升级的`loom.install-plan.v1`协议。`tests/runner/node-event-receipt.mjs`也改为从自有数据库`PRAGMA user_version`取数，而非固定15。
 - 这两个实际driver都已重新通过；Unknown/回滚/事件回执语义没有随之扩展。这类一致性修复不是新迁移、包安装或权限提权，不能把“用了新版本号”当新母宿能力。新增package真实核验另行叙述，避免把原始report里的错旧schema标签混入同一份metadata凭证。
 
+### 5.5.12 在审批前只读核实本地Package manifest与binary
+
+- 现有安装计划仅依据静态Bare描述符与fixture Inventory；新增可选`package_manifest`绝对路径，不将其视作签名或全新安装器。创建ID前，controller读取既有`loom.bare-host-package.v1`及同目录./loom-node，严格检查普通单link文件、大小/模式/byte count/SHA和thin Mach-O arm64，错误shape、篡改bytes或不匹配arch均拒绝。无 path请求的请求字节与digest定义仍不变，没有 getRoot/API自动探源。任何实际执行仍需后续独立bytes及Grant验证。
+- `source_manifest_sha256`只能由controller按读取到的manifest原始字节计算，不接受客户端口述或补造安装authority。不是pseudo grant；不公开manifest路径、其来源配置或将来不变性承诺。它步进在id/target/save前，失败时完整快照 原Plan/Audit/Grant/Ticket保持。
+- 实际`node tests/install/package-manifest.mjs`用smoke native复制的package，验证新digest产生，篡改一个字节、错误arch、硬链接及自报digest都保留原全部证据集合且零新Ticket/Grant。`node tests/install/browser.mjs`也在原本apply/rollback/Unknown后继续读取真实包，界面显示“本地manifest与binary只读核验（未安装）”，前端只接受64位hex且允许legacy缺字段。此次推出并未执行bare binary、连接DSH Profile或安装另一个物理Host。
+
+- **这次也不能把同一owner目录上的母/子文件 fd 误当一次永久一致的原子读取。** 经审查发现：即使最末path又恢复同一对象，中间open可能已混入另一目录。现以原有目录fd执行`openat(fd,"loom-node")`，后代Bytes的header、SHA及长度/mode均取自已所开child fd，并在读取前后比较descriptor的ino/dev；**目录句柄/名称entity当前不一致时 reject**。固定[`package_manifest.rs`](crates/concierge/src/package_manifest.rs)类posixowner纹理，仍不把此上纲 为任意Rust类型的恶意包沙盒。这次还补上了同包A/B真实目录交换检查：openat仍取原有A字节，变换后的path则验证失败，**目录身份不能偷偷改变**。以后执行仍需再次读取新bytes及授权，不宣称不限于父目录仍指旧Object的一部派 。
+
 ### 6. 尚未解决
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。
