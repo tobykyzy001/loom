@@ -205,6 +205,13 @@
 
 - 新增和更新实际入口为`node scripts/document-pipeline.mjs`、`node tests/direct/loopback-handoff.mjs`，范围见 [pipeline](tests/pipeline/README.md)。现有新调度的`Grant/Binding/current epoch/root`继续原条职责，这项终态归并不扩展为物理第二台、任意DAG或global stop guarantee。
 
+### 5.5.4 常态普通报告失败的后续续传
+
+- **先实证、没有为臆测做工法。** 此前只看到中心正常poll不再发已ACK作业时，可能误以为pending Report无法重投。实际`once()`在没有Assignment时也进入`dispatch_outbox()`，已获取准入的原作业根本不会因poll为空就停止发送其到期的证据。新的独立入口 `node tests/runner/normal-report-retry.mjs`证明了这条普通闭环，无需再加协议或branch。
+- 本机固定`read_summary`产生一份实际读取Artifact，先把真实ACK及Artifact交给Concierge，然后**首笔Report在上游之前**由代理返回503。第一次native退出时只有这条pending report，真实计数为`ack=1/artifact=1/report=effect=0`，report receipt也为0；`attempts=1`，持久`next_attempt_at`未过期。等到这个调度到期而不改SQL/请求体，以同一Native/State/Grant另启CLI；空sameNode polling虽返回`assignment:null`，其后 auto dispatch把**同一原Report**送上Controller，产生一个原request ID的报告以及一个confirmed Effect，整座Ticket变为succeeded。
+- 最后只有恰一个普通Admission/Ack audit、一件Artifact、一份Report和一件Effect，原Grant/lease、SHA、source/read bytes/ledger ID不变；客户端orig_report UUID与中控新建Report UUID分开，真实数据库`payload_digest`与原body相同。第一CLI和reopen 都自然退出，期间无另一次Read操作/普通ACK或Artifact上传，完成后再做sameNode零等待poll仍为空。这是对新真实501/503失败的恢复，**不把空poll当成权 限撤销或递增执行**。
+- 这个经济型partial checkpoint不扩展为**中央已接Report后回执丢失**、未ACK硬停、Lease revocation/cancel、其它OS/Harness/Host、移动或全过 程global exactly-once；这些各有自己的证明限制。全部workspace的确定性回归与独立审查已另行通过，只有真实探针和维护文档需要增加，生产无需为下一里程碑制造一个不存在的缺陷。
+
 ### 5.5.3 首ACK未达后撤Grant：只允许能证明原效果的恢复
 
 - `node tests/runner/revoke-after-local-effect.mjs`已实证缺口：真实编辑已落盘后扣住第一普通ACK，管理员撤Grant让原Grant从v1变为当前撤销的v2、原lease失效、Ticket进入reconciling，随后放行原ACK得到真实`409 outcome_unknown`；此时本地两个outbox/file effect确定了成果，但旧SQL只让已经ack的Assignment进入停帧，没ack的作品永远是null poll。现在中央只给这类**固定edit_file、尚未报告、cancel=false、同Grant digest/attempt lease epoch、正确root/binding/node** 的原Assignment `purpose=reconcile`，**不再次续租、让旧Grant复活** 或开新执行。

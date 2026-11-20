@@ -60,6 +60,14 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 
 **交付结构和其依赖也已实证。** `NodeClient.deliver`不再把任意HTTP 200当作 Artifact/Report已收：Artifact要求response的UUID与本地outbox完全相同；Report需要accepted:true，任何顶层error envelope均拒收。原始在库首次 Artifact返回无accepted flag也不强行补造duplicate/freshness字段，因此符合已有服务端响应。原`once`即使HOLD了坏artifact回执，仍可能光凭本地outcome扩散为`Tick::Succeeded`；现在向调用方传播实际永久transport rejection，而不是让decoy outcome掩盖投递失败。发生不可重试失败时，**与该处理中的Artifact同assignment的Report也必须hold**，不能被队列"允许独立作业继续"偷渡此因果断裂；独立Assignment仍保留正常通行。新增负例分别用不同UUID以及accepted:false验证原body不被改写、controller层`dispatched=success`不会假完成；恢复正确响应和due timestamp**只是本地测试拥有的重试调度**，之后每个原body的往返id不变、file effect仍一份。Loopback不是真实Concierge持久记录的替代，正向流程以真实Rust bare读写与Native Descriptor注册的通过为伴。另有**同Host、同有效readGrant/root下**的真实A/B作业验证：A使Artifact ID失配时，自身两份pending body均保持HOLD；B用独立Ticket/Assignment/Lease实际`read_summary`，**单独各自一次artifact与report HTTP**。这使得依赖暂保不再只是单一作业的解析。B的新目录包含 一项bin+一项effect ledger，A没有被重复执行，cdn主体/owner及其原始关系仍一致。该文档提及的当前总量是**11/11**，同一主机逻辑作业隔离，非第二物理Host或新Grant声明。
 
+## 已有Admission，普通Report失败后的重开续传
+
+运行 `node tests/runner/normal-report-retry.mjs`。此入口是**现有Native实现的独立实证**，不是新增恢复协议或生产补丁。一个真实Native installation、原ProjectBinding与一个只读Grant，对自有Project中的`input.txt`完成固定 `read_summary`，受控代理先让**真正的ACK与Artifact到达Rust Concierge**，随后在首笔**Report**未到上游前返回503。首个CLI退出前本地只剩该pending Report（`attempts=1`与有效`next_attempt_at`），中央恰有持久Admission和一件Artifact，而 **Report/Effect/对应report receipt均为0**。这里使用真实受控网络拒绝，不以SQL制造“尚未完成”。
+
+测试等自有私有的调度时间实际到期，原Report body和deferred effect不变。真实同Node authorization的零等待poll返回`assignment:null`，说明不再另发工作；但这**不等于已收到准入的outbox停止续传**。相同Native身份、state与Grant再次正常执行`--once`时，当前 `once()`的空poll分支接待到期outbox，按原Assignment/Grant/epoch再将同一Report交给中心。最后在受保护Ticket中恰为**一件Admission、一件Artifact、一份成功Report与一份confirmed Effect**，原ACK timestamp保持，只有原一个准入audit。原Artifact UUID/SHA、request/effect ID、文件ledger及源bytes都不变，中心形成单一的Report receipt，且后续真实poll仍为空。没有第二个新Assignment、读取或文件操作。
+
+验证同时比较输入SHA/字节，本地唯一binary/effect files、报告请求体/真实payload digest、最终状态与audit链。`admin`与Node token分别使用；证据只保留公开身份、scope、hash与交付字段，不写authentication header、private key或机密。**空poll并非没有已经准备好的原证据**，与尚未取得Admission时必须先走原生准入的场景不同。这个单一503失败早于首Report接收，不宣称覆盖中央已接收报告后丢失响应（另见`real-receipt-replay.mjs`的不同栈和场景），也不覆盖timeout之后的Lease/Grant撤权、移动真机、Windows/Linux/其他物理Host恢复。首个CLI与恢复CLI均真实自然退出，等待/代理/中心清理或同源0600结果写入失败都会使测试失败。
+
 ## 已发生本地文件效果但普通ACK未达时撤权：证据级恢复
 
 运行 `node tests/runner/revoke-after-local-effect.mjs`。真实CLI使用独立身份注册至自己的Rust Concierge，沿用精确ProjectBinding与一个read/write Grant完成固定`edit_file`写入。代理在**私有completion和两条原始outbox落盘后**扣住首个普通ACK，先验证真实文件、两个本地证据体、中心ACK/Artifact/Report/Effect和普通准入审计全为0；随后管理员**真实撤Grant**，让Grant v1变v2、原Lease失效、Ticket进入reconciling。原ACK只在此时放行一次，真实中心返回`409 outcome_unknown`。
