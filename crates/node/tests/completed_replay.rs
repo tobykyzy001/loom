@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 const TOKEN: &str = "owned-loopback-native-replay-token";
 const ASSIGNMENT: &str = "asg_native_replay";
+type StateDamageCase = (&'static str, fn(&mut Value));
 
 #[derive(Clone)]
 struct Call {
@@ -215,6 +216,16 @@ fn role_packet(identity: &Identity, project: &Path, cancelled: bool) -> Value {
             "version":1,"digest":grant_digest,"project_binding_id":"binding_native_replay",
             "created_at":chrono::Utc::now().to_rfc3339(),"revoked_at":null,"project_root":project},
         "resource":binding})
+}
+
+fn revoked_assignment(raw: &mut Value) {
+    raw["status"] = json!("reconciling");
+    raw["purpose"] = json!("reconcile");
+    raw["cancel_requested"] = json!(false);
+    raw["grant_status"] = json!(false);
+    raw["lease_expires_at"] = json!("2000-01-01T00:00:00Z");
+    raw["grant"]["version"] = json!(2);
+    raw["grant"]["revoked_at"] = json!(chrono::Utc::now().to_rfc3339());
 }
 
 impl Fixture {
@@ -421,6 +432,315 @@ impl Fixture {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_revoked_reconcile_frame_without_local_completion_never_starts_the_edit() {
+    let mut fixture = Fixture::new(true).await;
+    fixture.original["status"] = json!("reconciling");
+    fixture.original["cancel_requested"] = json!(false);
+    fixture.original["purpose"] = json!("reconcile");
+    fixture.original["grant_status"] = json!(false);
+    fixture.original["lease_expires_at"] = json!("2000-01-01T00:00:00Z");
+    fixture.original["grant"]["version"] = json!(2);
+    fixture.original["grant"]["revoked_at"] = json!(chrono::Utc::now().to_rfc3339());
+    let before = std::fs::read(fixture.project.join("README.md")).unwrap();
+    fixture.server.delivery_attempts.store(1, Ordering::SeqCst);
+    let status = fixture.tick(fixture.original.clone()).await.unwrap();
+    assert!(matches!(status, TickStatus::Rejected));
+    assert_eq!(
+        std::fs::read(fixture.project.join("README.md")).unwrap(),
+        before
+    );
+    assert!(fixture.ordinary_admissions().is_empty());
+    assert!(
+        fixture
+            .server
+            .calls("/acknowledge")
+            .into_iter()
+            .all(|body| body.get("wait_seconds").is_some()),
+        "an unexecuted revoked reconciliation must not request any assignment admission"
+    );
+    assert!(fixture.server.calls("/artifacts").is_empty());
+    assert_eq!(fixture.actual_reports().len(), 1);
+    assert_eq!(fixture.actual_reports()[0]["state"], "unknown");
+    assert!(std::fs::read_dir(&fixture.artifacts)
+        .unwrap()
+        .next()
+        .is_none());
+    let history = fixture.history();
+    assert_eq!(history["completion"]["state"], "unknown");
+    assert_eq!(history["active_assignment_id"], Value::Null);
+}
+
+#[tokio::test]
+async fn revoke_with_outbox_but_no_completion_retains_evidence_without_any_ack() {
+    let mut fixture = Fixture::new(true).await;
+    fixture.original["cancel_requested"] = json!(false);
+    fixture.original["status"] = json!("running");
+    fixture.original["content"] = json!("a durable file effect without a saved completion\n");
+    *fixture.server.acknowledgement.lock().unwrap() = Some(json!({
+        "accepted":false,"acknowledged_at":"2026-01-01T00:00:00Z"
+    }));
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let mut stored: Value =
+        serde_json::from_slice(&std::fs::read(fixture.state.join("node-state.json")).unwrap())
+            .unwrap();
+    stored["completions"] = json!({});
+    atomic_json(&fixture.state.join("node-state.json"), &stored).unwrap();
+    let damaged = fixture.history();
+    let file = std::fs::read(fixture.project.join("README.md")).unwrap();
+    let calls = fixture.server.calls.lock().unwrap().len();
+    fixture.original["status"] = json!("reconciling");
+    fixture.original["purpose"] = json!("reconcile");
+    fixture.original["grant_status"] = json!(false);
+    fixture.original["lease_expires_at"] = json!("2000-01-01T00:00:00Z");
+    fixture.original["grant"]["version"] = json!(2);
+    fixture.original["grant"]["revoked_at"] = json!(chrono::Utc::now().to_rfc3339());
+    assert!(fixture.tick(fixture.original.clone()).await.is_err());
+    assert_eq!(fixture.history(), damaged);
+    assert_eq!(
+        std::fs::read(fixture.project.join("README.md")).unwrap(),
+        file
+    );
+    let after = fixture.server.calls.lock().unwrap();
+    let new_calls = after.iter().skip(calls).collect::<Vec<_>>();
+    assert_eq!(
+        new_calls.len(),
+        2,
+        "only a heartbeat and the reconcile poll are needed"
+    );
+    assert!(new_calls
+        .iter()
+        .all(|call| call.path.ends_with("/heartbeat") || call.path.ends_with("/assignments/poll")));
+}
+
+#[tokio::test]
+async fn revoked_recovery_requires_one_original_report_and_a_matching_effect_chain() {
+    let damages: Vec<StateDamageCase> = vec![
+        ("missing-original-report", |state| {
+            state["outbox"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|item| item["kind"] == "artifact");
+        }),
+        ("wrong-body-digest", |state| {
+            let report = state["outbox"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| item["kind"] == "report")
+                .unwrap();
+            report["digest"] = json!("0".repeat(64));
+        }),
+        ("duplicate-original-report", |state| {
+            let duplicate = state["outbox"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["kind"] == "report")
+                .unwrap()
+                .clone();
+            state["outbox"].as_array_mut().unwrap().push(duplicate);
+        }),
+        ("wrong-original-epoch", |state| {
+            let report = state["outbox"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| item["kind"] == "report")
+                .unwrap();
+            report["body"]["lease_epoch"] = json!(2);
+            let digest = digest_json(&report["body"]);
+            report["digest"] = json!(digest);
+        }),
+        ("wrong-original-effect", |state| {
+            let report = state["outbox"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|item| item["kind"] == "report")
+                .unwrap();
+            report["body"]["effects"][0]["effect_id"] = json!(uuid::Uuid::new_v4());
+            let digest = digest_json(&report["body"]);
+            report["digest"] = json!(digest);
+        }),
+    ];
+    for (case, damage) in damages {
+        let mut fixture = Fixture::new(true).await;
+        fixture.original["cancel_requested"] = json!(false);
+        fixture.original["status"] = json!("running");
+        fixture.original["content"] = json!("already durable before revocation\n");
+        *fixture.server.acknowledgement.lock().unwrap() = Some(json!({
+            "accepted":false,"acknowledged_at":"2026-01-01T00:00:00Z"
+        }));
+        assert!(matches!(
+            fixture.tick(fixture.original.clone()).await.unwrap(),
+            TickStatus::Deferred
+        ));
+        assert_eq!(fixture.ordinary_admissions().len(), 1);
+        assert!(fixture.actual_reports().is_empty());
+        let original_history = fixture.history();
+        assert_eq!(original_history["completion"]["state"], "succeeded");
+        assert_eq!(original_history["outbox"].as_array().unwrap().len(), 2);
+        let mut stored: Value =
+            serde_json::from_slice(&std::fs::read(fixture.state.join("node-state.json")).unwrap())
+                .unwrap();
+        damage(&mut stored);
+        atomic_json(&fixture.state.join("node-state.json"), &stored).unwrap();
+        let damaged_history = fixture.history();
+        assert_eq!(
+            damaged_history["completion"],
+            original_history["completion"]
+        );
+        let original_file = std::fs::read(fixture.project.join("README.md")).unwrap();
+
+        fixture.original["status"] = json!("reconciling");
+        fixture.original["purpose"] = json!("reconcile");
+        fixture.original["grant_status"] = json!(false);
+        fixture.original["lease_expires_at"] = json!("2000-01-01T00:00:00Z");
+        fixture.original["grant"]["version"] = json!(2);
+        fixture.original["grant"]["revoked_at"] = json!(chrono::Utc::now().to_rfc3339());
+        let failed = fixture.tick(fixture.original.clone()).await;
+        assert!(
+            failed.is_err(),
+            "{case}: mismatched local evidence must fail closed"
+        );
+        assert_eq!(
+            fixture.history(),
+            damaged_history,
+            "{case}: private state remains unchanged after reject"
+        );
+        assert_eq!(
+            std::fs::read(fixture.project.join("README.md")).unwrap(),
+            original_file,
+            "{case}: no second file effect"
+        );
+        assert_eq!(
+            fixture.ordinary_admissions().len(),
+            1,
+            "{case}: no new ordinary ACK"
+        );
+        assert!(
+            fixture.actual_reports().is_empty(),
+            "{case}: no ghost or replacement Report"
+        );
+        assert!(
+            fixture.server.calls("/artifacts").is_empty(),
+            "{case}: no normal Artifact delivery"
+        );
+    }
+}
+
+#[tokio::test]
+async fn converted_unknown_can_retry_only_with_the_verified_original_effect_chain() {
+    let mut fixture = Fixture::new(true).await;
+    fixture.original["cancel_requested"] = json!(false);
+    fixture.original["status"] = json!("running");
+    fixture.original["content"] = json!("one actual write, then a revoked authority\n");
+    *fixture.server.acknowledgement.lock().unwrap() = Some(json!({
+        "accepted":false,"acknowledged_at":"2026-01-01T00:00:00Z"
+    }));
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let file = std::fs::read(fixture.project.join("README.md")).unwrap();
+    revoked_assignment(&mut fixture.original);
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let failed = fixture.actual_reports();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["state"], "unknown");
+    assert_eq!(failed[0]["evidence"][0]["kind"], "grant_revoked");
+    assert_eq!(fixture.ordinary_admissions().len(), 1);
+    assert!(fixture.server.calls("/artifacts").is_empty());
+
+    // Advance only the test-owned retry schedule before the real StateStore is
+    // reopened. Report bytes, IDs and completions remain those from the failure.
+    let mut stored: Value =
+        serde_json::from_slice(&std::fs::read(fixture.state.join("node-state.json")).unwrap())
+            .unwrap();
+    let report = stored["outbox"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| item["kind"] == "report")
+        .unwrap();
+    report["next_attempt_at"] = json!("2000-01-01T00:00:00Z");
+    atomic_json(&fixture.state.join("node-state.json"), &stored).unwrap();
+    let pending = fixture.history();
+    assert_eq!(pending["completion"]["state"], "unknown");
+    assert_eq!(
+        pending["completion"]["evidence"][0]["kind"],
+        "grant_revoked"
+    );
+    assert_eq!(pending["outbox"].as_array().unwrap().len(), 2);
+    assert!(matches!(
+        fixture.tick(fixture.original.clone()).await.unwrap(),
+        TickStatus::Deferred
+    ));
+    let delivered = fixture.actual_reports();
+    assert_eq!(delivered.len(), 2);
+    assert_eq!(delivered[0], delivered[1]);
+    assert_eq!(fixture.ordinary_admissions().len(), 1);
+    assert!(fixture.server.calls("/artifacts").is_empty());
+    assert_eq!(
+        std::fs::read(fixture.project.join("README.md")).unwrap(),
+        file
+    );
+    let history = fixture.history();
+    assert_eq!(history["completion"], pending["completion"]);
+    assert_eq!(history["assignment"]["purpose"], "reconcile");
+    assert_eq!(history["assignment"]["grant"]["version"], 2);
+    assert_eq!(history["outbox"].as_array().unwrap().len(), 1);
+    assert_eq!(history["outbox"][0]["kind"], "artifact");
+}
+
+#[tokio::test]
+async fn an_original_restart_unknown_cannot_be_reused_as_a_verified_success_conversion() {
+    let mut fixture = Fixture::new(true).await;
+    fixture.original["cancel_requested"] = json!(false);
+    fixture.original["status"] = json!("running");
+    let identity = Identity::open(&fixture.state).unwrap();
+    let first_assignment = Assignment::decode(
+        &fixture.original,
+        &identity.node_id,
+        &identity.installation_id,
+        &fixture.project,
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let mut state = StateStore::open(&fixture.state).unwrap();
+    assert!(state.start(&first_assignment).unwrap().is_none());
+    drop(state);
+    let original_file = std::fs::read(fixture.project.join("README.md")).unwrap();
+    // Opening the same actual Native state after a pending assignment stops the
+    // old runner path now produces a genuine restart recovery evidence report.
+    drop(fixture.runner().await);
+    let recovered = fixture.history();
+    assert_eq!(recovered["completion"]["state"], "unknown");
+    assert_eq!(recovered["outbox"].as_array().unwrap().len(), 1);
+    assert_eq!(recovered["outbox"][0]["kind"], "report");
+    assert_eq!(
+        recovered["outbox"][0]["body"]["evidence"][0]["kind"],
+        "restart_recovery"
+    );
+    revoked_assignment(&mut fixture.original);
+    assert!(fixture.tick(fixture.original.clone()).await.is_err());
+    assert_eq!(fixture.history(), recovered);
+    assert!(fixture.actual_reports().is_empty());
+    assert!(fixture.server.calls("/artifacts").is_empty());
+    assert!(fixture.ordinary_admissions().is_empty());
+    assert_eq!(
+        std::fs::read(fixture.project.join("README.md")).unwrap(),
+        original_file
+    );
 }
 
 #[tokio::test]

@@ -101,11 +101,7 @@ impl StateStore {
         if !matches!(kind, "artifact" | "report") {
             bail!("unsupported durable outbox kind");
         }
-        let mut logical = body.clone();
-        if let Some(object) = logical.as_object_mut() {
-            object.insert("sent_at".into(), Value::Null);
-        }
-        let digest = digest_json(&logical);
+        let digest = outbox_body_digest(&body);
         if self
             .data
             .outbox
@@ -276,12 +272,327 @@ impl StateStore {
         Ok(changed)
     }
 
+    /// Revoked recovery is scoped evidence, not another execution permission.
+    /// Before any mutation, tie this completion to exactly one original Report.
+    /// Missing, duplicate or unrelated history is retained on disk and refused.
+    pub fn record_revocation_race(&mut self, assignment: &crate::wire::Assignment) -> Result<bool> {
+        let id = &assignment.id;
+        if self
+            .data
+            .outbox
+            .iter()
+            .filter(|item| item.kind == "report" && item.body["assignment_id"] == id.as_str())
+            .count()
+            != 1
+        {
+            return Ok(false);
+        }
+        let completion = self.data.completions.get(id).cloned();
+        let mut matched_unknown = false;
+        let mut indices = Vec::new();
+        for (index, item) in self.data.outbox.iter().enumerate() {
+            if item.kind != "report"
+                || !report_scope_matches(item, assignment)
+                || item.digest != outbox_body_digest(&item.body)
+            {
+                continue;
+            }
+            let state = item.body["requested_state"].as_str();
+            if state == Some("succeeded")
+                && completion.as_ref().is_some_and(|c| {
+                    report_relations_match(&item.body, c, assignment)
+                        && c["assignment_id"] == assignment.id
+                        && c["digest"] == assignment.logical_digest()
+                        && c["state"] == "succeeded"
+                })
+            {
+                indices.push(index);
+            } else if state == Some("unknown")
+                && completion
+                    .as_ref()
+                    .is_some_and(|c| converted_unknown_evidence_matches(&item.body, c, assignment))
+            {
+                // Only the traced conversion of the previously verified success
+                // may retry. Unrelated unknown/restart history is not promoted by
+                // this new revocation frame.
+                matched_unknown = true;
+            }
+        }
+        if matched_unknown {
+            return self.quarantine_revoked_artifacts(assignment);
+        }
+        if indices.len() != 1 {
+            return Ok(false);
+        }
+        let index = indices[0];
+        let item = &mut self.data.outbox[index];
+        let original_artifacts = item.body["artifacts"].clone();
+        let original_effects = item.body["effects"].clone();
+        for effect in item.body["effects"].as_array_mut().into_iter().flatten() {
+            effect["status"] = json!("unknown");
+            effect["artifacts"] = json!([]);
+        }
+        item.body["requested_state"] = json!("unknown");
+        item.body["state"] = json!("unknown");
+        item.body["status"] = json!("unknown");
+        item.body["summary"] = json!("The Grant was revoked after the local edit completed. Original success cannot be promoted under the revoked Grant; retain its local effect evidence for reconciliation without another operation.");
+        item.body["artifacts"] = json!([]);
+        item.body["artifact_ids"] = json!([]);
+        item.body["cancel_acknowledged"] = json!(false);
+        item.body["evidence"] = json!([{
+            "kind":"grant_revoked","assignment_id":id,"local_artifacts":original_artifacts,
+            "original_effect_evidence":original_effects,
+            "ordinary_delivery_blocked_by_revocation":true,"artifact_transport":"quarantined"
+        }]);
+        item.digest = outbox_body_digest(&item.body);
+        item.next_attempt_at = chrono::Utc::now().to_rfc3339();
+        if let Some(local) = self.data.completions.get_mut(id) {
+            local["state"] = json!("unknown");
+            local["summary"] = json!(
+                "Local file effect preceded revocation. Ordinary admission cannot be promoted after that authority change; reconcile its evidence."
+            );
+            let effects = local["effects"].clone();
+            for effect in local["effects"].as_array_mut().into_iter().flatten() {
+                effect["status"] = json!("unknown");
+                effect["artifacts"] = json!([]);
+            }
+            local["evidence"] = json!([{
+                "kind":"grant_revoked","assignment_id":id,
+                "original_effect_evidence":effects,"ordinary_artifact_transport":"quarantined"
+            }]);
+        }
+        self.quarantine_revoked_artifacts(assignment)?;
+        Ok(true)
+    }
+
+    fn quarantine_revoked_artifacts(
+        &mut self,
+        assignment: &crate::wire::Assignment,
+    ) -> Result<bool> {
+        let assignment_id = &assignment.id;
+        for item in &mut self.data.outbox {
+            if item.kind == "artifact" && item.body["assignment_id"] == assignment_id.as_str() {
+                item.last_error = Some("Normal artifact delivery is quarantined because the Grant was revoked before ordinary admission; local bytes remain evidence.".to_owned());
+                item.next_attempt_at = HOLD_SCHEDULE.to_owned();
+            }
+        }
+        // Persist only after the whole history and all relations are verified.
+        // The completed input is unchanged, while the revoked snapshot and
+        // reconcile purpose remain recoverable in the same atomic state flush.
+        self.data
+            .assignments
+            .insert(assignment_id.clone(), assignment.raw.clone());
+        self.flush()?;
+        Ok(true)
+    }
+
     pub fn set_cancel_requested(&mut self, id: &str, value: bool) -> Result<()> {
         if let Some(assignment) = self.data.assignments.get_mut(id) {
             assignment["cancel_requested"] = json!(value);
         }
         self.flush()
     }
+}
+
+fn outbox_body_digest(body: &Value) -> String {
+    let mut logical = body.clone();
+    if let Some(object) = logical.as_object_mut() {
+        object.insert("sent_at".into(), Value::Null);
+    }
+    digest_json(&logical)
+}
+
+fn uuid_is_valid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn report_scope_matches(item: &OutboxItem, assignment: &crate::wire::Assignment) -> bool {
+    item.kind == "report"
+        && item.body["protocol"] == "loom.node.v1"
+        && item.body["ticket_id"] == assignment.ticket_id
+        && item.body["assignment_id"] == assignment.id
+        && item.body["node_id"] == assignment.node_id
+        && item.body["installation_id"] == assignment.installation_id
+        && item.body["worker_id"] == assignment.worker_id
+        && item.body["grant_digest"] == assignment.grant_digest
+        && item.body["lease_id"] == assignment.lease_id
+        && item.body["lease_epoch"].as_u64() == Some(assignment.lease_epoch)
+        && item.body["attempt"].as_u64() == Some(assignment.attempt)
+        && ["request_id", "report_id"]
+            .into_iter()
+            .all(|name| item.body[name].as_str().is_some_and(uuid_is_valid))
+}
+
+fn converted_unknown_evidence_matches(
+    report: &Value,
+    completion: &Value,
+    assignment: &crate::wire::Assignment,
+) -> bool {
+    // A transport retry may only reuse the evidence produced by the previously
+    // validated success conversion. A generic/restart unknown is not proof that
+    // this known success existed, and must stay locally unresolved instead.
+    if completion["state"] != "unknown"
+        || completion["assignment_id"] != assignment.id
+        || completion["digest"] != assignment.logical_digest()
+        || completion["evidence"][0]["kind"] != "grant_revoked"
+        || report["requested_state"] != "unknown"
+        || report["state"] != "unknown"
+        || report["status"] != "unknown"
+        || report["cancel_acknowledged"] != false
+        || report["artifacts"] != json!([])
+        || report["artifact_ids"] != json!([])
+    {
+        return false;
+    }
+    let conversion = &report["evidence"][0];
+    if conversion["kind"] != "grant_revoked"
+        || conversion["artifact_transport"] != "quarantined"
+        || conversion["ordinary_delivery_blocked_by_revocation"] != true
+        || conversion["original_effect_evidence"]
+            != completion["evidence"][0]["original_effect_evidence"]
+    {
+        return false;
+    }
+    let operation_digest = digest_json(&json!({
+        "assignment_id":assignment.id,"kind":assignment.kind,
+        "relative_path":assignment.relative_path,"content":assignment.content
+    }));
+    let operation = operation_digest.as_str();
+    let artifacts = completion["artifacts"].as_array();
+    let original_artifacts = conversion["local_artifacts"].as_array();
+    let old_effects = conversion["original_effect_evidence"].as_array();
+    let new_effects = report["effects"].as_array();
+    let local_effects = completion["effects"].as_array();
+    let (
+        Some(artifacts),
+        Some(original_artifacts),
+        Some(old_effects),
+        Some(new_effects),
+        Some(local_effects),
+    ) = (
+        artifacts,
+        original_artifacts,
+        old_effects,
+        new_effects,
+        local_effects,
+    )
+    else {
+        return false;
+    };
+    if artifacts.len() != 1
+        || original_artifacts.len() != 1
+        || old_effects.len() != 1
+        || new_effects.len() != 1
+        || local_effects.len() != 1
+        || artifacts[0].as_str() != original_artifacts[0]["artifact_id"].as_str()
+        || !artifacts[0].as_str().is_some_and(uuid_is_valid)
+        || original_artifacts[0]["origin_node_id"] != assignment.node_id
+        || original_artifacts[0]["assignment_id"] != assignment.id
+    {
+        return false;
+    }
+    let old = &old_effects[0];
+    let new = &new_effects[0];
+    let local = &local_effects[0];
+    let matched_fields = |effect: &Value| {
+        effect["assignment_id"] == assignment.id
+            && effect["ticket_id"] == assignment.ticket_id
+            && effect["node_id"] == assignment.node_id
+            && effect["attempt"].as_u64() == Some(assignment.attempt)
+            && effect["input_digest"] == operation
+    };
+    matched_fields(old)
+        && matched_fields(new)
+        && matched_fields(local)
+        && old["status"] == "confirmed"
+        && new["status"] == "unknown"
+        && local["status"] == "unknown"
+        && old["artifacts"] == completion["artifacts"]
+        && new["artifacts"] == json!([])
+        && local["artifacts"] == json!([])
+        && old["effect_id"] == new["effect_id"]
+        && new["effect_id"] == local["effect_id"]
+        && old["effect_id"].as_str().is_some_and(uuid_is_valid)
+        && old["evidence"] == new["evidence"]
+        && old["evidence"][0]["kind"] == "artifact"
+        && old["evidence"][0]["digest"] == original_artifacts[0]["sha256"]
+        && original_artifacts[0]["sha256"]
+            .as_str()
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+}
+
+fn report_relations_match(
+    report: &Value,
+    completion: &Value,
+    assignment: &crate::wire::Assignment,
+) -> bool {
+    // Effect input identifies the executed operation; the separate completion
+    // digest additionally identifies lease/grant admission. They are not aliases.
+    let operation_input = json!({
+        "assignment_id":assignment.id,"kind":assignment.kind,
+        "relative_path":assignment.relative_path,"content":assignment.content
+    });
+    let operation_digest = digest_json(&operation_input);
+    let Some(artifacts) = completion["artifacts"].as_array() else {
+        return false;
+    };
+    let Some(artifact_ids) = artifacts
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let Some(reported_ids) = report["artifact_ids"]
+        .as_array()
+        .and_then(|values| values.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+    else {
+        return false;
+    };
+    if artifact_ids != reported_ids {
+        return false;
+    }
+    let Some(metadata) = report["artifacts"].as_array() else {
+        return false;
+    };
+    if metadata.len() != artifacts.len() {
+        return false;
+    }
+    for (entry, expected_id) in metadata.iter().zip(&artifact_ids) {
+        if entry["artifact_id"].as_str() != Some(*expected_id)
+            || entry["sha256"].as_str().is_none()
+            || entry["origin_node_id"] != report["node_id"]
+            || entry["assignment_id"] != report["assignment_id"]
+        {
+            return false;
+        }
+    }
+    let Some(original_effects) = report["effects"].as_array() else {
+        return false;
+    };
+    let Some(expected_effects) = completion["effects"].as_array() else {
+        return false;
+    };
+    if original_effects.len() != expected_effects.len() {
+        return false;
+    }
+    original_effects
+        .iter()
+        .zip(expected_effects)
+        .all(|(effect, local)| {
+            effect["effect_id"] == local["effect_id"]
+                && effect["status"] == local["status"]
+                && effect["input_digest"] == local["input_digest"]
+                && effect["input_digest"] == operation_digest
+                && effect["attempt"] == local["attempt"]
+                && effect["artifacts"] == completion["artifacts"]
+                && effect["effect_id"].as_str().is_some_and(uuid_is_valid)
+        })
 }
 
 impl Persisted {

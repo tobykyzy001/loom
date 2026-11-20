@@ -852,7 +852,13 @@ bundle的`NodeState`对缺少文件的初始状态执行`structuredClone(EMPTY)`
 
 对应地，中央普通新Artifact与running/succeeded/failed结果要求确认该Assignment**非空可解析acknowledged_at + 恰一条node-origin assignment.acknowledged历史配对**，缺失给`assignment_unadmitted`，坏半边/坏timestamp或多重审计继续403/409不接受。相同旧不可变bytes/Report receipt仅作为原scope read复现，不创建新Effect，未知与取消的特殊对账不能借这项普通Admission约束假 成新建/确认正常效果。Report的ticket_attempt与持久lease_epoch独立比对，避免只核 对ticket attempt而误接旧租期。新建Artifact在写文件及记录前受检查； 原生 ACK恢复与duplicate 都走相同现有Node/Grant/epoch audit helper，重复只读原准入不改变原timestamp 或给新审计。
 
-已通过真正的OS `SIGKILL after durable local effect and two outbox, before any ACK`增量证明原28-byte编辑、单assignment及同身份reuse (details/completions digest match)，恢复恰一原Admission并原单份Artifact/Report/Effect；权威 duplicate 再送不再增加审计； 同一私有state中的原来源与outbox在重新校验当前Grant/root/epoch/digest后原样交付；磁盘上的“已运行”字样本身从来不是授权。 仅有当前macOS、本例完成窗口与本机的已准入/未准入比对，非mid-write中断、任意工具故障、多机global exactly-once或M0通用设备验收。入口及负例见 [runner](tests/runner/README.md)；`completed_replay`14/14及真实duplicate已跑通。
+已通过真正的OS `SIGKILL after durable local effect and two outbox, before any ACK`增量证明原28-byte编辑、单assignment及同身份reuse (details/completions digest match)，恢复恰一原Admission并原单份Artifact/Report/Effect；权威 duplicate 再送不再增加审计； 同一私有state中的原来源与outbox在重新校验当前Grant/root/epoch/digest后原样交付；磁盘上的“已运行”字样本身从来不是授权。 仅有当前macOS、本例完成窗口与本机的已准入/未准入比对，非mid-write中断、任意工具故障、多机global exactly-once或M0通用设备验收。入口及负例见 [runner](tests/runner/README.md)；当前`completed_replay`19/19及上述真实duplicate与新增撤权负例已跑通。
+
+**撤权后的原本地完成和欲保存的unknown必须一一匹配。** 真实`edit_file`可能在首个普通ACK落地之前完成文件替换，此时撤Grant即使正确拒绝旧ACK，也不能因`acknowledged_at`为空就永远不给对账。中央对这类未报告、未请求取消、原Grant digest未变，精确物理Binding/root/Node仍相同的原Assignment仅发`purpose=reconcile`，不续Lease。parser只在固定edit_file、原始creation-v1 digest与current-revoked-v2快照、当前物理scope全部一致时接收；这个重建仅用于验证原始digest，不是重授执行Grant，更不支持任意v3/换kind/换worker。
+
+在本地，**唯一原Report**必须与原Ticket/Assignment/lease/epoch/request/effect、原始完整输入及Artifact关系吻合，方可把已有success转换为`unknown` Report和unknown Effect；原Artifact byte/metadata保留于本地HOLD，不再上传。operation input digest由assignment/kind/path/content计算，与包含lease/grant关联的completion logical digest分别检查。queue digest复核继续沿用原`sent_at=null`投影，而非误把queue digest类比成传输原始字节摘要。当前reconcile/Grant revoked快照只有所有关联通过后才持久化，缺/多/scope错误/digest不一致的失败不会冗余改写completion。
+
+已经converted的unknown在真实传输失败后允许重试，但必须仍能复核`grant_revoked`转换标记、原Effect UUID/inputdigest/attempt及原始Artifact证据；** unrelated restart history不能拿generic unknown混作已有success**。没有本地完成，只有空历史时才允许原拒绝报告、不发任何Assignment ACK；缺completion却已有outbox则保留并失败，不补造漂亮历史。中央收到完整unknown后以`last_report_at`阻断再次派发现旧Assignment，但仍保持reconciling，不自动成功、不假装边写边停止的Agent工具已消失或已回滚。命令 `node tests/runner/revoke-after-local-effect.mjs`；Native `security`18项、`completed_replay`19项，当前仅macOS arm64固定文件场景，非真实DSH、任意工具中断或物理多Host契约。
 
 **审批理由必须与首签身份和实际审计一起成立。** `POST /tickets/{id}/approval` 现要求 `decision=approve|reject`、有界 `approval_id` 及**非空、trim后、UTF-8最多1000字节**的 `reason`。Vue只在仍选中同一张真正 `waiting_approval` 且无停止意图的Ticket时提交，并在表单事先说明理由会以可读文字持久化、不能填Secret；外部凭据或子进程secret不因此进入Prompt。随后填写另一明确决定不是自动学习习惯，也不为了审批ID而去创建审批Granted对象。
 

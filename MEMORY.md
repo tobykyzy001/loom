@@ -205,6 +205,14 @@
 
 - 新增和更新实际入口为`node scripts/document-pipeline.mjs`、`node tests/direct/loopback-handoff.mjs`，范围见 [pipeline](tests/pipeline/README.md)。现有新调度的`Grant/Binding/current epoch/root`继续原条职责，这项终态归并不扩展为物理第二台、任意DAG或global stop guarantee。
 
+### 5.5.3 首ACK未达后撤Grant：只允许能证明原效果的恢复
+
+- `node tests/runner/revoke-after-local-effect.mjs`已实证缺口：真实编辑已落盘后扣住第一普通ACK，管理员撤Grant让原Grant从v1变为当前撤销的v2、原lease失效、Ticket进入reconciling，随后放行原ACK得到真实`409 outcome_unknown`；此时本地两个outbox/file effect确定了成果，但旧SQL只让已经ack的Assignment进入停帧，没ack的作品永远是null poll。现在中央只给这类**固定edit_file、尚未报告、cancel=false、同Grant digest/attempt lease epoch、正确root/binding/node** 的原Assignment `purpose=reconcile`，**不再次续租、让旧Grant复活** 或开新执行。
+- Native decoder严格吻合顶层原Grant v1+digest与当前Grant v2+revoked_at、flagfalse，在原binding/node/root.operations/write字段都一致下验证。真正原始Grant digest包含v1；特批clone到creation-v1只为重验同一原digest，而非拿当前v2再签另一个Grant。对purpose/status/kind/topGrantVersion/currentGrantState错误、只读Grant与伪digest都拒绝。
+- **中央不可知本地是否操作过**，不能因一个reconcile frame就让worker执行。Native只有当前completion与一份唯一原始success Report，且原Ticket/Binding/owner/lease/epoch/Report/Effect UUID和原始operation input与Artifact关系齐，才转换为unknown Report/Effect；validation完成后才以原子State写入更新当前revoked snapshot/purpose。普通Artifact转HOLD并保留真实文件与私有ledger，**不拿它再换中央准入**。原outbox digest由`sent_at=null`的queue形状复核，不是可变wire bytes；本作业operation input `assignment_id/kind/path/content` 与完成digest（还有lease/grant）还要分开核对。
+- 对正窗口的实际结局是：**1 unknown Report + 1 unknown Effect；0中央Artifact、0普通Admission audit、acknowledged_at仍null**，原file/原Report request id/original Effect身份/inputdigest没换。Ticket仍reconciling，`last_report_at`存在后poll不再给这项旧作业，未产生第一次之外的文件效果。尚未完成的空历史只付原拒绝unknown而绝不写任何assignment ACK；有outbox且无completion则保留报错，不能补造unknown。
+- 任何`unknown`字符串**不能**直接认定同一老成果。对已验证converted unknown，可用`grant_revoked conversion标记 + 原Effect+input/attempt/ticket/node/assignment + 原Artifact证据`复核后在transport失败后原body重发；缺/重Report、原body digest变化、错epoch/Effect、restart generic unrelated unknown全部拒绝且原有state/file不动。不用模糊的 **既有某条unknown**替代真实完成来源。运行`security`18/18、`completed_replay`19/19以及真实正向driver为证，不改schema16，不读用户Profile/DSH或外部模型服务。范围仅单macOS Bare Rust固定edit，不推广通用SDK停止、移动物理机、Linux/Windows验证或所有tool效果/global exactly-once Proof。
+
 ### 5.5.1 真实SIGKILL与本地outbox的准入恢复
 
 - **新的真实增量暴露并修复了“先传成果，后补准入”以及中心未检查准入的问题。** `tests/runner/kill-reconciliation.mjs`让原生CLI取得一份实际edit_file，hold的是executor完成后第一笔普通ACK（**不要hold pre-spawn的取消观察poll**），使写效果及两个原outbox先durable，而中心`acknowledged_at`和效果仍空。硬门前是28-byte真实目标文件、completion succeeded、capture的确切Grant/root/epoch/logical digest和confirmed ledger；真正`SIGKILL`并等待退出后开启同identity，才续原先work。

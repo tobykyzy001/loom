@@ -256,7 +256,7 @@ impl LocalNodeRunner {
                     "completed assignment cannot be replayed under an invalid assignment",
                 ))
             }
-            Err(error) => return self.reject_assignment(preliminary, raw, error).await,
+            Err(error) => return self.reject_assignment(preliminary, raw, error, true).await,
         };
         let assignment = match Assignment::decode(
             &raw,
@@ -271,7 +271,7 @@ impl LocalNodeRunner {
                     "completed assignment cannot be replayed under an invalid assignment",
                 ))
             }
-            Err(error) => return self.reject_assignment(preliminary, raw, error).await,
+            Err(error) => return self.reject_assignment(preliminary, raw, error, true).await,
         };
         if has_completion {
             // State::start compares this fully decoded packet with the original
@@ -282,6 +282,18 @@ impl LocalNodeRunner {
             if let Some(previous) = self.state.start(&assignment)? {
                 if previous["state"] == "running" {
                     bail!("running assignment requires reconciliation before evidence replay");
+                }
+                if raw["purpose"] == "reconcile" && assignment.grant.revoked_at.is_some() {
+                    // An immutable revoked frame carries evidence only. The local
+                    // completed operation must never be started or re-ACKed anew.
+                    if !self.state.record_revocation_race(&assignment)? {
+                        bail!(
+                            "revoked local history has no uniquely matching evidence-only Report"
+                        );
+                    }
+                    self.state.data.last_assignment_id = Some(assignment.id.clone());
+                    self.state.flush()?;
+                    return self.dispatch_outbox().await;
                 }
                 if previous["state"] == "succeeded" {
                     // An ordinary acknowledgement may have needed a retry after
@@ -337,6 +349,27 @@ impl LocalNodeRunner {
                     TickStatus::Unknown
                 },
             );
+        }
+        if raw["purpose"] == "reconcile" && !has_completion {
+            if self
+                .state
+                .data
+                .outbox
+                .iter()
+                .any(|item| item.body["assignment_id"] == preliminary.id)
+            {
+                bail!("revoked assignment has durable outbox but no completion to correlate; retain original evidence without another acknowledgement");
+            }
+            return self
+                .reject_assignment(
+                    preliminary,
+                    raw,
+                    anyhow::anyhow!(
+                        "a revoked reconcile frame cannot start a first local execution"
+                    ),
+                    false,
+                )
+                .await;
         }
         if let Some(previous) = self.state.start(&assignment)? {
             self.state.data.last_assignment_id = Some(assignment.id.clone());
@@ -438,6 +471,7 @@ impl LocalNodeRunner {
         preliminary: PreliminaryAssignment,
         raw: Value,
         error: anyhow::Error,
+        send_rejection_acknowledgement: bool,
     ) -> Result<TickStatus> {
         let mut stub = crate::wire::scoped_envelope(&raw, &Uuid::new_v4().to_string())?;
         self.state
@@ -463,15 +497,20 @@ impl LocalNodeRunner {
         report.insert("effects".into(), json!([{"effect_id":Uuid::new_v4(),"input_digest":preliminary.logical_digest(),"status":"unknown","evidence":[{"kind":"assignment_rejected"}]}]));
         report.insert("cancel_acknowledged".into(), json!(false));
         self.state.enqueue("report", Value::Object(report))?;
-        let _ = self
-            .client
-            .acknowledge_envelope(
-                &mut stub,
-                &self.identity,
-                false,
-                &format!("Rejected locally: {error}"),
-            )
-            .await;
+        // A reconciliation refusal must not gain ordinary Admission before a
+        // revocation arrives. Its unknown evidence can be recorded on that path
+        // without a successful, rejected or cancellation-flavoured assignment ACK.
+        if send_rejection_acknowledgement {
+            let _ = self
+                .client
+                .acknowledge_envelope(
+                    &mut stub,
+                    &self.identity,
+                    false,
+                    &format!("Rejected locally: {error}"),
+                )
+                .await;
+        }
         let completion = json!({"assignment_id":preliminary.id,"digest":preliminary.logical_digest(),"state":"unknown","summary":error.to_string(),"artifacts":[],"effects":[],"report_enqueued":true,"cancel_acknowledged":false});
         self.state.complete(&preliminary.id, completion)?;
         self.dispatch_outbox().await?;

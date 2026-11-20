@@ -317,8 +317,13 @@ WITH eligible AS (
       AND (t.status IN ('running','cancel_requested')
            OR (t.status IN ('reconciling') AND a.last_report_at IS NULL))
       AND (g.revoked_at IS NULL
+           -- Revocation can win the race with the ordinary ACK: the local effect
+           -- exists but acknowledged_at is still NULL. Admit only this unreported,
+           -- bounded edit for reconciliation, regardless of its ACK timestamp.
+           -- A v2 Grant alone proves no local completion. The Node must prove that
+           -- from its own evidence or reject the frame, never rerun the edit.
            OR (t.status='reconciling' AND t.kind='edit_file' AND t.cancel_requested=0
-               AND a.acknowledged_at IS NOT NULL AND a.last_report_at IS NULL
+               AND a.last_report_at IS NULL
                AND g.version=2 AND t.grant_digest=g.digest))
       AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling')
 )
@@ -2569,11 +2574,79 @@ mod revoked_assignment_tests {
     }
 
     #[test]
-    fn revoked_assignment_needs_admission_and_an_unreported_bounded_edit_shape() {
+    fn revoked_edit_is_reconciled_before_or_after_ack_but_not_after_report() {
+        for acknowledged in [false, true] {
+            let fixture = fixture("edit_file");
+            revoke_running(&fixture, acknowledged);
+            fixture.store.conn()
+                .execute(
+                    "UPDATE assignments SET cancelled_at='2026-01-01T00:00:00Z' WHERE id='assignment'",
+                    [],
+                )
+                .unwrap();
+            let expired = fixture
+                .store
+                .get("assignments", "assignment")
+                .unwrap()
+                .unwrap()["lease_expires_at"]
+                .clone();
+            let mut store = fixture.store;
+            let snapshot = assignment_for_poll(&mut store, "node").unwrap().unwrap();
+            let repeat = assignment_for_poll(&mut store, "node").unwrap().unwrap();
+            for frame in [&snapshot, &repeat] {
+                assert_eq!(frame["id"], "assignment");
+                assert_eq!(frame["ticket_id"], "ticket");
+                assert_eq!(frame["kind"], "edit_file");
+                assert_eq!(frame["relative_path"], "src/calc.js");
+                assert_eq!(frame["content"], "original task input");
+                assert_eq!(frame["objective"], "Bounded original work");
+                assert_eq!(frame["grant_digest"], "original-grant-digest");
+                assert_eq!(frame["grant_version"], 1);
+                assert_eq!(frame["lease_epoch"], 1);
+                assert_eq!(frame["attempt"], 1);
+                assert_eq!(frame["lease_expires_at"], expired);
+                assert_eq!(frame["purpose"], "reconcile");
+                assert_eq!(frame["grant_status"], false);
+                assert_eq!(frame["cancel_requested"], false);
+                assert_eq!(frame["node_id"], "node");
+                assert_eq!(frame["worker_id"], "default");
+                assert_eq!(frame["grant"]["version"], 2);
+                assert!(frame["grant"]["revoked_at"].is_string());
+                assert_eq!(frame["grant"]["project_root"], "/private/poll-fixture");
+                assert!(frame.get("artifact_input").is_none());
+            }
+            assert_eq!(snapshot, repeat);
+            assert!(assignment_for_poll(&mut store, "other-node")
+                .unwrap()
+                .is_none());
+            store
+                .conn()
+                .execute(
+                    "UPDATE assignments SET last_report_at=?1 WHERE id='assignment'",
+                    [crate::now()],
+                )
+                .unwrap();
+            assert!(assignment_for_poll(&mut store, "node").unwrap().is_none());
+            assert!(assignment_for_poll(&mut store, "other-node")
+                .unwrap()
+                .is_none());
+            let ticket = store.get("tickets", "ticket").unwrap().unwrap();
+            assert_eq!(ticket["status"], "reconciling");
+            assert_eq!(ticket["attempt"], 1);
+            assert_eq!(ticket["cancel_requested"], false);
+            let assignments = store.query("SELECT id FROM assignments", []).unwrap();
+            assert_eq!(assignments, [json!({"id":"assignment"})]);
+        }
+    }
+
+    #[test]
+    fn non_edit_and_reported_revoked_work_cannot_use_the_reconcile_selection() {
         for (kind, acknowledged, reported) in [
-            ("edit_file", false, false),
+            ("edit_file", false, true),
             ("edit_file", true, true),
+            ("read_summary", false, false),
             ("read_summary", true, false),
+            ("model_text", false, false),
             ("model_text", true, false),
             ("model_descriptor", true, false),
             ("credential_ref", true, false),
@@ -2606,17 +2679,84 @@ mod revoked_assignment_tests {
 
     #[test]
     fn a_changed_grant_or_explicit_cancel_cannot_become_a_revocation_snapshot() {
+        for acknowledged in [false, true] {
+            for mutation in [
+                "UPDATE grants SET version=3 WHERE id='grant'",
+                "UPDATE grants SET digest='changed-grant-digest' WHERE id='grant'",
+                "UPDATE tickets SET grant_digest='changed-grant-digest' WHERE id='ticket'",
+                "UPDATE tickets SET status='running' WHERE id='ticket'",
+                "UPDATE tickets SET status='pending' WHERE id='ticket'",
+                "UPDATE tickets SET status='succeeded' WHERE id='ticket'",
+                "UPDATE tickets SET status='waiting_approval' WHERE id='ticket'",
+                "UPDATE tickets SET cancel_requested=1 WHERE id='ticket'",
+                "UPDATE assignments SET lease_epoch=2 WHERE id='assignment'",
+            ] {
+                let fixture = fixture("edit_file");
+                revoke_running(&fixture, acknowledged);
+                fixture.store.conn().execute(mutation, []).unwrap();
+                let mut store = fixture.store;
+                assert!(
+                    assignment_for_poll(&mut store, "node").unwrap().is_none(),
+                    "acknowledged={acknowledged}, mutation={mutation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_derived_revoked_edit_cannot_fall_back_to_plain_file_work() {
+        let fixture = fixture("edit_file");
+        revoke_running(&fixture, false);
+        let at = crate::now();
+        let definition = json!({
+            "schema":"loom.document-pipeline.v1",
+            "version":1,
+            "pipeline_id":"11111111-1111-1111-1111-111111111111",
+            "project_id":"project",
+            "read":{"stage_id":"source","kind":"read_summary","grant_id":"other-grant","relative_path":"docs/source.txt"},
+            "edit":{"stage_id":"derived","kind":"edit_file","grant_id":"grant","relative_path":"docs/result.txt","depends_on":["source"],"transform":"trim"},
+        });
+        fixture.store.conn()
+            .execute(
+                "INSERT INTO document_pipeline_runs(id,project_id,name,definition_json,definition_digest,created_at,updated_at) VALUES('pipeline','project','Derived edit',?1,'pipeline-digest',?2,?2)",
+                params![definition.to_string(), &at],
+            )
+            .unwrap();
+        fixture.store.conn()
+            .execute(
+                "INSERT INTO document_pipeline_stages(pipeline_id,stage_id,ticket_id,raw_grant_id,created_at,updated_at) VALUES('pipeline','derived','ticket','grant',?1,?1)",
+                [&at],
+            )
+            .unwrap();
+        let mut store = fixture.store;
+        let error = assignment_for_poll(&mut store, "node").unwrap_err();
+        assert!(
+            error.to_string().contains("Source stage is missing"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_changed_physical_binding_cannot_become_a_revocation_snapshot() {
         for mutation in [
-            "UPDATE grants SET version=3 WHERE id='grant'",
-            "UPDATE grants SET digest='changed-grant-digest' WHERE id='grant'",
-            "UPDATE tickets SET grant_digest='changed-grant-digest' WHERE id='ticket'",
-            "UPDATE tickets SET cancel_requested=1 WHERE id='ticket'",
+            "UPDATE project_bindings SET revoked_at='2026-01-01T00:00:00Z' WHERE id='binding'",
+            "UPDATE project_bindings SET root_scope='' WHERE id='binding'",
+            "UPDATE project_bindings SET root_scope='/' WHERE id='binding'",
+            "UPDATE project_bindings SET root_scope='relative-root' WHERE id='binding'",
+            "UPDATE project_bindings SET node_id='other' WHERE id='binding'",
+            "UPDATE project_bindings SET installation_id='other' WHERE id='binding'",
+            "UPDATE project_bindings SET worker_id='other' WHERE id='binding'",
+            "UPDATE grants SET project_binding_id='other' WHERE id='grant'",
+            "UPDATE grants SET project_binding_id=NULL WHERE id='grant'",
         ] {
             let fixture = fixture("edit_file");
-            revoke_running(&fixture, true);
+            revoke_running(&fixture, false);
             fixture.store.conn().execute(mutation, []).unwrap();
             let mut store = fixture.store;
-            assert!(assignment_for_poll(&mut store, "node").unwrap().is_none());
+            assert!(
+                assignment_for_poll(&mut store, "node").is_err(),
+                "mutation={mutation} must fail closed rather than expose a different scope"
+            );
         }
     }
 }

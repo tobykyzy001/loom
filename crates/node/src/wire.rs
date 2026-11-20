@@ -155,11 +155,19 @@ impl Assignment {
         if grant.project_id != project_id {
             bail!("grant project mismatch");
         }
-        if grant.version != grant_version {
-            bail!("grant version moved during delivery");
-        }
-        if grant.revoked_at.is_some() {
-            bail!("grant is revoked");
+        // A revoked stop retains the original Grant/digest at the top level,
+        // while its current snapshot records the separate revocation version.
+        // Only this explicitly scoped reconcile may read that pairing. It is not
+        // authority to execute a fresh operation or to accept other grant moves.
+        let revoked_reconcile = value.get("purpose").and_then(Value::as_str) == Some("reconcile")
+            && kind == "edit_file"
+            && status == "reconciling"
+            && !cancel_requested
+            && grant_version == 1
+            && grant.version == 2
+            && grant.revoked_at.is_some();
+        if !revoked_reconcile && (grant.version != grant_version || grant.revoked_at.is_some()) {
+            bail!("grant version moved during delivery or was revoked");
         }
         if grant.expires_at.is_some_and(|expiry| expiry <= now) {
             bail!("grant is expired");
@@ -182,8 +190,10 @@ impl Assignment {
         {
             bail!("grant contains an unsupported operation");
         }
-        if value.get("grant_status").and_then(Value::as_bool) != Some(true) {
-            bail!("controller did not mark the grant active");
+        if value.get("grant_status").and_then(Value::as_bool) != Some(grant.revoked_at.is_none()) {
+            bail!(
+                "controller grant state does not match execution or explicit revoke reconciliation"
+            );
         }
         let resource = value
             .get("resource")
@@ -208,7 +218,27 @@ impl Assignment {
             bail!("grant binding pointer mismatch");
         }
         grant.binding_digest = raw_binding_digest(resource)?;
-        if recompute_grant_digest(&grant)? != grant_digest {
+        if revoked_reconcile {
+            let reported_digest = grant_value
+                .get("digest")
+                .and_then(Value::as_str)
+                .context("revoke reconcile must carry the immutable original grant digest")?;
+            if reported_digest != grant_digest {
+                bail!("current grant digest differs from the original assignment input");
+            }
+        }
+        // The revoked current snapshot records v2, while the immutable original
+        // assignment retained its creation-v1 digest. Rebuild that creation-time
+        // grant for this narrow frame only; do not re-sign a different revision.
+        let digest_grant = if revoked_reconcile {
+            Grant {
+                version: grant_version,
+                ..grant.clone()
+            }
+        } else {
+            grant.clone()
+        };
+        if recompute_grant_digest(&digest_grant)? != grant_digest {
             bail!("grant digest is not a verifiable controller signature");
         }
         Ok(Self {

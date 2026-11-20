@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated: 2026-11-19.
+Updated: 2026-11-20.
 
 ## Authenticated heartbeat status validation now fails before storage mutation
 
@@ -11,6 +11,18 @@ The actual mounted node handler now matches the raw input explicitly: missing st
 A new Concierge test uses the real `/api/v1/nodes/heartbeat` route and a stored matching Node-token hash to prove bad states never alter the complete registration row/timestamp, while `online/busy/degraded/offline` still succeed. The real signed-node README driver then rotates through `revoked`, an unknown text token, `null` and `17` with this installation's **actual registered transport credential** (not an administrator fallback), checks the HTTP error and byte-for-byte unchanged public snapshot, and continues the existing stale/390px/revocation flow. `/tmp/loom-node-staleness-proof.json` now contains **six** PASS checks. Total of 143 previous tests is **144** plus the ordinary workspace integration tests; complete strict clippy, Rust tests and the 208-web baseline are passing.
 
 Only protocol status validation is narrowed/validated. There is still no real network outage, second physical Host, phone or full M1 acceptance; `NodeIdentity.getters` versus `report.results.fixture` mappings deliberately keep their separate field names.
+
+## Revocation after a completed local file effect preserves only matching evidence
+
+The actual CLI/server regression `node tests/runner/revoke-after-local-effect.mjs` initially failed in a precise unacknowledged window: native editing had already produced its file, completion, artifact bytes and two original outbox bodies, but the first ordinary ACK was withheld. Valid administrator revocation then moved Grant v1 to current-revoked v2. The later ACK was rejected with **409 outcome_unknown**, and neither an ordinary Artifact/Report nor ordinary Admission could legitimately appear. Previously the revoked `edit_file` could not be selected for reconciliation at all because selection required a non-null `acknowledged_at`.
+
+The bounded selection now permits only an unreported `reconciling`, non-cancelled `edit_file` with its original Grant digest, exact current attempt/lease epoch, physical Binding/root/Node and the exact current-revoked v2 pairing, with no lease renewal. Its immutable top-level original v1 Grant/digest and the current revoked Grant v2 are independently retained. Native decoding reproves the original creation-v1 digest only in this strict frame; it is not executing because a new current Grant has been invented.
+
+Before writing any changed state, the native worker must match **exactly one** original scoped success Report against the original completion, UUID, Node/ticket/assignment, lease/attempt, operation input digest and effect/artifact relationships. The previous replay and executor input digests are intentionally different recipes, and the queue digest correctly uses its existing `sent_at=null` projection. Valid conversion produces an **unknown Report and unknown Effect**, leaves its ordinary Artifact locally quarantined/HOLD and persists the actual revoked/reconcile snapshot atomically. It does not turn real prior bytes or the local ledger into “nothing happened,” manufacture a central Artifact/success/ordinary Admission or reexecute the writer. This holds for authenticated restart recovery of previous converted evidence only if the whole conversion marker and original effect/artifact chain still match, not for generic unrelated unknown/restart data.
+
+Negative/retry fixtures cover **no local completion** (cannot execute or send any assignment ACK, only well-scoped unknown rejection), **orphan outbox** (must retain rather than invent an unknown), five malformed/duplicate/stale-history shapes and original restart whose unknown cannot serve as the verified conversion. A converted unknown which encounters a first 503 can subsequently resend the same Report/request/effect body after its matching chain has been validated. This is an evidence-only retry, not execution promoted by an already revoked Grant.
+
+The recorded central result is **1 unknown Report + 1 unknown Effect, 0 central Artifacts and 0 ordinary admission audits, acknowledged_at still null**, with the original destination bytes and original request/effect/input digest preserved. `last_report_at` then blocks reissuing that Assignment; the central ticket stays `reconciling`, not succeeded. `security` is **18/18** and `completed_replay` **19/19**, and two focused independent source reviews checked the admission and exact outbox relations. Scope remains a single macOS arm64 Bare Rust installation/controlled fixed edit. It does not validate real DSH cancellation/replay, arbitrary tools, another physical Host, Windows/Linux, phones, TLS deployment or global exactly-once. Storage remains schema 16 and the production/test commands and all of today’s workspace baselines are rerun separately.
 
 ## Bounded pipeline cancellation now completes after the producer has already succeeded
 

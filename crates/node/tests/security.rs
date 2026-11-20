@@ -96,6 +96,102 @@ fn identity_rejects_publicly_readable_state() {
 }
 
 #[test]
+fn revoked_reconciliation_keeps_original_grant_digest_without_new_execute_permission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let base = input(&project);
+    let good = |packet: &mut Value| {
+        packet["kind"] = json!("edit_file");
+        packet["content"] = json!("already written under the earlier Grant\n");
+        packet["status"] = json!("reconciling");
+        packet["purpose"] = json!("reconcile");
+        packet["grant_status"] = json!(false);
+        packet["lease_expires_at"] = json!("2000-01-01T00:00:00Z");
+        packet["grant"]["version"] = json!(2);
+        packet["grant"]["revoked_at"] = json!(chrono::Utc::now().to_rfc3339());
+        packet.clone()
+    };
+    let accepted = Assignment::decode(
+        &good(&mut base.clone()),
+        &"a".repeat(64),
+        "installation-one",
+        &project,
+        chrono::Utc::now(),
+    )
+    .expect("the exact revoke frame preserves original Grant v1 and its current v2 snapshot");
+    assert_eq!(accepted.grant.version, 2);
+    assert!(accepted.grant.revoked_at.is_some());
+    assert_eq!(accepted.grant_version, 1);
+    assert_eq!(accepted.kind, "edit_file");
+    for (label, mutation) in [
+        (
+            "wrong execution purpose",
+            (|packet: &mut Value| {
+                packet["purpose"] = json!("execute");
+            }) as fn(&mut Value),
+        ),
+        ("not the original creation version", |packet: &mut Value| {
+            packet["grant"]["version"] = json!(3);
+        }),
+        ("wrong immutable digest", |packet: &mut Value| {
+            packet["grant"]["digest"] = json!("0".repeat(64));
+        }),
+        ("wrong original top-level version", |packet: &mut Value| {
+            packet["grant_version"] = json!(2);
+        }),
+        ("no current revocation fact", |packet: &mut Value| {
+            packet["grant"]["revoked_at"] = Value::Null;
+        }),
+        ("read-only Grant cannot write", |packet: &mut Value| {
+            packet["grant"]["operations"] = json!(["read"]);
+        }),
+        ("unsupported kind", |packet: &mut Value| {
+            packet["kind"] = json!("read_summary");
+        }),
+        ("wrong working state", |packet: &mut Value| {
+            packet["status"] = json!("running");
+        }),
+        (
+            "explicit cancellation intent is not revocation",
+            |packet: &mut Value| {
+                packet["cancel_requested"] = json!(true);
+            },
+        ),
+        ("reported authority mismatch", |packet: &mut Value| {
+            packet["grant_status"] = json!(true);
+        }),
+    ] {
+        let mut altered = good(&mut base.clone());
+        mutation(&mut altered);
+        let rejected = Assignment::decode(
+            &altered,
+            &"a".repeat(64),
+            "installation-one",
+            &project,
+            chrono::Utc::now(),
+        );
+        assert!(
+            rejected.is_err(),
+            "{label}: v2/current Grant claims must not become a fresh execute permission"
+        );
+    }
+    let mut ordinary = base;
+    ordinary["grant_status"] = json!(false);
+    assert!(
+        Assignment::decode(
+            &ordinary,
+            &"a".repeat(64),
+            "installation-one",
+            &project,
+            chrono::Utc::now(),
+        )
+        .is_err(),
+        "an active execute Grant must still explicitly be marked active"
+    );
+}
+
+#[test]
 fn digest_reject_project_binding_and_grant_mismatches() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("project");

@@ -60,6 +60,18 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 
 **交付结构和其依赖也已实证。** `NodeClient.deliver`不再把任意HTTP 200当作 Artifact/Report已收：Artifact要求response的UUID与本地outbox完全相同；Report需要accepted:true，任何顶层error envelope均拒收。原始在库首次 Artifact返回无accepted flag也不强行补造duplicate/freshness字段，因此符合已有服务端响应。原`once`即使HOLD了坏artifact回执，仍可能光凭本地outcome扩散为`Tick::Succeeded`；现在向调用方传播实际永久transport rejection，而不是让decoy outcome掩盖投递失败。发生不可重试失败时，**与该处理中的Artifact同assignment的Report也必须hold**，不能被队列"允许独立作业继续"偷渡此因果断裂；独立Assignment仍保留正常通行。新增负例分别用不同UUID以及accepted:false验证原body不被改写、controller层`dispatched=success`不会假完成；恢复正确响应和due timestamp**只是本地测试拥有的重试调度**，之后每个原body的往返id不变、file effect仍一份。Loopback不是真实Concierge持久记录的替代，正向流程以真实Rust bare读写与Native Descriptor注册的通过为伴。另有**同Host、同有效readGrant/root下**的真实A/B作业验证：A使Artifact ID失配时，自身两份pending body均保持HOLD；B用独立Ticket/Assignment/Lease实际`read_summary`，**单独各自一次artifact与report HTTP**。这使得依赖暂保不再只是单一作业的解析。B的新目录包含 一项bin+一项effect ledger，A没有被重复执行，cdn主体/owner及其原始关系仍一致。该文档提及的当前总量是**11/11**，同一主机逻辑作业隔离，非第二物理Host或新Grant声明。
 
+## 已发生本地文件效果但普通ACK未达时撤权：证据级恢复
+
+运行 `node tests/runner/revoke-after-local-effect.mjs`。真实CLI使用独立身份注册至自己的Rust Concierge，沿用精确ProjectBinding与一个read/write Grant完成固定`edit_file`写入。代理在**私有completion和两条原始outbox落盘后**扣住首个普通ACK，先验证真实文件、两个本地证据体、中心ACK/Artifact/Report/Effect和普通准入审计全为0；随后管理员**真实撤Grant**，让Grant v1变v2、原Lease失效、Ticket进入reconciling。原ACK只在此时放行一次，真实中心返回`409 outcome_unknown`。
+
+修复前，此Assignment因尚无 `acknowledged_at`不会再发reconcile包，本地成果仅能保留并持续遇到普通拒绝。现在中央只向同一**unreported、未请求取消、原始Grant digest未变、attempt等于lease epoch、physical Binding/root及Node匹配的edit_file** 提供`purpose=reconcile`；正常续租和新执行并不获得授权。Native decoder也只支持该场景的 creation-v1原始digest加上 current-revoked v2快照，不插新发另一份Grant，糊涂purpose/kind/status/版本/写权限均继续拒绝。此入口只针对原始、固定`edit_file`输入，不支持任意作业类型或派生Artifact作为新授权。
+
+完整本地完成才会被转换为一份 `unknown` Report + 一项 `unknown` Effect。**必须**恰好一份与该Assignment有正确request/report/effect UUID，以及原Request、lease/epoch、原Grant digest、artifact关系与operation input digest吻合的原Report；进入写修改之前先行检查。queue的logical digest按照原`sent_at=null`投影复核，不会把每次传输时间当内容变更。普通Artifact和byte引用均以HOLD方式保留于本地，不重投给中央；中心绝对不因此生成原成功Artifact/普通Admission。当前撤销快照及purpose一起原子落盘，和原文件、原private ledger、原`request_id`与实际effect/inputdigest保持关联，不另发一次操作、不以用户取消的ACK冒充撤权，也不把central待对账的任务标为成功。
+
+独立`completed_replay.rs`和 `security.rs`现在还覆盖：没完成历史且没有垃圾缓存时，**不执行文件+不发送任何assignment ACK，仅留unknown拒绝证据**；没有completion却有旧outbox时，禁止凭空补发一个新Report，不伪造missing事实。五种离线私有历史破坏（缺Report、重复Report、journal digest错误、错误epoch、错误effect ID）均必须保持原始历史、目标文件不变，零新增Artifact/Report/Admission。只有**由此前完整success校验转换出的unknown**才可以按原Effect/Artifact关联在传输失败后重试：要复核`grant_revoked`证据、原Effect UUID、operation input digest、Node/ticket/assignment/epoch及原始Artifact摘要；历史无关或真restart的generic unknown不能冒充verified success转换。原生restart未知仍走原恢复路径，不因新撤权purpose被擅自重新上报。当前 `security`**18/18**、`completed_replay`**19/19**；完整Rust/workspace和前端测试同轮另跑。
+
+真实终点是`1 unknown Report/1 unknown Effect/0中央Artifact/0普通Admission审计`，原文件bytes与private ledger不变，central仍保持reconciling；`last_report_at`被记录后，之后真实poll不再给这项原Assignment，也不允许重新执行。此驱动验证案例只覆盖macOS arm64单机、一个Native installation和一次定边界文本替换，不是任意进程/tool效果、真正跨机DSH、移动生命周期或global exactly-once。所有临时目录、Node身份及端口专属于此测试，认证凭据不写入结果或日志。
+
 ## 文件效果已落盘、Admission未达中心后的真实SIGKILL恢复
 
 运行 `node tests/runner/kill-reconciliation.mjs`。它先用真实CLI注册与单个read/write Grant和Binding，颁发一份edit_file；随后hold住**file effect和原始outbox都已持久化后**的首个普通ACK（不是提前poll）。在private state确认`completion=succeeded`、active为空、两个原outbox，确认28-byte目标内容与原artifact/effect ledger均已写入，而中心ack/Artifact/Report/Effect和准入审计为0后，才对所属PID实际发`SIGKILL`并等待其退出。
@@ -69,7 +81,7 @@ cargo test --locked -p loom-node --test completed_replay -- --test-threads=1
 - 新普通Artifact及`running/succeeded/failed` Report在创建持久事实、文件和关联审计之前，必须有该Assignment的**合法** `acknowledgement_at`连同一个精确node/`assignment.acknowledged`审计；半边/异常历史维持`acknowledgement_inconsistent`，缺噪声拒绝`assignment_unadmitted`。旧不可变byte/receipt replay不是新事件，未知/取消报告沿用 自己的特殊契约，不把错误结果升格为普通成功。
 - Native启动不再无条件派发local outbox；随后由同一poll重验当前Grant/root/Lease/epoch和完整logical digest，完成结果的**普通ACK先行**，raw的请求Id nonce可变，但上传体、Artifact UUID、客户端ReportUUID与effect身份不变。已有Admission再次到API只会报告duplicate和原timestamp，不会再签发审计。
 - `assignment_unadmitted`在服务端只对应**可重新走正常当前Assignment准入**的返回，被native区分成限期保留与不换body的传输回退；`acknowledgement_inconsistent`、`outcome_unknown`、`stale_lease`则继续保持永久HOLD，不意外觉醒另一份entry的report。
-- 保留普通首次Ticket与completed replay各自原`TickStatus` 与 outbox distinction；这并非宣称对象全局exactly-once或将HTTP200当业务完成。`completed_replay`现为**14/14**，包含启动顺序、允许的精确暂退与三类其它authority负例，错误时仍按原始body保留。
+- 保留普通首次Ticket与completed replay各自原`TickStatus` 与 outbox distinction；这并非宣称对象全局exactly-once或将HTTP200当业务完成。`completed_replay`现为**19/19**，包含启动顺序、允许的精确暂退与三类其它authority负例，错误时仍按原始body保留。
 
 恢复后内部状态为恰 **1 Ticket / 1 Assignment / 1 Artifact / 1 Report / 1 Effect / 1条准入审计**，原bytes/SHA、effect/Receipt id、Lease epoch和原Grant/digest一致；再idle也不发生第二个写文件。另以代理内存中正牌Node的authorization发送一次当前、同Assignment的普通ACK请求（**不将Node或administrator token写入报告/日志**），得duplicate:true，**原timestamp未变、审计仍恰一条**。
 
@@ -241,7 +253,7 @@ node tests/runner/task-priority.mjs
 node tests/runner/grant-revocation-fence.mjs
 ```
 
-此入口在真正的 Rust Concierge 上建立注册的 Node、ProjectBinding、Grant与 current Assignment。它先完成实际领取确认（`acknowledged_at`），随后撤销该 Grant，并另外创建24个未领取 Ticket 以超过24条审计记录。严格选择器只向那笔已经 ACK 且尚未 Report 的旧 `edit_file` 提供 `purpose=reconcile` 的停止帧：原始 `grant_version=1`、当前 Grant version=2/revoked_at、精确身份/root/digest及字段完整，不把 `grant_status=false` 当作用户取消。未领取、其他工作类型或不同 immutable work 不得借此开始执行。
+此入口在真正的 Rust Concierge 上建立注册的 Node、ProjectBinding、Grant与 current Assignment。它先完成实际领取确认（`acknowledged_at`），随后撤销该 Grant，并另外创建24个未领取 Ticket 以超过24条审计记录。此场景的严格选择器向那笔已经 ACK 且尚未 Report 的旧 `edit_file` 提供 `purpose=reconcile` 的停止帧：原始 `grant_version=1`、当前 Grant version=2/revoked_at、精确身份/root/digest及字段完整，不把 `grant_status=false` 当作用户取消。未领取、其他工作类型或不同 immutable work 不得借此开始执行。对未ACK的另种狭窄窗口——**本地已经完成固定编辑**——只允许同时限定的reconcile与unknown证据；不存在本地完成时仍保护原始outbox且零执行。见前述 `revoke-after-local-effect.mjs`，它仍未创造普通Admission。
 
 - 撤权帧只指导旧的原作业停止/对账，不延长已过期 Lease，不把新 Ticket 视为已执行。中心将 running Ticket 转为 reconciling，`cancel_requested=false` 始终独立持久存在；没有新Grant、Permission、分布新Session或私自Session event。
 - 使用真实 HTTP 客户端对原 epoch 的普通 Artifact 与 succeeded Report **实际发出**上传，二者都得到 **409 `outcome_unknown`** 并被隔离。SQL/Artifact/Report/Effect新增数为0；第二笔未领取任务未发生本地或Agent执行。这里的围栏不是检查某个`accepted:true`布尔值。
