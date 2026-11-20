@@ -5,12 +5,12 @@ const safeIdentity = /^[a-z0-9][a-z0-9:_-]{1,159}$/i
 const safeName = /^[a-z][a-z0-9._:-]{0,159}$/
 const confidenceLabels: Record<string, string> = {
   fresh_observation: '最新观察', stale_last_known: '陈旧 · 上次已知', offline_last_known: '离线 · 上次已知',
-  missing_unknown: '尚未获得目录证据', invalid_observation: '观察不可用或字段不完整', revoked_last_known: '已撤销 · 仅存历史观察',
+  missing_unknown: '尚未获得目录证据', invalid_observation: '观察不可用或字段不完整', revoked_last_known: '已撤销 · 仅存历史观察', worker_offline: 'Worker 离线 · 保留历史记录',
 }
 const findingLabels: Record<string, string> = {
   prepared_call_ready: '已观察文本适配器（未激活）', model_catalog_missing: '尚无目录观察', requested_disabled: '未启用精确目录查询',
   lookup_unavailable: '查询未就绪，无法确认模型可用性', lookup_failed: '查询失败，无法确认模型可用性', source_invalid: '来源或字段不符合目录约束',
-  worker_mismatch: '工作器范围不匹配', invalid_observation: '无效目录观察', unsupported_provider: '不提供该 Provider', unsupported_model: '不识别该模型',
+  worker_mismatch: '工作器范围不匹配', worker_offline: '此 Worker 已离线 · 仅存历史观察', invalid_observation: '无效目录观察', unsupported_provider: '不提供该 Provider', unsupported_model: '不识别该模型',
   unsupported_route: '路由未支持', unsupported_modality: '模态未支持', not_granted: '旁路或未见准备的目录证据',
   prepared_call_failed: '目录准备失败', runtime_disposed: '适配器已释放（仅历史）', missing_unknown: '目录信息缺失 / 未知', duplicate_model_source: '重复模型来源（不新增记录）',
 }
@@ -43,7 +43,8 @@ function validObservation(value: unknown): value is ModelCatalogObservation {
   const row = value as ModelCatalogObservation
   if (row.schema !== 'loom.model-inventory.v1' || row.revision !== 1 || row.read_source !== 'authenticated_node_heartbeat' || row.permission_granted !== false || !identity(row.node_id) || !identity(row.installation_id) || (row.worker_id && !identity(row.worker_id))) return false
   if (row.confidence === 'fresh_observation' && (row.lookup_source !== 'ctx.llm.listProviders/listModels/resolveModelInfo/prepareCall' || row.controller_matches !== true)) return false
-  if (!row.confidence.match(/^(fresh_observation|stale_last_known|offline_last_known|revoked_last_known|missing_unknown|invalid_observation)$/) || !Array.isArray(row.findings) || row.findings.length > 8 || row.findings.some(finding => !validFinding(finding))) return false
+  if (!row.confidence.match(/^(fresh_observation|stale_last_known|offline_last_known|revoked_last_known|missing_unknown|invalid_observation|worker_offline)$/) || !Array.isArray(row.findings) || row.findings.length > 8 || row.findings.some(finding => !validFinding(finding))) return false
+  if (row.confidence === 'worker_offline' && row.models.some(model => model.resource_state !== 'unavailable' || model.freshness !== 'stale')) return false
   return rawPolicy(row.policy) && Array.isArray(row.models) && row.models.length <= 8 && row.models.every(model => validModel(model, row))
 }
 export function parseModelInventory(value: unknown): ModelInventoryData | null {

@@ -7593,6 +7593,13 @@ fn model_binding_for(
             "Only the exact local placement receipt can bind this fixture",
         ));
     }
+    crate::model_registry::verify_current_adapter_observation(
+        store,
+        node_id,
+        installation_id,
+        worker_id,
+        invocation,
+    )?;
     Ok(json!({
         "schema":"loom.model-binding.v1",
         "model_id":model_id, "placement_id":placement_id, "placement_sha256":placement_sha256,

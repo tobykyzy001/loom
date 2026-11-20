@@ -39,6 +39,11 @@ try {
     server, admin, root,
     observer: {
       heartbeat: async () => produce(),
+      offline_worker: async () => {
+        await node.heartbeat({ status: 'online', capabilities: [], workers: [{ ...worker, status: 'offline' }],
+          inventory: { project_roots: {}, resources: [], model_catalog: workerCatalog } })
+        return admin.get(`/api/v1/model-inventory?node_id=${identity.nodeId}&installation_id=${encodeURIComponent(identity.installationId)}&worker_id=default`)
+      },
       refresh: async () => admin.get('/api/v1/model-inventory'),
     },
   })

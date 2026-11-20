@@ -2,6 +2,19 @@
 
 Updated: 2026-11-20.
 
+## A Worker that is offline stays historical and cannot create a new model call
+
+A worker could be clearly `offline` while retaining a valid historical catalog and active placement/invoke Grants, yet enter a new `model_text` binding. The view relied on Node/catalog freshness and worker-ID existence: the actual Worker state and current invocation availability were separately mishandled. `matching_physical_node` even accepted `_worker` without using it, so selecting by ID did not exclude the offline identity.
+
+The exact selected Worker must now be present and not explicitly `offline`; other Worker declarations on that installation aren't substitutes. Healthy/busy/degraded states and the legacy no-status/empty declaration behavior are not reassigned an offline/TTL policy. The model's source, historical prepared catalog and timestamp remain readable, but the current adapter projection returns `worker_offline`, `unavailable`, `stale` and a matching finding instead of fresh adapter availability. No new SDK probe, model installation or catalog-timeout rule was introduced.
+
+The old poll validation has been extracted into a shared current-adapter check which also runs in `create_ticket`'s `model_binding_for`, after ordinary exact place/invoke/scope and immutable-byte checks. A new model invocation is now refused before record creation when the source Worker is offline, with actual `403 source_node_unavailable` as appropriate. Other revoked/stale/missing/incorrect observations retain their precise error semantics, and neither source nor Grant data is rewritten or recreated to fabricate recovery.
+
+The real `node tests/harness/real-model-binding.mjs` driver first carried out successful source registration, placement and an isolated SDK text invocation. It then used the existing Node's transport credential to report only that Worker offline with the complete unchanged catalog and installation. The next model call returned that precise source-unavailable denial, tickets/Grants stayed equal and no further SDK request occurred. Restoring online precedes the independent model-retirement test. The Rust P2 test independently proves the physical worker matcher now refuses that exact offline Worker while retaining all persisted record history.
+
+The frontend accepts `worker_offline` only for `unavailable/stale` history, rejects a contradictory offline confidence plus `fresh`/`adapter_observed`, and displays the useful offline-worker label rather than merely an unknown state. `tests/model-inventory/browser.mjs` uses actual Edge and the same registered Node to show this historical state after a user-initiated resource read, with no execute/download/activation button and a passing 390px desktop layout. All of this is a bounded Worker-status repair on a single macOS test setup, not a model deployment, arbitrary provider, true phone, second Host or full M1 acceptance proof.
+
+
 ## A direct Memory and its saving audit now succeed or roll back together
 
 `create_memory` previously inserted a Memory before calling the existing audit writer. If that audit write failed, the user faced a failed save while the new Memory remained visible without its corresponding saving fact. This was reproduced through the real authenticated Router and an owned SQL trigger rejecting only `memory.explicit_saved`: **Memory rows=1, saving audits=0**.

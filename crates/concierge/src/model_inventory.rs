@@ -355,6 +355,31 @@ fn project_node_for_worker(
             .push(finding("worker_mismatch", None, None, None));
         return view;
     }
+    // This is a fact about the exact catalog Worker, not a mismatch with
+    // another declared Worker on the same Installation.
+    let worker_offline = node["workers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|worker| {
+            worker
+                .get("worker_id")
+                .or_else(|| worker.get("id"))
+                .and_then(Value::as_str)
+                == Some(catalog.worker_id.as_str())
+                && harness_name(worker).is_some()
+                && worker["status"] == "offline"
+        });
+    let model_freshness = if worker_offline {
+        Freshness::Stale
+    } else {
+        freshness
+    };
+    if worker_offline {
+        view.confidence = "worker_offline".to_owned();
+        view.findings
+            .push(finding("worker_offline", None, None, None));
+    }
     // One incoming catalog may describe only one actual worker. Never collapse
     // its distinct scope into a generic synthetic default worker.
     view.worker_id.clone_from(&catalog.worker_id);
@@ -412,7 +437,7 @@ fn project_node_for_worker(
                         context_window: model.context_window,
                         source: "host_reported".to_owned(),
                         observed_at: model.observed_at,
-                        resource_state: if freshness == Freshness::Fresh
+                        resource_state: if model_freshness == Freshness::Fresh
                             && node["revoked_at"].is_null()
                             && node["status"] != "offline"
                         {
@@ -425,7 +450,7 @@ fn project_node_for_worker(
                         executable: false,
                         controller_matches: true,
                         read_source: "authenticated_node_heartbeat".to_owned(),
-                        freshness,
+                        freshness: model_freshness,
                     });
                 } else {
                     view.findings

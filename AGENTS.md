@@ -201,7 +201,11 @@ DSH 插件是已打包的 Host-only bundle；临时隔离 Profile 已验证过�
 
 - **Host存在性用派生online而非自报status**:`/nodes`的`online/freshness`是读取时按撤销和末次heartbeat算出的快照，原始status与last heartbeat不再被UI独自解释为当前在线。`nodeOnline`须尊重明确的 false/true，只有online缺失才保留旧90秒fallback，revoked与offline永远不参与当前在线数，busy/degraded仍保留。陈旧则显示离线、陈旧及原绝对时间，不宣称整机物理断网或新探测。真实driver `node tests/model-inventory/offline-heartbeat.mjs` 验证真实签名注册→老化自有timestamp→同dir/token重开→Edge卡片与顶栏零在线→390px同profile重开，以及管理员身份撤销后Node自己token被401拒绝。共享NodeHttpClient与带管理token的操作各自分开；不能用owned fixture冒称第二物理Host/mobile或新Grant。结果`/tmp/loom-node-staleness-proof.json`，入口见 [tests/model-inventory/README.md](tests/model-inventory/README.md#actual-stale-heartbeat-presentation-and-exact-installation-boundary)。
 
- **Git/Project观察与Grant/真实remote分开**：项目`Inventory`经原控制器净化，生产视图要展示实际form/revision/dirty/controller_probe/probed_at与凭据类别，缺值unknown，working-tree dirty:null不允许包装成clean，非Git不造HEAD。`probeProject(id)`使用既有受保护POST和per-Project busy，只读epoch仍必须fresh；必须 `read_only_probe=true`、同ID且公开inventory完整才替换原Registry item，失败保留旧观测。验证入口`tests/projects/browser.mjs`用真实Git/document/Edge验证busy、redaction、命令未知以及删除project的真实400与同数据库恢复。它不争隐私跨机clone/fetch/远端可达，同时声明没有新增probe audit或新Grant。完整M1/真手机/第二Host不能由浏览器390px或单page证明。更多细节见[projects](tests/projects/README.md)。
+- **Worker自身offline与Node库存/活体要分开**：source/history可继续查看，不再fresh/可发新model_text。`matching_physical_node`必须实际使用worker参数及status，不能再忽略离线；创建及poll的model binding共用当前Worker/catalog验证，否则仍可能先生成offline作业。保留原Source/Assignment/Grant与其它busy/degraded、legacyworker数组，不加catalog过期或换standby顶班。真实全流程`node tests/harness/real-model-binding.mjs`先在正生成后离线并精确403 `source_node_unavailable`，Ticket/Grant/SDK requests 不增加；UI `node tests/model-inventory/browser.mjs`证明Worker离线历史!=执行可用，前端也拒绝离线confidence与fresh adapter冲突。仅限于固定M1文本与状态fixture，非通用模型或平台实现，细节见[README](tests/model-inventory/README.md#exact-worker-offline-is-non-executable-not-a-worker-mismatch) 与 [绑定证明](tests/harness/MODEL_BINDING.md)。
+
+
+
+**Git/Project观察与Grant/真实remote分开**：项目`Inventory`经原控制器净化，生产视图要展示实际form/revision/dirty/controller_probe/probed_at与凭据类别，缺值unknown，working-tree dirty:null不允许包装成clean，非Git不造HEAD。`probeProject(id)`使用既有受保护POST和per-Project busy，只读epoch仍必须fresh；必须 `read_only_probe=true`、同ID且公开inventory完整才替换原Registry item，失败保留旧观测。验证入口`tests/projects/browser.mjs`用真实Git/document/Edge验证busy、redaction、命令未知以及删除project的真实400与同数据库恢复。它不争隐私跨机clone/fetch/远端可达，同时声明没有新增probe audit或新Grant。完整M1/真手机/第二Host不能由浏览器390px或单page证明。更多细节见[projects](tests/projects/README.md)。
 
 ## 7. 修改和验证协议
 

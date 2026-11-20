@@ -987,12 +987,42 @@ pub(crate) fn bound_for_invocation(store: &Store, assignment: &Value) -> Result<
             "Binding must identify the one active authorized local placement receipt",
         ));
     }
-    verify_current_node(store, &grant, &binding.worker_id)?;
-    let catalog = crate::model_inventory::inventory(
+    verify_current_adapter_observation(
         store,
         &binding.node_id,
         &binding.installation_id,
         &binding.worker_id,
+        &grant,
+    )?;
+    Ok(json!({
+        "schema":"loom.model-binding.v1",
+        "model":{
+            "id":model["id"],
+            "source_ticket_id":model["source_ticket_id"],
+            "source_artifact_id":model["source_artifact_id"],
+            "source_assignment_id":model["source_assignment_id"],
+            "source_assignment_digest":model["assignment_digest"]
+        },
+        "placement":{"id":placements[0]["id"],"grant_id":grant["id"]},
+        "placement_auditable":true
+    }))
+}
+
+/// Recheck current activity for the same invocation Grant and exact installed
+/// Worker both when proposing a binding and when blessing an Assignment.
+pub(crate) fn verify_current_adapter_observation(
+    store: &Store,
+    node_id: &str,
+    installation_id: &str,
+    worker_id: &str,
+    invocation: &Value,
+) -> Result<(), ApiError> {
+    verify_current_node(store, invocation, worker_id)?;
+    let catalog = crate::model_inventory::inventory(
+        store,
+        node_id,
+        installation_id,
+        worker_id,
         chrono::Utc::now(),
     )
     .map_err(|_| {
@@ -1004,9 +1034,9 @@ pub(crate) fn bound_for_invocation(store: &Store, assignment: &Value) -> Result<
     })?;
     if catalog.schema != crate::model_inventory::CATALOG_SCHEMA
         || catalog.revision != 1
-        || catalog.node_id != binding.node_id
-        || catalog.installation_id != binding.installation_id
-        || catalog.worker_id != binding.worker_id
+        || catalog.node_id != node_id
+        || catalog.installation_id != installation_id
+        || catalog.worker_id != worker_id
         || catalog.confidence != "fresh_observation"
         || !catalog.controller_matches
         || catalog.permission_granted
@@ -1024,9 +1054,9 @@ pub(crate) fn bound_for_invocation(store: &Store, assignment: &Value) -> Result<
         .collect();
     if adapters.len() != 1
         || !adapters.iter().all(|adapter| {
-            adapter.node_id == binding.node_id
-                && adapter.installation_id == binding.installation_id
-                && adapter.worker_id == binding.worker_id
+            adapter.node_id == node_id
+                && adapter.installation_id == installation_id
+                && adapter.worker_id == worker_id
                 && adapter.catalogued
                 && adapter.prepared_call_observed
                 && !adapter.generation_observed
@@ -1046,18 +1076,7 @@ pub(crate) fn bound_for_invocation(store: &Store, assignment: &Value) -> Result<
             "Exactly one fresh prepared-call adapter observation is required; it grants nothing",
         ));
     }
-    Ok(json!({
-        "schema":"loom.model-binding.v1",
-        "model":{
-            "id":model["id"],
-            "source_ticket_id":model["source_ticket_id"],
-            "source_artifact_id":model["source_artifact_id"],
-            "source_assignment_id":model["source_assignment_id"],
-            "source_assignment_digest":model["assignment_digest"]
-        },
-        "placement":{"id":placements[0]["id"],"grant_id":grant["id"]},
-        "placement_auditable":true
-    }))
+    Ok(())
 }
 
 pub(crate) fn retire(store: &mut Store, id: &str, body: &Value) -> Result<Value, ApiError> {
@@ -1367,6 +1386,111 @@ mod tests {
             value
         );
         assert_eq!(before, authorized.store.audits(None).unwrap().len());
+    }
+    #[test]
+    fn offline_exact_worker_cannot_receive_a_new_invocation_binding() {
+        let authorized = authorized_fixture();
+        let first_valid_binding =
+            bound_for_invocation(&authorized.store, &authorized.assignment).unwrap();
+        assert_eq!(first_valid_binding["placement_auditable"], true);
+        let placement_grant = authorized
+            .store
+            .get("grants", "placement-grant")
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::maintenance::matching_physical_node(
+                &authorized.store,
+                "read_summary",
+                Some(&"a".repeat(64)),
+                &placement_grant,
+                "default",
+            )
+            .unwrap()
+            .is_some(),
+            "the healthy exact Worker must remain explicitly selectable"
+        );
+        let before = (
+            authorized.store.audits(None).unwrap(),
+            authorized.store.query("SELECT * FROM tickets", []).unwrap(),
+            authorized
+                .store
+                .query("SELECT * FROM artifacts", [])
+                .unwrap(),
+            authorized.store.query("SELECT * FROM grants", []).unwrap(),
+            authorized
+                .store
+                .query("SELECT * FROM model_placements", [])
+                .unwrap(),
+            model(&authorized.store, &authorized.model_id).unwrap(),
+        );
+        let observed_at = authorized.store.query("SELECT json_extract(inventory,'$.model_catalog.models[0].observed_at') AS observed_at FROM nodes", []).unwrap()[0]["observed_at"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // A second declared Worker must not be folded into this catalog or used
+        // as a substitute for the exact default Worker that is now offline.
+        authorized
+            .store
+            .conn()
+            .execute(
+                "UPDATE nodes SET workers=json_insert(json_set(workers,'$[0].status','offline'),'$[#]',json(?1))",
+                [json!({"worker_id":"standby","harness_kind":"dsh-loom","status":"online","capabilities":[{"ticket_kind":"read_summary"}]}).to_string()],
+            )
+            .unwrap();
+        let catalog = crate::model_inventory::inventory(
+            &authorized.store,
+            &"a".repeat(64),
+            "installation",
+            "default",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(catalog.confidence, "worker_offline");
+        assert_eq!(catalog.worker_id, "default");
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].worker_id, "default");
+        assert_eq!(catalog.models[0].resource_state, "unavailable");
+        assert_eq!(
+            catalog.models[0].freshness,
+            crate::inventory::Freshness::Stale
+        );
+        assert_eq!(catalog.models[0].observed_at, observed_at);
+        assert!(catalog
+            .findings
+            .iter()
+            .any(|finding| finding.state == "worker_offline"));
+        assert!(crate::maintenance::matching_physical_node(
+            &authorized.store, "read_summary", Some(&"a".repeat(64)), &placement_grant, "default",
+        ).unwrap().is_none(), "the offline selected Worker must not be substituted by another online Worker declaration");
+        assert!(bound_for_invocation(&authorized.store, &authorized.assignment).is_err());
+        assert_eq!(authorized.store.audits(None).unwrap(), before.0);
+        assert_eq!(
+            authorized.store.query("SELECT * FROM tickets", []).unwrap(),
+            before.1
+        );
+        assert_eq!(
+            authorized
+                .store
+                .query("SELECT * FROM artifacts", [])
+                .unwrap(),
+            before.2
+        );
+        assert_eq!(
+            authorized.store.query("SELECT * FROM grants", []).unwrap(),
+            before.3
+        );
+        assert_eq!(
+            authorized
+                .store
+                .query("SELECT * FROM model_placements", [])
+                .unwrap(),
+            before.4
+        );
+        assert_eq!(
+            model(&authorized.store, &authorized.model_id).unwrap(),
+            before.5
+        );
     }
     #[test]
     fn binding_never_survives_corrupted_immutable_source_proof() {

@@ -71,6 +71,34 @@ describe('strict, controller-signed model inventory observation reader', () => {
 })
 
 describe('read-only model resources under the actual Fleet layout', () => {
+  it('renders an explicitly offline Worker as history while refusing conflicting available facts', async () => {
+    const offline = structuredClone(good)
+    offline.observations[0].confidence = 'worker_offline'
+    offline.observations[0].findings.unshift({ state: 'worker_offline' })
+    for (const model of [offline.models[0], offline.observations[0].models[0]]) {
+      model.resource_state = 'unavailable'
+      model.freshness = 'stale'
+    }
+    const value = parseModelInventory(offline)
+    expect(value?.observations[0].confidence).toBe('worker_offline')
+    expect(value?.models[0].resource_state).toBe('unavailable')
+    expect(confidenceLabel('worker_offline')).toBe('Worker 离线 · 保留历史记录')
+    expect(findingLabel('worker_offline')).toBe('此 Worker 已离线 · 仅存历史观察')
+    const html = await renderToString(createSSRApp(ModelInventorySection, { inventory: offline }))
+    expect(html).toContain('当前不可用')
+    expect(html).toContain('Worker 离线')
+    expect(html).toContain('不可用（保留历史证据）')
+    expect(html).toContain('此 Worker 已离线 · 仅存历史观察')
+    expect(html).not.toContain('激活模型')
+    expect(html).not.toContain('下载模型')
+    const contradictory = structuredClone(offline)
+    for (const model of [contradictory.models[0], contradictory.observations[0].models[0]]) {
+      model.resource_state = 'adapter_observed'
+      model.freshness = 'fresh'
+    }
+    expect(parseModelInventory(contradictory)).toBeNull()
+  })
+
   it('shows the actual host/worker/model, modality, observation time and no model lifecycle action', async () => {
     const html = await renderToString(createSSRApp(ModelInventorySection, { inventory: good }))
     expect(html).toContain('模型目录观察不等于执行 Grant。不提供下载或激活。')

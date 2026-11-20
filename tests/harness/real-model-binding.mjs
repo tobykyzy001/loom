@@ -7,6 +7,10 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { installation } from './environment.mjs'
 import { startIsolatedHost, prepareScenario } from './binding-scenario.mjs'
+import { LoomNodeClient } from '../../packages/node-client/src/client.js'
+import { NodeIdentity } from '../../packages/node-client/src/identity.js'
+import { LoomHttpClient } from '../../packages/node-client/src/http.js'
+import { DatabaseSync } from 'node:sqlite'
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const secret = []
@@ -118,6 +122,45 @@ try {
   assert.ok(boundSession?.session_id, 'True DSH Agent session linked to the new Assignment, not source Task')
   assert.equal(sessionMap.assignments.some(entry => entry.assignment_id === sourceAssignment.id), false, 'Descriptor file reading never creates an LLM Agent session')
   const callsAfterExecution = requestCount(finalCalls)
+  const ticketsBeforeOffline = (await admin.get('/api/v1/tickets')).tickets
+  const grantsBeforeOffline = (await admin.get('/api/v1/grants')).grants
+  const nodeBeforeOffline = (await admin.get('/api/v1/nodes')).nodes.find(entry => entry.id === node.id && entry.installation_id === node.installation_id)
+  assert.ok(nodeBeforeOffline, 'The successful invocation still belongs to the same Node and Installation')
+  const identity = await NodeIdentity.open(join(root, 'node-state'))
+  assert.ok(identity.token, "The fixture's authenticated Node credential was actually registered")
+  secret.push(identity.token)
+  const nodeClient = new LoomNodeClient({ http: new LoomHttpClient({ baseUrl: server.baseUrl }), identity, state: {} })
+  const db = new DatabaseSync(join(server.dataDir, 'loom.sqlite3'))
+  let beforeHeartbeat
+  try {
+    beforeHeartbeat = db.prepare('SELECT inventory FROM nodes WHERE id=? AND installation_id=?').get(node.id, node.installation_id)
+  } finally { db.close() }
+  assert.ok(beforeHeartbeat, 'Preserve the actual catalog for this registered Node and Installation')
+  const inventoryBeforeOffline = JSON.parse(beforeHeartbeat.inventory)
+  assert.ok(inventoryBeforeOffline.model_catalog?.source, 'Do not accidentally erase the SDK catalog by replaying only the public Node projection')
+  await nodeClient.heartbeat({
+    status: 'online', capabilities: [],
+    workers: nodeBeforeOffline.workers.map(worker => (worker.worker_id ?? worker.id) === 'default'
+      ? { ...worker, status: 'offline' } : worker),
+    inventory: inventoryBeforeOffline,
+  })
+  const workerOffline = await admin.get(`/api/v1/model-inventory?node_id=${node.id}&installation_id=${encodeURIComponent(node.installation_id)}&worker_id=default`)
+  assert.equal(workerOffline.confidence, 'worker_offline')
+  assert.equal(workerOffline.models.length, 1, 'The historical descriptor remains visible without turning it available')
+  assert.equal(workerOffline.models[0].resource_state, 'unavailable')
+  assert.equal(workerOffline.models[0].freshness, 'stale')
+  assert.equal(workerOffline.models[0].source, 'host_reported')
+  assert.equal(workerOffline.models[0].read_source, 'authenticated_node_heartbeat')
+  const rejectedOffline = await request().catch(error => error)
+  assert.equal(rejectedOffline.status, 403, `An offline exact Worker must not create a new invocation: ${JSON.stringify({ id: rejectedOffline.id, status: rejectedOffline.status, code: rejectedOffline.code, message: rejectedOffline.message })}`)
+  assert.equal(rejectedOffline.code, 'source_node_unavailable', 'Current physical matching must report the offline Worker before an invocation can be created')
+  assert.deepEqual((await admin.get('/api/v1/tickets')).tickets, ticketsBeforeOffline, 'Rejected offline Worker creates no model ticket')
+  assert.deepEqual((await admin.get('/api/v1/grants')).grants, grantsBeforeOffline, 'Worker offline does not revoke or mint any authorization')
+  assert.equal(requestCount(await calls(root)), callsAfterExecution, 'No additional real SDK request occurs after the exact Worker goes offline')
+  const workersBeforeOffline = nodeBeforeOffline.workers
+  await nodeClient.heartbeat({ status: 'online', capabilities: [], workers: workersBeforeOffline, inventory: inventoryBeforeOffline })
+  assert.equal((await admin.get('/api/v1/tickets')).tickets.length, ticketsBeforeOffline.length, 'Restoring fixture availability also creates no model ticket')
+
   await admin.post(`/api/v1/models/${model.id}/retire`, { reviewed_sha256: sourceArtifact.sha256 })
   await expectDenied(request(), 'A retired model cannot enter a new invocation')
   assert.equal(requestCount(await calls(root)), callsAfterExecution, 'Retirement does not create a new request')
@@ -129,7 +172,8 @@ try {
     proof_artifact_sha256: sourceArtifact.sha256,
     model_text_artifact_sha256: resultArtifact.sha256, model_id: model.id, placement_id: placement.id,
     source_ticket_id: readTicket.id, invoke_ticket_id: textTicket.id,
-    revoke_wrong_scope_and_retire_refused: true, actual_adapter: 'loom-stub/loom-stub-v1',
+    revoke_wrong_scope_and_retire_refused: true, offline_worker_blocked_new_invocation: true,
+    no_sdk_request_after_worker_offline: true, actual_adapter: 'loom-stub/loom-stub-v1',
     not_a_real_provider_model_or_weight_runtime: true, root }
   await writeFile(join(root, 'model-binding-result.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify(report, null, 2))

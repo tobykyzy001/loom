@@ -9,6 +9,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 export async function verifyModelInventoryBrowser({ server, observer = {}, root }) {
   assert.ok(server?.baseUrl?.startsWith('http://127.0.0.1:') && server?.clientToken && root && typeof observer.heartbeat === 'function', 'A running local synthetic controller, token and bounded heartbeat producer are required')
   assert.ok(isAbsolute(root) && resolve(root) !== '/' && resolve(root) !== process.env.HOME, 'root must be a test-owned output directory')
+  if (observer.offline_worker) assert.equal(typeof observer.offline_worker, 'function')
   await mkdir(root, { recursive: true, mode: 0o700 })
   const { chromium } = await import('playwright-core')
   const { fileURLToPath, pathToFileURL } = await import('node:url')
@@ -154,6 +155,38 @@ export async function verifyModelInventoryBrowser({ server, observer = {}, root 
     assert.equal((await page.locator('body').innerText()).includes(server.clientToken), false)
     assert.equal(await page.locator('.model-inventory-section').getByRole('button').count(), 1, 'Only the explicit resource-read refresh belongs to model inventory')
     assert.equal(await modelRow.getByRole('button').count(), 0)
+    if (observer.offline_worker) {
+      const offline = await observer.offline_worker()
+      assert.equal(offline.confidence, 'worker_offline')
+      assert.equal(offline.models[0].resource_state, 'unavailable')
+      assert.equal(offline.models[0].freshness, 'stale')
+      assert.equal(offline.models[0].observed_at, model.observed_at, 'Do not invent a fresh catalog lookup merely to establish Worker offline')
+      assert.ok(offline.findings.some(finding => finding.state === 'worker_offline'))
+      const before = authorizedCollections.length
+      const reading = page.waitForResponse(response => response.url().endsWith('/api/v1/model-inventory') && response.request().method() === 'GET' && response.status() === 200)
+      await manual.click()
+      await reading
+      assert.ok(authorizedCollections.length > before, 'An ordinary resource refresh must re-read the current Worker fact')
+      const offlineSection = await page.locator('.model-inventory-section').innerText()
+      assert.match(offlineSection, /Worker 离线 · 保留历史记录/)
+      assert.match(offlineSection, /此 Worker 已离线 · 仅存历史观察/)
+      assert.doesNotMatch(offlineSection, /目录状态不明确/)
+      const offlineRow = await modelRow.innerText()
+      assert.match(offlineRow, /仅历史观察 · 当前不可用/)
+      assert.match(offlineRow, /不可用（保留历史证据）/)
+      assert.match(offlineRow, /上次已知（陈旧）/)
+      for (const control of ['激活模型', '下载模型', '运行模型', '已授权运行']) assert.equal(offlineRow.includes(control), false)
+      assert.equal(await modelRow.getByRole('button').count(), 0, 'An offline Worker may not acquire an invocation control')
+      assert.equal(await page.locator('.model-inventory-section').getByRole('button').count(), 1, 'The only remaining action is an explicit read')
+      report.worker_offline_history = true
+      report.screenshot_paths.worker_offline_desktop = join(root, 'model-inventory-worker-offline-desktop.png')
+      await page.screenshot({ path: report.screenshot_paths.worker_offline_desktop, fullPage: true })
+      await page.setViewportSize({ width: 390, height: 844 })
+      await modelRow.scrollIntoViewIfNeeded()
+      await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth, undefined, { timeout: 800 })
+      report.screenshot_paths.worker_offline_narrow = join(root, 'model-inventory-worker-offline-narrow.png')
+      await page.screenshot({ path: report.screenshot_paths.worker_offline_narrow, fullPage: true })
+    }
     report.read_only_controller_and_ui = authorizedCollections.every(row => row.method === 'GET' && row.auth)
     report.browser_errors = logs
     assert.deepEqual(logs, [], `Unexpected browser requests/errors: ${logs.join(' | ')}`)

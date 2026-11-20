@@ -40,7 +40,7 @@ pub fn matching_physical_node(
     capability: &str,
     preferred: Option<&str>,
     grant: &Value,
-    _worker: &str,
+    worker: &str,
 ) -> Result<Option<Value>> {
     let nodes = store.list("nodes")?;
     Ok(nodes.into_iter().find(|node| {
@@ -74,7 +74,7 @@ pub fn matching_physical_node(
         let worker_matches = grant["worker_id"]
             .as_str()
             .filter(|id| !id.is_empty())
-            .is_none_or(|worker| {
+            .is_none_or(|_| {
                 node["workers"].as_array().is_some_and(|workers| {
                     workers.iter().any(|candidate| {
                         candidate
@@ -82,6 +82,7 @@ pub fn matching_physical_node(
                             .or_else(|| candidate.get("id"))
                             .and_then(Value::as_str)
                             == Some(worker)
+                            && candidate["status"] != "offline"
                     })
                 }) || worker == "default"
                     && node["workers"]

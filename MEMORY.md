@@ -258,6 +258,13 @@
 - **真实同中心后续恢复现在已有实证**：已增强`node tests/observations/candidates.mjs --browser`，注入该保存审计错误后立即检查Memory/旧Audit不变，移除trigger，再对同一Rust Concierge、同一合法来源和同一客户端发正常创建。记录新Memory的实际source/project/scope/version 1及恰一条同ID saving audit，之后以正常DELETE只清理这个新条目；Audit保留`authority_changed:false`和`candidate_withdrawal:false`，整个原有Grant集合**完全相等**，不只是数量仍2。随后全原Memory/Candidate/Scope/UI链继续PASS。
 - **早期单独的in-process扩展probe只留作上下文**：曾有线程停在`client() → State.lock() → pthread等待`（[会话采样](/tmp/loom-memory-atomicity-current.txt)）。这没有证明SQL COMMIT失败或真实HTTP一定会阻塞；实验中的临时`drop(store)`/RAII改写都不需要进入生产代码。现在应先跑**已有真实driver**：已由同一Rust Concierge、正常认证HTTP完成“fault回滚→恢复保存→普通删除”，不再把先前in-process等待误读为普遍的生产认证缺陷。该实证仍限于固定创建错误/回滚/健康保存，不包含其他平台、任意异常级调度或自动习惯学习。
 
+### 5.5.7 M1的真实Worker状态：离线只是历史，不能发新Invocation
+
+- **独立review给出P2后，真实驱动揭示的是两层缺口，不止标签问题。** 有效注册、Grant/place与SDK目录可以已经成立，但该exact Worker后来offline时，旧投影仍会给出fresh adapter；而 `matching_physical_node`的 `_worker` 参数实际没有用，只验同ID存在。`create_ticket`原 `model_binding_for`只核模型/placement/Grant，尚未检查当前Worker/catalog，导致新模型text pending仍可创建。只修viewer/Freshness并 不会自动关闭这条**创建前**关系。当前 request Worker必须存在且不`offline`，另一个online standby不可代替下线 default；busy/degraded/legacy empty状态不作新的“无资格”重分类。
+- 当前Worker/catalog证明抽成共享 `verify_current_adapter_observation(...)`:创建时`api::model_binding_for`及后续poll原`bound_for_invocation`均使用此同一检查，仍先严格source/placement/ImmutableAssignment/Grant及精确身份，不用伪造任何future Assignment。历史条目保留其原来源/Prepared Timestamp，但confidence/finding=`worker_offline`、resource_state=unavailable、Freshness::Stale。**不是给model_catalog加90秒过期，也不是每次heartbeat再造探测**。
+- 实际`node tests/harness/real-model-binding.mjs`先真正src→Register→place→SDK调用成功；再复用同一个有效Node transport身份仅切换default Worker offline、保留整个 catalog与installation。**403 `source_node_unavailable`**成为真实返回，原Ticket/Grant全集不变，SDK请求不增长；之后正常恢复Worker才测试retire，避免错标原因。Rust同时证明匹配健康Node→默认Worker offline后物理匹配None、历史模型仍 可见、所有records一致。若单测helper看似拒绝而真实创建仍被放行，就继续查**物理匹配/创建入口**，不能报完整P2修好。
+- `apps/web/src/lib/modelInventory.ts` 只允许离线下 unavailable/stale并拒绝离线confidence加fresh adapter；`node tests/model-inventory/browser.mjs`的真实Edge与主动refresh显示离线Worker提示、陈旧source及不可用，不给模型调用按钮。真实留证来自那份owned desktop/390 viewport截图，不是iOS/Android/其他宿主验收。独立复核再次跑全service后无 P1/P2。整体M1能力矩阵、硬件条件、真正的跨机placement与真实GL运行态度不可从这一条修复生成。
+
 ## 6. 尚未解决、不要误判为已闭环的事项
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。
