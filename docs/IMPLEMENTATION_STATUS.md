@@ -2,6 +2,16 @@
 
 Updated: 2026-11-20.
 
+## An offline Worker also cannot claim a new ordinary execute
+
+A valid pending Assignment with an effective Grant previously still received `purpose=execute` after its selected Worker became offline. Ordinary unacknowledged running candidates, before priority ordering/LIMIT, now exclude a registration explicitly reporting their exact Worker as offline. Rejected candidates receive no execution or lease renewal; the original ticket and relationship are preserved rather than marked cancelled or succeeded. Stop/reconcile frames retain their own eligibility and evidence path.
+
+The check uses the registered Node plus the authorized Grant's installation and the candidate's exact Worker ID/alias. A legacy blank ticket installation does not bypass an actually known Grant installation, and empty worker lists, wildcard compatibility, busy/degraded and observation timestamps are not assigned a new availability timeout. Filtering before ordering also prevents an offline head candidate from hiding a different healthy candidate with its **own** independently authorized Grant/Binding. It never reassigns the offline ticket to that Worker.
+
+The focused Rust case proves positive initial delivery, offline suppression without lease mutation, independent healthy authorization, restored same-Assignment delivery and ordinary stop continuity. `node tests/runner/task-priority.mjs` then performs two real authenticated offline polls returning `assignment:null` on an already-approved but unacknowledged read; the ticket and lease are unchanged and no executor/file effect runs. Restoring the Worker returns the same Assignment, followed by the original cancel and real failed/successful-file retry proof. This is single-Host logical Worker availability, not physical failover, new authorization or global fair scheduling.
+
+Separately, a pre-existing revocation-stop candidate ordering defect was reproduced on clean HEAD `fe19e88`. Investigating/publicly fixing that wrong admitted-versus-unacknowledged reconcile choice is a separate increment, not silently included in the offline execute repair.
+
 ## A Worker that is offline stays historical and cannot create a new model call
 
 A worker could be clearly `offline` while retaining a valid historical catalog and active placement/invoke Grants, yet enter a new `model_text` binding. The view relied on Node/catalog freshness and worker-ID existence: the actual Worker state and current invocation availability were separately mishandled. `matching_physical_node` even accepted `_worker` without using it, so selecting by ID did not exclude the offline identity.

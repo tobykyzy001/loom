@@ -327,12 +327,44 @@ WITH eligible AS (
                AND a.last_report_at IS NULL
                AND g.version=2 AND t.grant_digest=g.digest))
       AND (a.acknowledged_at IS NULL OR t.cancel_requested=1 OR t.status='reconciling')
-)
+      /* Ordinary execute excludes offline Workers only in its own candidate query. */
+ )
 SELECT ticket_id,project_id,kind,objective,relative_path,content,status,node_id,
        installation_id,worker_id,attempt,grant_digest,cancel_requested,assignment_id,
        lease_id,lease_epoch,lease_expires_at,grant_operations,grant_revoked_at
 FROM eligible
 WHERE TRUE"#;
+
+/// Availability is not an artefact of parsing legacy storage in JSON table functions.
+/// Only an exact, explicitly-offline declaration excludes a fresh ordinary execute.
+fn ordinary_execute_worker_offline(
+    store: &Store,
+    node_id: &str,
+    candidate: &Value,
+) -> Result<bool> {
+    let loader = candidate["ticket_id"].as_str().unwrap_or_default();
+    let records = store.query(
+        "SELECT n.workers FROM grants g JOIN nodes n ON n.id=?2 AND (n.installation_id=g.installation_id OR g.installation_id IN ('','*') OR g.installation_id IS NULL) WHERE g.id=(SELECT grant_id FROM tickets WHERE id=?1) AND g.node_id=?2 AND (?3='' OR n.installation_id=?3)",
+        params![
+            loader,
+            node_id,
+            candidate["installation_id"].as_str().unwrap_or_default()
+        ],
+    )?;
+    let requested = candidate["worker_id"].as_str().unwrap_or("default");
+    Ok(records.iter().any(|record| {
+        record["workers"].as_array().is_some_and(|workers| {
+            workers.iter().any(|worker| {
+                worker
+                    .get("worker_id")
+                    .or_else(|| worker.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(requested)
+                    && worker["status"] == "offline"
+            })
+        })
+    }))
+}
 
 pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Value>> {
     crate::pipeline::advance_all(store)?;
@@ -343,14 +375,23 @@ pub fn assignment_for_poll(store: &mut Store, node_id: &str) -> Result<Option<Va
     let assignment = if let Some(stop) = stop.into_iter().next() {
         Some(stop)
     } else {
-        store.query(
-            &format!("{ELIGIBLE_ASSIGNMENTS} AND acknowledged_at IS NULL AND status='running' AND cancel_requested=0 ORDER BY priority DESC,assignment_created_at DESC LIMIT 1"),
+        let candidates = store.query(
+            &format!("{ELIGIBLE_ASSIGNMENTS} AND acknowledged_at IS NULL AND status='running' AND cancel_requested=0 ORDER BY priority DESC,assignment_created_at DESC"),
             [node_id],
-        )?
-        .into_iter()
-        .next()
+        )?;
+        let mut selected = None;
+        for candidate in candidates {
+            if !ordinary_execute_worker_offline(store, node_id, &candidate)? {
+                selected = Some(candidate);
+                break;
+            }
+        }
+        selected
     };
     if let Some(mut assignment) = assignment {
+        // The ordinary execute selection above excludes only explicit offline
+        // Workers. Legacy empty worker declarations have no such status to reject;
+        // reconcile and stop frames retain their own existing permission path.
         crate::source_events::ensure_source_work_approval(
             store,
             assignment["ticket_id"].as_str().unwrap_or_default(),
@@ -2410,6 +2451,314 @@ mod priority_tests {
         assert!(assignment_for_poll(&mut fixture.store, "node")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn offline_exact_worker_blocks_new_execute_without_suppressing_later_stop() {
+        let mut fixture = fixture();
+        insert_ticket(&fixture.store, "01", 80);
+        // A second independently authorized healthy candidate must not be
+        // starved by an offline higher-priority candidate on the same Node.
+        insert_ticket(&fixture.store, "02", -100);
+        fixture.store.conn().execute_batch(
+            "INSERT INTO project_bindings(id,project_id,node_id,installation_id,worker_id,root_scope,binding_digest,approved_at) VALUES('standby-binding','project','node','installation','standby','/owned/priority','standby-binding-digest','2026-01-01T00:00:00Z');
+             INSERT INTO grants(id,project_id,node_id,worker_id,installation_id,operations,version,digest,created_at,project_binding_id) VALUES('standby-grant','project','node','standby','installation','[\"read\"]',1,'standby-grant-digest','2026-01-01T00:00:00Z','standby-binding');
+             UPDATE tickets SET worker_id='standby',grant_id='standby-grant',grant_digest='standby-grant-digest' WHERE id='02';
+             UPDATE assignments SET worker_id='standby' WHERE id='assignment-02';"
+        ).unwrap();
+        assert!(assignment_for_poll(&mut fixture.store, "node").unwrap().is_some(),
+            "The original default assignment is valid while both its Worker and its Grant are healthy");
+        // Both declarations belong to this exact Node/Installation. The online
+        // standby is not a replacement source for the exact default Worker.
+        let workers = json!([
+            {"worker_id":"default","harness_kind":"dsh-loom","status":"online"},
+            {"worker_id":"standby","harness_kind":"dsh-loom","status":"online"}
+        ]);
+        assert_eq!(
+            fixture.store.conn().execute(
+                "UPDATE nodes SET workers=?1 WHERE id='node' AND installation_id='installation'",
+                [workers.to_string()],
+            ).unwrap(),
+            1
+        );
+        let initial = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .expect("the healthy exact Worker must receive its ordinary work");
+        assert_eq!(initial["id"], "assignment-01");
+        assert_eq!(initial["purpose"], "execute");
+        assert_eq!(initial["worker_id"], "default");
+        assert_eq!(initial["grant_status"], true);
+        assert_eq!(initial["grant"]["id"], "grant");
+        assert_eq!(initial["grant"]["digest"], "grant-digest");
+        assert_eq!(initial["grant"]["project_root"], "/owned/priority");
+        assert_eq!(initial["operation"]["path"], "README.md");
+        assert!(initial["grant"]["revoked_at"].is_null());
+        assert!(initial.get("artifact_input").is_none());
+        eprintln!("HEALTHY ordinary execute: {initial}");
+
+        // Preserve the old Ticket projection's blank installation field from the
+        // baseline, while its actual Grant remains the concrete installation identity.
+        fixture
+            .store
+            .conn()
+            .execute("UPDATE tickets SET installation_id='' WHERE id='01'", [])
+            .unwrap();
+        let before_fault = (
+            fixture.store.get("projects", "project").unwrap().unwrap(),
+            fixture.store.get("grants", "grant").unwrap().unwrap(),
+            fixture.store.detail("01").unwrap(),
+            fixture
+                .store
+                .query("SELECT * FROM project_bindings", [])
+                .unwrap(),
+            fixture.store.query("SELECT * FROM nodes", []).unwrap(),
+        );
+        let admitted_assignment = before_fault.2["assignments"][0].clone();
+        assert_eq!(admitted_assignment["id"], initial["id"]);
+        assert_eq!(admitted_assignment["lease_id"], initial["lease_id"]);
+        assert!(
+            crate::parse_time(admitted_assignment["lease_expires_at"].as_str().unwrap()).is_ok()
+        );
+        assert!(admitted_assignment["acknowledged_at"].is_null());
+        assert!(admitted_assignment["last_report_at"].is_null());
+        assert!(admitted_assignment["cancelled_at"].is_null());
+        for table in ["reports", "artifacts", "effects"] {
+            assert!(fixture
+                .store
+                .query(&format!("SELECT * FROM {table}"), [])
+                .unwrap()
+                .is_empty());
+        }
+
+        // Preserve every heartbeat, registration, capability and Installation
+        // fact: only the exact default Worker's own status changes here.
+        assert_eq!(
+            fixture.store.conn().execute(
+                "UPDATE nodes SET workers=json_set(workers,'$[0].status','offline') WHERE id='node' AND installation_id='installation' AND json_extract(workers,'$[0].worker_id')='default' AND json_extract(workers,'$[1].worker_id')='standby'",
+                [],
+            ).unwrap(),
+            1
+        );
+        let offline_node = fixture
+            .store
+            .query("SELECT * FROM nodes", [])
+            .unwrap()
+            .remove(0);
+        for (key, value) in before_fault.4[0].as_object().unwrap() {
+            if key != "workers" {
+                assert_eq!(offline_node[key], *value, "unexpected Node mutation: {key}");
+            }
+        }
+        assert_eq!(offline_node["workers"][0]["status"], "offline");
+        assert_eq!(offline_node["workers"][1]["status"], "online");
+
+        let lease_before_fault_poll = admitted_assignment["lease_expires_at"].clone();
+        let faulty = assignment_for_poll(&mut fixture.store, "node").unwrap();
+        let after_fault_poll = (
+            fixture.store.get("projects", "project").unwrap().unwrap(),
+            fixture.store.get("grants", "grant").unwrap().unwrap(),
+            fixture.store.detail("01").unwrap(),
+            fixture
+                .store
+                .query("SELECT * FROM project_bindings", [])
+                .unwrap(),
+        );
+        let lease_after_fault_poll =
+            after_fault_poll.2["assignments"][0]["lease_expires_at"].clone();
+        eprintln!(
+            "OFFLINE actual assignment={}; lease before={}, after={}; grant={}; ticket={}; artifacts={}; assignments={}; original target/path/digest={}/{}/{}",
+            faulty.as_ref().map_or_else(|| "null".to_owned(), ToString::to_string),
+            lease_before_fault_poll,
+            lease_after_fault_poll,
+            after_fault_poll.1,
+            after_fault_poll.2,
+            after_fault_poll.2["artifacts"],
+            after_fault_poll.2["assignments"],
+            initial["operation"]["path"],
+            initial["operation"]["path"],
+            initial["grant_digest"],
+        );
+        // Capture the actual bug before its RED assertion stops this focused test.
+        assert_eq!(after_fault_poll.0, before_fault.0);
+        assert_eq!(after_fault_poll.1, before_fault.1);
+        let mut ticket_after = after_fault_poll.2.clone();
+        let mut ticket_before = before_fault.2.clone();
+        ticket_after["assignments"][0]["lease_expires_at"] = Value::Null;
+        ticket_before["assignments"][0]["lease_expires_at"] = Value::Null;
+        assert_eq!(ticket_after, ticket_before, "apart from an erroneous delivery's Lease refresh, the Ticket, work, effects and Assignment history must be unchanged");
+        assert_eq!(after_fault_poll.3, before_fault.3);
+        let standby = faulty.expect(
+            "offline top candidate must not hide a different already-authorized healthy task",
+        );
+        assert_eq!(standby["id"], "assignment-02");
+        assert_eq!(standby["ticket_id"], "02");
+        assert_eq!(standby["worker_id"], "standby");
+        assert_eq!(standby["purpose"], "execute");
+        assert_eq!(standby["grant"]["id"], "standby-grant");
+        assert_eq!(standby["grant"]["worker_id"], "standby");
+        assert_eq!(standby["resource"]["worker_id"], "standby");
+        assert_ne!(standby["ticket_id"], initial["ticket_id"], "the healthy candidate is independently authorized, not the offline original Assignment renamed");
+        assert_eq!(standby["grant_digest"], "standby-grant-digest");
+        assert_eq!(
+            fixture.store.detail("02").unwrap()["reports"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            fixture.store.detail("02").unwrap()["artifacts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            fixture.store.detail("02").unwrap()["effects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .is_some());
+        acknowledge(&fixture.store, &standby);
+        assert_eq!(
+            lease_after_fault_poll, lease_before_fault_poll,
+            "a rejected poll must not renew the existing Lease"
+        );
+
+        fixture.store.conn().execute(
+            "UPDATE nodes SET workers=json_set(workers,'$[0].status','online') WHERE id='node' AND installation_id='installation'",
+            [],
+        ).unwrap();
+        let recovered = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered["purpose"], "execute");
+        for key in [
+            "id",
+            "ticket_id",
+            "worker_id",
+            "lease_id",
+            "lease_epoch",
+            "operation",
+            "grant_digest",
+            "resource",
+        ] {
+            assert_eq!(recovered[key], initial[key], "{key}");
+        }
+        acknowledge(&fixture.store, &recovered);
+        cancel(&fixture.store, "01").unwrap();
+        let before_stop = fixture.store.detail("01").unwrap();
+        let stop = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop["id"], initial["id"]);
+        assert_eq!(
+            stop["cancel_requested"], true,
+            "a valid Grant's stop frame must still reach the restored exact Worker"
+        );
+        assert_eq!(stop["grant_status"], true);
+        assert_eq!(stop["operation"], initial["operation"]);
+        assert_eq!(
+            fixture.store.detail("01").unwrap(),
+            before_stop,
+            "stop delivery itself must not create another execution or effect"
+        );
+        for table in ["reports", "artifacts", "effects"] {
+            assert!(fixture
+                .store
+                .query(&format!("SELECT * FROM {table}"), [])
+                .unwrap()
+                .is_empty());
+        }
+        eprintln!("RESTORED ordinary stop remains deliverable: {stop}");
+    }
+
+    #[test]
+    fn legacy_invalid_worker_metadata_does_not_break_ordinary_candidate_selection() {
+        let mut fixture = fixture();
+        insert_ticket(&fixture.store, "01", 0);
+        for raw in ["[{broken-json", "\"legacy-worker-value\""] {
+            fixture.store.conn().execute(
+                "UPDATE nodes SET workers=?1 WHERE id='node' AND installation_id='installation'",
+                [raw],
+            ).unwrap();
+            let selected = assignment_for_poll(&mut fixture.store, "node")
+                .expect("Undecodable historical worker labels must not abort this established Assignment's poll")
+                .expect("This legacy state has no explicit matching worker/offline fact to exclude");
+            assert_eq!(selected["id"], "assignment-01");
+            assert_eq!(selected["purpose"], "execute");
+            assert_eq!(selected["grant"]["digest"], "grant-digest");
+            let persisted = fixture
+                .store
+                .conn()
+                .query_row("SELECT workers FROM nodes WHERE id='node'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap();
+            assert_eq!(
+                persisted, raw,
+                "The original historical storage text must not be rewritten"
+            );
+            let legacy_value = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+            assert_eq!(
+                fixture.store.get("nodes", "node").unwrap().unwrap()["workers"],
+                legacy_value,
+                "The established Store projection may decode a bare JSON scalar without turning it into an Array"
+            );
+            for table in ["reports", "artifacts", "effects"] {
+                assert!(fixture
+                    .store
+                    .query(&format!("SELECT * FROM {table}"), [])
+                    .unwrap()
+                    .is_empty());
+            }
+            acknowledge(&fixture.store, &selected);
+            fixture
+                .store
+                .conn()
+                .execute(
+                    "UPDATE assignments SET acknowledged_at=NULL WHERE id='assignment-01'",
+                    [],
+                )
+                .unwrap();
+        }
+        fixture.store.conn().execute(
+            "UPDATE nodes SET workers='[{\"worker_id\":\"default\",\"status\":\"offline\"}]' WHERE id='node'", [],
+        ).unwrap();
+        assert!(
+            assignment_for_poll(&mut fixture.store, "node")
+                .unwrap()
+                .is_none(),
+            "The array guard still respects a real exact Worker-offline declaration"
+        );
+    }
+
+    #[test]
+    fn a_concrete_ticket_installation_is_not_shadowed_by_another_installation_under_legacy_wildcard_grant(
+    ) {
+        let mut fixture = fixture();
+        insert_ticket(&fixture.store, "01", 0);
+        fixture.store.conn().execute_batch(
+            "INSERT INTO nodes(id,installation_id,public_key,token_hash,status,capabilities,workers,inventory,registered_at,last_heartbeat) SELECT id,'other-installation',public_key,token_hash,status,capabilities,'[{\"id\":\"default\",\"status\":\"offline\"}]',inventory,registered_at,last_heartbeat FROM nodes WHERE id='node' AND installation_id='installation';
+             UPDATE grants SET installation_id='*' WHERE id='grant';"
+        ).unwrap();
+        let selected = assignment_for_poll(&mut fixture.store, "node")
+            .unwrap().expect("The explicitly targeted healthy installation is not the other installation's offline worker");
+        assert_eq!(selected["id"], "assignment-01");
+        assert_eq!(selected["worker_id"], "default");
+        assert_eq!(selected["installation_id"], "installation");
+        assert_eq!(selected["grant_digest"], "grant-digest");
+        for table in ["reports", "artifacts", "effects"] {
+            assert!(fixture
+                .store
+                .query(&format!("SELECT * FROM {table}"), [])
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]

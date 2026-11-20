@@ -346,6 +346,42 @@ try {
   const approvalAssignment = await runner.client.poll({ lastAssignmentId: urgentAssignment.id, waitSeconds: 0 })
   assertAssignmentMetadata(approvalAssignment, approvedTicket, 'approved original priority delivered')
   assert.equal(approvalAssignment.lease_epoch, 1)
+
+  const readyWorker = (await admin.get('/api/v1/nodes')).nodes
+    .find(item => item.id === runner.nodeId && item.installation_id === runner.installationId)
+  const readyWorkerDeclaration = readyWorker.workers.find(item => (item.worker_id ?? item.id) === 'default')
+  assert.ok(readyWorkerDeclaration, 'only the actual registry default Worker may be put offline')
+  const ticketBeforeOffline = await ticketDetail(approvedTicket.id)
+  const leaseBeforeOffline = row('SELECT lease_expires_at FROM assignments WHERE id=?', approvalAssignment.id).lease_expires_at
+  await runner.client.heartbeat({
+    capabilities: runner.capabilities,
+    workers: [{ ...readyWorkerDeclaration, status: 'offline' }],
+    inventory: readyWorker.inventory,
+  })
+  const beforeRejectedPolls = await ticketDetail(approvedTicket.id)
+  const emptyOfflinePoll = await runner.client.poll({ lastAssignmentId: approvalAssignment.id, waitSeconds: 0 })
+  assert.equal(emptyOfflinePoll, null, 'An explicitly offline exact Worker must not receive a fresh execute')
+  assert.equal((await runner.client.poll({ lastAssignmentId: approvalAssignment.id, waitSeconds: 0 })), null,
+    'An unreported idle Worker must not revive that pending execution on subsequent polls')
+  assert.deepEqual(await ticketDetail(approvedTicket.id), beforeRejectedPolls,
+    'Offline polls never change the original ticket, reports or effects; null does not imply cancellation')
+  assert.equal(row('SELECT lease_expires_at FROM assignments WHERE id=?', approvalAssignment.id).lease_expires_at,
+    leaseBeforeOffline, 'A rejected poll must not renew the old lease while the exact Worker is offline')
+  assert.deepEqual(await fileBytes(join(projectRoot, 'input.txt')), originalInput)
+  assert.equal(result.executor_count_real, 0, 'No executor is invoked while the selected Worker is offline')
+  await runner.client.heartbeat({
+    capabilities: runner.capabilities,
+    workers: [{ ...readyWorkerDeclaration, status: 'online' }],
+    inventory: readyWorker.inventory,
+  })
+  const recovered = await runner.client.poll({ lastAssignmentId: approvalAssignment.id, waitSeconds: 0 })
+  assertAssignmentMetadata(recovered, approvedTicket, 'same Assignment after this exact Worker is available again')
+  assert.equal(recovered.lease_epoch, 1)
+  assert.deepEqual(countOutcomes(approvedTicket.id), { reports: 0, artifacts: 0, effects: 0 })
+  assert.equal(recovered.id, approvalAssignment.id)
+  result.offline_worker_execute_suppressed_until_recovery = true
+  result.restored_pending_assignment_id = approvalAssignment.id
+  assert.deepEqual(ticketBeforeOffline, beforeRejectedPolls, 'The pending ticket observed before stopping its source is unchanged through offline polling')
   await acknowledge(approvedTicket, approvalAssignment, 'approval acknowledgement')
   result.approval_waiting_priority_retained_and_delivered = true
 

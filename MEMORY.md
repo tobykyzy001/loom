@@ -265,7 +265,14 @@
 - 实际`node tests/harness/real-model-binding.mjs`先真正src→Register→place→SDK调用成功；再复用同一个有效Node transport身份仅切换default Worker offline、保留整个 catalog与installation。**403 `source_node_unavailable`**成为真实返回，原Ticket/Grant全集不变，SDK请求不增长；之后正常恢复Worker才测试retire，避免错标原因。Rust同时证明匹配健康Node→默认Worker offline后物理匹配None、历史模型仍 可见、所有records一致。若单测helper看似拒绝而真实创建仍被放行，就继续查**物理匹配/创建入口**，不能报完整P2修好。
 - `apps/web/src/lib/modelInventory.ts` 只允许离线下 unavailable/stale并拒绝离线confidence加fresh adapter；`node tests/model-inventory/browser.mjs`的真实Edge与主动refresh显示离线Worker提示、陈旧source及不可用，不给模型调用按钮。真实留证来自那份owned desktop/390 viewport截图，不是iOS/Android/其他宿主验收。独立复核再次跑全service后无 P1/P2。整体M1能力矩阵、硬件条件、真正的跨机placement与真实GL运行态度不可从这一条修复生成。
 
-## 6. 尚未解决、不要误判为已闭环的事项
+### 5.5.8 首次普通execute不能在Worker离线后领取
+
+- 模型任务之外，已签发且尚未ACK的普通票也会漏掉当前Worker offline：CTE曾按Lease/有效Grant继续返回`purpose=execute`并续租。现只在未ACK、running、未取消的execute候选**排序和LIMIT之前**排除该Worker的明确offline声明；原Ticket/Lease不续写，空poll不绝不代表取消或成功。stop/reconcile保留各自的权限与效果路径。
+- 离线头不能遮蔽另一个真正拥有独立Grant/Binding的健康候选，但离线原票不改发给standby。旧Ticket空installation显示不用于绕过其有效Grant所确定的真实安装；legacy空worker声明、通配、busy/degraded不另加时间过期规则。Rust用两组独立授权的候选全面复核。
+- 真Node `node tests/runner/task-priority.mjs` 已证approved、未ACK的正常领取之后，同一Node用真实heartbeat下线default：两次poll都为空，Ticket与Lease不变、executor和文件效果为零；恢复后仍是原Assignment，后续取消及真实失败/重试也成功。仍是单机logical Worker围栏，不是第二物理Host或全局公平调度证明。
+- 撤权STOP的错选是**独立旧缺陷**：第一次撤权先把同Grant的多个running票转`reconciling`，原始最新优先可让后建、未ACK的邻居盖住之前的真实ACK Assignment。已用无本次修改的clean HEAD `fe19e88` 再次复现`grant-revocation-fence.mjs`同错误，不能把它算给离线query，也不得忽略。`first_admitted_original_wins_revoke_over_later_unacknowledged_neighbours`与STOP排序独立另审另提交，不能用“ACK-only”误禁ACK未达但本地效果已发生的例外。
+
+### 6. 尚未解决、不要误判为已闭环的事项
 
 - **完整 M0 场景验收**，尤其真实 iOS/Android 浏览、锁屏、杀进程、切网、非敏感审批，以及未覆盖路径的敏感过程审查。当前只有固定 `LOOM_FIXTURE_READ` 的真实echo→公开Proof已闭环，不等于其它普通DSH对话/历史材料的通用DLP。桌面窄视口和桌面浏览器离线壳不替代真机。
 - 真实自然语言/通用编程质量、通用代码工具与 Shell、外部 Provider/Live LLM、完整模型治理、通用 Pipeline/Reviewer/多 Harness。

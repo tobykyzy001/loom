@@ -196,6 +196,12 @@ Worker声明也不能以同ID、互相冲突的不同对象覆盖。Heartbeat ti
 
 同一公共Node ID能够绑定多个Installation/Profile/Worker，所以设备卡片的VNode key并不能只用Node ID。`nodeIdentityKey`以 `node_id ?? id` 与`installation_id`合并提升真正的安装身份，DOM以`data-installation-id`定位；它不代表多安装共享调用凭据或合并namespace，原来的metadata/旧无Installation记录仍按原字段降级展示。各安装自己的presence/最后heartbeat因此不会借共同Node ID与其它安装互换。已有两次真实注册、只变B末次时间、同库/端口/token重开、新旧B/A bindings全程验收见 [installation driver](tests/browser/installation-ui.mjs)，这两者是logical installation而非新物理机器。
 
+### 6.1.1 普通 execute 的当前 Worker 可用性
+
+已有 Assignment 和当前有效 Grant，也不能在指定Worker明确offline后继续派新的`purpose=execute`。普通未ACK的running候选在领取/续Lease之前排除该Worker当前的offline声明，不能让排在前面的离线候选使后续合法候选永久不可见，因此它既不领取、不续Lease，也不会遮蔽同Node上**本来就独立拥有Grant/Binding的另一健康Worker**；离线原作业不会被改名成后者交付。不能把这个fence扩大到stop/reconcile：取消意图、旧证据恢复与它们各自的Grant/Lease规则保持原状。
+
+匹配按注册Node与Grant的精确installation查找当前Worker的`worker_id|id`，只在明确offline时排除。旧Ticket允许有空installation展示，不能借空字段绕过有效Grant确定的真实安装。legacy空/无workers声明及已有通配语义不被重写成"现在必须额外声明在线"； busy/degraded也不等于offline。按此查询产生的空poll代表这件新执行仍未发出，**不是取消，也不是零效果或执行成功**，仍须读取原Assignment和对账事实。固定M1的单Node实际取证见[调度客候选围栏](tests/runner/README.md#有界ticket-priority与pending-stop的真实调度)，不推为第二物理Host或全局公平调度权。
+
 ### 6.2 模型生命周期
 
 ```mermaid
