@@ -54,4 +54,10 @@ pnpm run build
 - Mobile real-device Web/PWA cases, lockscreen/kill-process/resume, desktop installers, OS system credential stores, Linux/Windows Host behavior and signed update/rollback.
 - Actual research/programming/graphics multi-agent live LLM tasks, non-synthetic data, GPU models or industry pipeline. There is no GPU or physical-device assumption.
 
+## Current authoritative deterministic entry point (2026-11-22)
+
+Run `node scripts/verify-baseline.mjs`. It uses a real Rust Concierge, authenticated HTTP, actual files and an independent Native Bare process, rather than `SyntheticCoordinator` as task authority. The report records exits, commands, actual scene checks and NOT RUN cases; it does not execute a 1+3 Compose topology or install DSH.
+
+The macOS arm64 run passed all 12 scene checks and all seven selected suites. Evidence: [result](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-baseline-verification-ht6dSh/result.json) and [scenario](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-baseline-verification-hHUkou/result.json). Exact commands and limitations: [DETERMINISTIC_BASELINE](docs/DETERMINISTIC_BASELINE.md). Bare direct handoff and production Composer lifecycle are separate subsequent increments, not promoted by this baseline.
+
 The audited implementation notes live in [MEMORY.md](MEMORY.md); the intended layered test strategy is [testing.md](testing.md). Milestones complete only when their **actual** evidence exists.

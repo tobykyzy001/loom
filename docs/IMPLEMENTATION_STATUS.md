@@ -1,6 +1,12 @@
 # Implementation status
 
-Updated: 2026-11-20.
+Updated: 2026-11-22.
+
+## Deterministic single-host baseline now uses actual authority and external facts
+
+`node scripts/verify-baseline.mjs` no longer treats `SyntheticCoordinator` as a completion authority. It starts an owned Rust Concierge, registers a signed TypeScript LocalNode, exercises real read/write/Failure/cancellation/replay/revocation and controlled restart behavior through authenticated HTTP and actual bytes. A native Bare integration plus Rust workspace, narrowed security/replay, Node, plugin-source and Web suites each records a real child exit and log. One current macOS arm64 run passed 12 scenes and all seven selected suites; artifacts are under the output result rather than embedded secrets or production profiles. See [DETERMINISTIC_BASELINE](DETERMINISTIC_BASELINE.md).
+
+The actual full report is [result.json](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-baseline-verification-ht6dSh/result.json), with a separate [scenario](/var/folders/gp/y8z6514j1dq96j4q4tj6n_hc0000gn/T/loom-baseline-verification-hHUkou/result.json). It is deliberately not evidence of live DSH, Live LLM, iOS/Android, Linux/Windows, signed deployment, a second physical Host or Compose 1+3. Direct Native Artifact handoff and the production Composer→DSH chain are separate current work and have independent acceptance obligations.
 
 ## An offline Worker also cannot claim a new ordinary execute
 
