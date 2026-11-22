@@ -123,7 +123,15 @@ impl Assignment {
             Some(Value::String(content)) if content.len() <= 1_048_576 => Some(content.clone()),
             _ => bail!("assignment content must be a bounded string"),
         };
-        if kind == "edit_file" && content.is_none() {
+        let direct_trim = kind == "edit_file"
+            && content.is_none()
+            && value.get("artifact_input").is_some_and(|input| {
+                input["direct_offer"].as_bool() == Some(true)
+                    && input["transform"].as_str() == Some("trim")
+                    && input["offer_scope"].as_str() == Some("recipient_current_lease_only")
+                    && input.is_object()
+            });
+        if kind == "edit_file" && content.is_none() && !direct_trim {
             bail!("edit_file has no content");
         }
         if kind == "model_descriptor" && content.is_some() {

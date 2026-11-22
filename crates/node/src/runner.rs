@@ -24,6 +24,8 @@ pub struct NodeOptions {
     pub bindings: Bindings,
     pub wait_seconds: u64,
     pub enrollment_code: Option<String>,
+    /// Explicit origin Node ID to numeric loopback listener; default denies direct input.
+    pub direct_peers: std::collections::BTreeMap<String, String>,
 }
 
 pub struct LocalNodeRunner {
@@ -283,7 +285,12 @@ impl LocalNodeRunner {
                 if previous["state"] == "running" {
                     bail!("running assignment requires reconciliation before evidence replay");
                 }
-                if raw["purpose"] == "reconcile" && assignment.grant.revoked_at.is_some() {
+                let direct_unknown = previous["state"] == "unknown"
+                    && previous["evidence"][0]["kind"] == "direct_handoff_unverified";
+                if raw["purpose"] == "reconcile"
+                    && assignment.grant.revoked_at.is_some()
+                    && !direct_unknown
+                {
                     // An immutable revoked frame carries evidence only. The local
                     // completed operation must never be started or re-ACKed anew.
                     if !self.state.record_revocation_race(&assignment)? {
@@ -295,7 +302,14 @@ impl LocalNodeRunner {
                     self.state.flush()?;
                     return self.dispatch_outbox().await;
                 }
-                if previous["state"] == "succeeded" {
+                if direct_unknown {
+                    // The original Assignment already yielded a durable transport
+                    // ambiguity. Replay only the preserved Report, never resolve or
+                    // execute it again. A stale/revoked evidence delivery remains held.
+                    if previous["digest"] != assignment.logical_digest() {
+                        bail!("direct unknown Assignment identity differs from retained evidence");
+                    }
+                } else if previous["state"] == "succeeded" {
                     // An ordinary acknowledgement may have needed a retry after
                     // transport loss. The server checks this same current lease,
                     // Grant and input before returning the original admission.
@@ -306,8 +320,15 @@ impl LocalNodeRunner {
                 }
                 self.state.data.last_assignment_id = Some(assignment.id.clone());
                 self.state.flush()?;
-                self.dispatch_outbox().await?;
-                return Ok(TickStatus::Deferred);
+                // Preserve the established replay TickStatus for ordinary work.
+                // Direct acquisition failures are different: there was no file
+                // executor outcome to report, so delivery denial must remain visible.
+                let delivery = self.dispatch_outbox().await?;
+                return Ok(if direct_unknown {
+                    delivery
+                } else {
+                    TickStatus::Deferred
+                });
             }
             bail!("completed assignment replay does not match the original assignment evidence");
         }
@@ -380,6 +401,38 @@ impl LocalNodeRunner {
             self.dispatch_outbox().await?;
             return Ok(TickStatus::Deferred);
         }
+        let direct_input = if assignment.raw["artifact_input"]["direct_offer"] == json!(true)
+            && raw["purpose"] != "reconcile"
+        {
+            match crate::direct::resolve(
+                &self.client,
+                &self.identity,
+                &assignment,
+                &self.options.direct_peers,
+            )
+            .await
+            {
+                Ok(input) => Some(input),
+                Err(error) => {
+                    // Transport/integrity failures are Unknown effects, not an
+                    // ordinary edit failure and never a payload-substitution fallback.
+                    executor::record_direct_unknown(&assignment, &mut self.state, &error)?;
+                    self.state.data.last_assignment_id = Some(assignment.id.clone());
+                    self.state.flush()?;
+                    // Preserve the durable Unknown outcome while reporting whether
+                    // its exact Report was actually accepted, deferred or fenced.
+                    // A non-empty / held outbox must never be reported as a
+                    // normally delivered or authority-acknowledged completion.
+                    let delivery = self.dispatch_outbox().await?;
+                    return Ok(match delivery {
+                        TickStatus::Delivered => TickStatus::Unknown,
+                        other => other,
+                    });
+                }
+            }
+        } else {
+            None
+        };
         let signal = Arc::new(AtomicBool::new(false));
         let cancellation_witness = signal.clone();
         let mut execution_assignment = assignment.clone();
@@ -387,11 +440,12 @@ impl LocalNodeRunner {
         let execution_artifacts = self.options.artifact_dir.clone();
         let mut execution_state = self.state.clone();
         let mut task = tokio::task::spawn_blocking(move || {
-            let outcome = executor::execute_cancellable(
+            let outcome = executor::execute_with_verified_input(
                 &execution_assignment,
                 &execution_artifacts,
                 &mut execution_state,
-                &executor_signal,
+                Some(&executor_signal),
+                direct_input,
             );
             execution_assignment.cancel_requested =
                 execution_assignment.cancel_requested || executor_signal.load(Ordering::Acquire);

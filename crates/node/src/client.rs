@@ -205,8 +205,18 @@ impl NodeClient {
                 }
             }
             "report" => {
-                if response.get("accepted").and_then(Value::as_bool) != Some(true) {
-                    bail!("coordinator did not accept the Report");
+                if response.get("accepted").and_then(Value::as_bool) == Some(true) {
+                    // First durable Report receipt.
+                } else if response.get("duplicate").and_then(Value::as_bool) == Some(true)
+                    && response.get("request_id").and_then(Value::as_str)
+                        == body.get("request_id").and_then(Value::as_str)
+                    && response["receipt"]["accepted"] == json!(true)
+                    && response["receipt"]["request_id"] == body["request_id"]
+                {
+                    // The Concierge's original-Report replay nests its original
+                    // receipt. This is delivery evidence only, not a second Report.
+                } else {
+                    bail!("coordinator did not accept the original Report or its exact replay");
                 }
             }
             _ => unreachable!("delivery kind was restricted above"),
@@ -298,6 +308,49 @@ impl NodeClient {
             15,
         )
         .await
+    }
+
+    pub(crate) async fn issue_direct_offer(
+        &self,
+        identity: &Identity,
+        assignment: &crate::wire::Assignment,
+    ) -> Result<Value> {
+        let mut body = assignment.envelope(
+            &Uuid::new_v4().to_string(),
+            &identity.node_id,
+            &identity.installation_id,
+        );
+        body.insert(
+            "artifact_id".into(),
+            assignment.raw["artifact_input"]["artifact_ref"]["artifact_id"].clone(),
+        );
+        self.request(
+            "/api/v1/nodes/direct-offers",
+            Value::Object(body),
+            Some(identity.token()?),
+            15,
+        )
+        .await
+        .map_err(|error| {
+            if let Some(http) = error.downcast_ref::<HttpError>() {
+                if http.status.is_some_and(|status| {
+                    status.is_client_error()
+                        && status != StatusCode::REQUEST_TIMEOUT
+                        && status != StatusCode::TOO_MANY_REQUESTS
+                }) {
+                    // A direct-scope denial is evidence-only. It needs a durable
+                    // Unknown for reconciliation, not a second ordinary operation
+                    // or another immediate source acquisition.
+                    return HttpError {
+                        status: http.status,
+                        message: "direct offer/scope was not currently authorized".into(),
+                        retryable: false,
+                    }
+                    .into();
+                }
+            }
+            error
+        })
     }
 
     async fn request<T: serde::de::DeserializeOwned>(

@@ -595,6 +595,10 @@ Schema14在现有 `artifacts` 增加可空 `code_evidence_json`，只为这一�
 
 实际一次 source→socket→checksum→B Grant→child file验证在[tests/direct/README.md](tests/direct/README.md)，含取消 expires/lifecycle错误与重启幂等测试。它**不是**第二物理机连接/TLS保证、远程安装包部署、任意大文件默认可下载或全面M2完成证明。中途断流、nonce已经消费而下游结果不确定的自动收据/对账仍未完整验证，不可用一次领取或Model Observation替代未知付款的结果确认。
 
+**Rust Bare 也能在这个受限边界内真正领取 direct descendant。** 新增显式 `--direct-peers-file`（或无文件即默认无任何来源）对精确 origin Node 选择数值 loopback 地址。Rust 再次校验四字段 input、服务端实际选择的父来源、33字段 DirectOffer、所有 assignment/recipient/Lease/current Grant 签名关联及公钥和响应 MIME、实际完整byte SHA、固定大小和URI；额外输入Content-Encoding/TE/trailer/hostname旁路均拒绝。不将任意 body `artifact_input` 传给旧 executor。
+
+**Local outcome ≠ authoritative delivery。** 取源失败不会退化为普通edit：先持久一条带原 Assignment/lease/Grant/digest 的 Unknown Report/Effect，无目标文件、无子Artifact。直接权限4xx不可盲重取 source；已有这种 Unknown completion 的重开只复核与原工作输入，再传同样原 request/effect，不能用本地Unknown冒充center已经接收。首次与完成 replay 的 `dispatch_outbox()` 分別传播 Deferred/Rejected，而非哈一般固定Deferred，普通完成replay保持原兼容不变。`--once` 在真正延期/拒收时非零提示保留对账，但后续收到合法 duplicate receipt不会成为永久错误；原中央 Report ID和本地原Report UUID不同，关联以 request ID/Effect 为依据。父 lineage只有在真正 DirectInput value才被保全，普通 Artifact metadata绝不新增 `artifact_ref:null`。失败类别、原body/outbox、原source nonce及center reopen的实际证据入口是 `node tests/direct/bare-handoff.mjs`；仍只一台macOS两逻辑Node，不包括远程物理Host、通用中断恢复或者global ExactlyOnce。
+
 ### 3.5.1 中心 Artifact 读取、纯文本与有界原字节交付边界
 
 - 中心`GET /api/v1/tickets/{ticket}/artifacts/{artifact}`仍是既有authenticated client读取，不是新Ticket Grant或跨Principal身份模型。控制器必须按真实record的 `ticket_id` 限定这个Artifact属于正在读取的Ticket，其它Ticket不能通过改URL/ID冒领，未注册ID保持404。产生新Artifact的既有Node上传递同一原始 Grant/Assignment/Lease/sha验证，不能因为读取一个UUID就获得新的权限。

@@ -41,6 +41,9 @@
 
 ### 当前
 
+- 本轮已经交付统一确定性单机基线 `node scripts/verify-baseline.mjs`：真实 Rust Concierge/Node/Bare 的 12 个端到端场景与 7 套件，而不是用 SyntheticCoordinator 冒充权威或把 HTTP 200、零 outbox 当完成；其成功/失败/取消、同 Report 重放、撤权/根 Gate、双端重开和 NOT_RUN 均见 [DETERMINISTIC_BASELINE](docs/DETERMINISTIC_BASELINE.md)。
+- 已补齐 **Rust Bare 的受限直接父 Artifact 接收**：只在当前 document trim/direct、origin/目的Grant/Binding/Assignment/Lease、签名与显式loopback允许时产生实际trim后文件及父谱系。坏字节/停peer/缺peer/撤权不输入普通editor，保留原Unknown、原request/effect和原outbox；延期拒收可被CLI看见并照原body恢复，中央 receipt、取消、source nonce 和中心重开各自有实证。整套正反例 `node tests/direct/bare-handoff.mjs` 已 PASS，物理第二Host、远程TLS、任意DAG/工具与通用跨机Exactly-once仍未验证，详见 [direct](tests/direct/README.md)。这是单机确定性任务的补充，不是将M0或M2宣告完成。
+
 已有真实 `crates/protocol`、`crates/concierge`、`packages/node-client`、`plugins/dsh-loom` 和 Vue 工程，以及使用前台真实子进程实现的 Rust↔TypeScript 本地任务链。可执行命令和硬断言见 [BASELINE.md](BASELINE.md)，提交与实现/缺口对照见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)，集成缺陷记录见 [MEMORY.md](MEMORY.md)。
 
 这并不等同于完整 M0 完成。下述状态在没有对应证据前均不能视为已完成：

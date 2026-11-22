@@ -589,6 +589,7 @@ fn only_exact_controller_mapping_executes_and_project_has_no_cwd_default() {
         bindings,
         wait_seconds: 1,
         enrollment_code: None,
+        direct_peers: std::collections::BTreeMap::new(),
     };
     if let Err(error) = LocalNodeRunner::open(options) {
         panic!("runner open failed: {error:#}");

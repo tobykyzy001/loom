@@ -147,6 +147,9 @@ async fn answer(
             .unwrap()
             .clone()
             .unwrap_or_else(|| json!({"accepted":true,"acknowledged_at":chrono::Utc::now().to_rfc3339(),"duplicate":true}));
+        if receipt["error"].is_object() {
+            return (StatusCode::FORBIDDEN, Json(receipt));
+        }
         return (StatusCode::OK, Json(receipt));
     }
     if path.ends_with("/acknowledge") {
@@ -303,6 +306,7 @@ impl Fixture {
             .unwrap(),
             wait_seconds: 1,
             enrollment_code: None,
+            direct_peers: std::collections::BTreeMap::new(),
         })
     }
 
@@ -393,6 +397,95 @@ impl Fixture {
         state.flush().unwrap();
     }
 
+    fn direct_unknown_packet(&self) -> Value {
+        let mut raw = self.original.clone();
+        raw["kind"] = json!("edit_file");
+        raw["content"] = Value::Null;
+        let id = uuid::Uuid::new_v4();
+        raw["artifact_input"] = json!({
+            "artifact_ref": {
+                "type": "artifact_ref", "artifact_id": id,
+                "ticket_id": "tkt_source_direct_unknown",
+                "sha256": "c".repeat(64), "origin_node_id": "b".repeat(64),
+                "location": format!("loom://artifact/{id}"), "parents": []
+            },
+            "direct_offer": true, "transform": "trim",
+            "offer_scope": "recipient_current_lease_only"
+        });
+        assert!(loom_node::wire::Assignment::decode(
+            &raw,
+            raw["node_id"].as_str().unwrap(),
+            raw["installation_id"].as_str().unwrap(),
+            &self.project,
+            chrono::Utc::now()
+        )
+        .is_ok());
+        raw
+    }
+
+    async fn assert_direct_unknown_delivery_denial(&self) {
+        let fixture = Fixture::new(false).await;
+        let packet = fixture.direct_unknown_packet();
+        let delivery = fixture.tick(packet.clone()).await.unwrap();
+        assert!(
+            matches!(delivery, TickStatus::Deferred),
+            "The first 503 must keep a genuine durable delivery attempt pending"
+        );
+        assert!(!fixture.project.join("README.md").is_symlink());
+        assert_eq!(fixture.server.calls("/direct-offers").len(), 1);
+        let original = StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .clone();
+        assert_eq!(original.len(), 1);
+        assert_eq!(original[0].body["requested_state"], "unknown");
+        assert_eq!(original[0].body["artifact_ids"], json!([]));
+        assert_eq!(original[0].body["effects"][0]["status"], "unknown");
+        let effect_files = std::fs::read_dir(&fixture.artifacts).unwrap().count();
+        assert_eq!(
+            effect_files, 0,
+            "No destination bytes or Artifact are fabricated by a failed source fetch"
+        );
+        *fixture.server.report_receipt.lock().unwrap() = Some(json!({
+            "error": {"code":"outcome_unknown", "message":"Owned authoritative rejection; never forwarded to a central Report"}
+        }));
+        fixture.due_original_outbox();
+        let denied = fixture.tick(packet.clone()).await.unwrap();
+        assert!(
+            matches!(denied, TickStatus::Rejected),
+            "An authoritative rejection cannot be misreported as a completed Unknown delivery: {denied:?}"
+        );
+        assert_eq!(fixture.server.calls("/reports").len(), 2);
+        assert_eq!(
+            fixture.server.calls("/direct-offers").len(),
+            1,
+            "An existing direct Unknown is replay-only, not another source acquisition"
+        );
+        let after = StateStore::open(&fixture.state)
+            .unwrap()
+            .data
+            .outbox
+            .clone();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].body, original[0].body,
+            "Permanent rejection retains the original request/report/effect body unchanged"
+        );
+        assert_eq!(after[0].attempts, 2);
+        assert_eq!(after[0].next_attempt_at, "+999999999-12-31T23:59:59Z");
+    }
+}
+
+#[tokio::test]
+async fn unverified_direct_input_propagates_delivery_denial_without_fallback() {
+    Fixture::new(false)
+        .await
+        .assert_direct_unknown_delivery_denial()
+        .await;
+}
+
+impl Fixture {
     async fn exact_replay_retains_original_bodies(&self) {
         let original = StateStore::open(&self.state).unwrap().data.outbox.clone();
         self.due_original_outbox();

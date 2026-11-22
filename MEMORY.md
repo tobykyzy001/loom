@@ -54,6 +54,10 @@
 ## 4. 编程、验证和测试方法
 
 
+- **本 session 的工作流经验**：先核实上一 session 的真实 diff、运行入口和失败证据；别从历史 PASS/行数推断状态。并行的子 Agent 必须写互斥范围、完成先冻结版本，否则后续草稿会覆盖主代理的补丁并制造难以追踪的独立 PASS。总调度最终逐项审查、复跑集成环境并提交，不接受空中 report。
+- **旧基线量具曾直接制造 Synthetic 的权力/效果**，将真实预取消第四事实误当成反例。权威入口应真实用 `scripts/verify-baseline.mjs` 的 Rust HTTP/实际字节/退出码/NOT_RUN 分层，而非混用 Synthetic。实际比对必须遵守 API 的不可变事实与可变视图：过期 Lease 不是工作的漂移；`undefined`、缺少可选字段、拒绝消息/期限和不同 Node projection 各有明确语义，不靠完整 deepEqual 掩盖差异；负例要到达目标分支而不是早已在缺权限阶段失败。
+- **Bare direct 不是 ordinary edit fallback**：无验证 parent bytes 不会导向文件修改。拒绝以 durable Unknown + outbox 证据结束，缺 peer/stopped/坏 bytes/撤权后不得反复读取或勇闯另一个目录。首次处理与已有 `direct_handoff_unverified` 都要传播真实投递 Deferred/Rejected，CLI `--once` 相应的非零并不代表副作用，遥测中不得冒充中央已接收 Unknown。只有真实 duplicate receipt（outer request_id、receipt accepted=true）合法作原重放；中央 `report_id` 与客户端 report UUID 不属同一命名空间，应使用原 request_id/effect_id 来串起证据。
+
 ### 4.1 先界定事实，再修代码
 
 1. 从真实入口复现，保存“实际请求/响应、数据库/文件事实、错误类别与作用域”；再写最小修复，而不是先设想一个通用框架。

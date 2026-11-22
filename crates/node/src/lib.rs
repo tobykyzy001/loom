@@ -9,6 +9,7 @@
 
 pub mod binding;
 pub mod client;
+pub mod direct;
 pub mod executor;
 pub mod identity;
 pub mod model_descriptor;

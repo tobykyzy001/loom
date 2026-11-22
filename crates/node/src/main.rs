@@ -33,7 +33,12 @@ enum Command {
         #[arg(long)]
         artifact_dir: PathBuf,
         /// Repeatable PROJECT_ID=/CANONICAL/APPROVED/ROOT. Never defaults to cwd.
-        #[arg(long = "project-root", required = true)]
+        /// A signed bindings file may independently provide the same owner-selected roots.
+        #[arg(
+            long = "project-root",
+            required_unless_present = "bindings_file",
+            conflicts_with = "bindings_file"
+        )]
         project_roots: Vec<String>,
         /// Optional enrollment override; prefer LOOM_ENROLLMENT_CODE environment input.
         #[arg(long, env = "LOOM_ENROLLMENT_CODE", hide_env_values = true)]
@@ -50,6 +55,9 @@ enum Command {
         /// Optional root -> project binding JSON, loaded read-only at startup.
         #[arg(long, env = "LOOM_BINDINGS_FILE")]
         bindings_file: Option<PathBuf>,
+        /// Optional private operator map: assigned producer Node ID -> loopback base URL.
+        #[arg(long, env = "LOOM_DIRECT_PEERS_FILE")]
+        direct_peers_file: Option<PathBuf>,
     },
 }
 
@@ -80,6 +88,7 @@ async fn main() -> Result<()> {
             heartbeat_seconds,
             wait_seconds,
             bindings_file,
+            direct_peers_file,
         } => {
             let initial = if bindings_file.is_some() {
                 let identity = loom_node::identity::Identity::open_existing(
@@ -105,14 +114,22 @@ async fn main() -> Result<()> {
                 bindings,
                 wait_seconds,
                 enrollment_code,
+                direct_peers: loom_node::direct::load_peers(direct_peers_file.as_deref())?,
             })?;
             let started = runner.start().await?;
             // Only non-secret public identity and control-plane acknowledgement are printed.
             println!("{}", serde_json::to_string(&started)?);
             let mut cycles = 0u64;
             loop {
-                match runner.once().await {
-                    Ok(_status) => {}
+                let status = runner.once().await;
+                match status {
+                    Ok(loom_node::TickStatus::Rejected) if once => {
+                        anyhow::bail!("single bounded cycle retained an authoritative delivery rejection for reconciliation");
+                    }
+                    Ok(loom_node::TickStatus::Deferred) if once => {
+                        anyhow::bail!("single bounded cycle retained undelivered evidence for later reconciliation");
+                    }
+                    Ok(_) => {}
                     Err(error) => {
                         eprintln!("loom-node cycle deferred: {error:#}");
                         if once {
