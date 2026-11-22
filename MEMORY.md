@@ -155,7 +155,9 @@
 - Credential fixture 只操作自有合成 record；存在性检查、独立撤权授权、实际 delete 和 restart missing 要分别证明。真实写异常无法判定结果时保持 `reconciling`、unknown Report/Effect 和只读 duplicate，正常 retry 拒绝，不能假装已删或可盲重试。
 - 文档 Pipeline 只限当前说明中的文件/转换/血缘。早期半成品 adapter 编译失败被回退，不能把一个 frozen DAG validator 称执行；后来真实两阶段链才以实际 Grant、worker、Report、Artifact、source parent 和中心重开验收。
 - Source Artifact 嵌套在 Pipeline 的子 Ticket 创建时机来自真实 source Report，不是 run 创建时全出现。Grant digest 与 binding location digest 都需有效但语义不同；不要持久锁内再次 `state.lock()` 制造自死锁。
-- 直接 Artifact handoff 只证明同机两个 logical Node 的小文件/签收与当前/取消围栏，nonce consumed 不等于 downstream stored/acknowledged。曾提出但未验证的 halfway Unknown replayer 已回退，下次必须另建严格错误/恢复协议，不能宣称转账 exactly-once。
+- 直接 Artifact handoff 只证明同机两个 logical Node 的小文件/签收与当前/取消围栏，nonce consumed 不等于 downstream stored/acknowledged。新 Bare driver 已覆盖原 Unknown outbox 和真实 response receipt；它不把 local Unknown 当 accepted，也不做远程效果 exactly-once。另一个本地原 report ID 和中心Report ID不应错误视为同一对象，原request ID/effect association 才是关键证据。
+- **真实 Composer 主线量测要关注任务的真实状态/生命周期而非静态截图。** 读取proof、路径 tool error、active cancel、Host/browser/center 停止和原 Session resume 现由 `tests/harness/composer-lifecycle.mjs` 同一真实 rc.5 fixture串验：实际 UI→Ticket→SDK→Report→重开→后续有效 followup、4 Tickets/4 Assignments/4 Reports/2 Artifacts/1 Grant。State-read and wait 有超时；截图在状态稳定后按 current ticket 的中央证明生成，不能在创建 cancel ticket之前等其取消徽标。source marker/token 不得进入 report/body/屏幕，Provider request/tool次数在重开先不变，随后 allowed followup 才按预期只加1。该 driver 证明生产普通 Composer 的固定 fixture垂直链，不是任意NLP、Live LLM或手机能力。入口：[COMPOSER_LIFECYCLE](tests/harness/COMPOSER_LIFECYCLE.md)。
+
 - Bare package 是 built-not-installed-not-activated；统一防 path/symlink/hardlink/identification/modality scope，但不以 permissions 检查代替实际 installation。recursive chmod 曾误动已有父目录，修复只针对 owned 新目录。
 - Bundle preflight 可在临时副本读 source/阻止越界 path 或 hardlink；不等于安装。真实 `file:` remove/add 在临时 Profile 中替代/启动时，默认 disabled Worker、revoked Grant 不复活，installed/enabled 仍不是 Registered/Granted。
 - 合成安装 plan 的 fixture observation、rollback parent、operation ID 和 Unknown 不能变成真实遥测、安装器、SSH 或节点健康。UI 曾被旧的 `observations.length` 阻止合法 rollback，应只检查当前 operation 的 observation，且 plan digest 不等于外部效果成功。

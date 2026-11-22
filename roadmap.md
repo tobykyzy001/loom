@@ -170,7 +170,9 @@ Binding写入与相同字段 `project.binding.approved` 审计现持同一Store�
 
 ### 下一刀：M0 的最小垂直切片
 
-一句话输入 → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心重启后恢复任务状态与结果引用。
+普通生产 TicketComposer objective → 创建一个 Ticket → 一个 DSH Worker 在授权目录内执行 → 产生一个可检查的 Artifact → 中心及真实宿主重启后继续复用原 Session 并恢复任务状态与结果引用。
+
+当前该链已由 `node tests/harness/composer-lifecycle.mjs` 连续验证：真实 rc.5 isolated Profile + Rust Concierge + 普通生产Vue/同源Edge，完成一次真实reader、一个越权拒绝、一个已运行Agent的真取消，再到同一DB/token/port与Host root打开原状态、原session followup。最终 **4 Tickets / 4 Assignments / 4 Reports / 2 Artifacts / 1 Grant / 无额外 source Work Spec/Execution Effect**，sleep期间UI意图与stop/audit各自分离。重开0新 Grant/tool/provider，随后真实原 Session Resume 才产生单个预期新call；结果与SHA/审计链/手机外所有临时进程清理都实证。入口与数据见 [COMPOSER_LIFECYCLE](tests/harness/COMPOSER_LIFECYCLE.md)。这是 deterministic zero-network fixture，不是自然语言泛化、live provider、移动真机/第二物理主机或全M0验收。
 
 先证明这条链路，再扩展项目索引、设备感知和多机调度。
 
